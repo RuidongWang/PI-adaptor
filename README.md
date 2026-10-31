@@ -144,19 +144,23 @@ node tmp-e2e/e2e-turn.mjs
 漏任何一步的现象都是「重新安装还是旧版本」——App 会按旧摘要下载旧字节。
 iOS 侧 `PiHostRelease` 常量必须与之一致，漂移时 `HostReleaseManifestTests` 直接失败。
 
-## 7. 文档导航
+## 7. 文档位置
 
-| 想知道什么 | 去哪 |
+> **本仓库只收代码与脚本，不收文档。** 需求、契约、QA 证据、设计文档与原型都不参与版本控制
+> （见 `.gitignore`：`/docs/`、`/AGENTS.md`、`/apps/ios/design/`），只存在于本地工作区。
+> 下面这张表是给拿到本仓库的人**在本地自查**用的路径索引，不是可点击的外部链接。
+
+| 想知道什么 | 本地路径 |
 |---|---|
-| 产品要做什么、85 条验收标准 | [`docs/specs/ios-client.md`](docs/specs/ios-client.md) |
-| 跨端约定（RACP 子集、provider-import 载荷、bootstrap 状态机、缓存 schema） | [`docs/api/ios-client.md`](docs/api/ios-client.md)（FROZEN） |
-| 模型服务删除增量契约 | [`docs/api/ios-client-provider-remove-draft.md`](docs/api/ios-client-provider-remove-draft.md) |
-| Host v2 契约 + schema + golden fixture | [`docs/api/pi-host-v2.md`](docs/api/pi-host-v2.md) |
-| 每条 AC 当前状态与证据 | [`docs/qa/implementation-status.md`](docs/qa/implementation-status.md) |
-| 交互与视觉规范、跳转矩阵、缺口清单 | [`apps/ios/design/`](apps/ios/design) |
-| Host 隔离配置与部署 | [`apps/host/README.md`](apps/host/README.md)、[`docs/specs/pi-host-v2-isolated-config.md`](docs/specs/pi-host-v2-isolated-config.md) |
-| 服务端增量交付说明（补丁、打包、T-01~T-56 用例） | [`server/README.md`](server/README.md) |
-| 开发流程规则 | [`AGENTS.md`](AGENTS.md) → [`docs/工作流.md`](docs/工作流.md) |
+| 产品要做什么、85 条验收标准 | `docs/specs/ios-client.md` |
+| 跨端约定（RACP 子集、provider-import 载荷、bootstrap 状态机、缓存 schema） | `docs/api/ios-client.md`（FROZEN） |
+| 模型服务删除增量契约 | `docs/api/ios-client-provider-remove-draft.md` |
+| Host v2 契约 + schema + golden fixture | `docs/api/pi-host-v2.md`、`docs/api/pi-host-v2.schema.json` |
+| 每条 AC 当前状态与证据 | `docs/qa/implementation-status.md` |
+| 交互与视觉规范、跳转矩阵、缺口清单、HTML 原型 | `apps/ios/design/` |
+| 开发流程规则 | `AGENTS.md` → `docs/工作流.md` |
+| Host 隔离配置与部署（**已入库**） | [`apps/host/README.md`](apps/host/README.md) |
+| 服务端增量交付说明（**已入库**） | [`server/README.md`](server/README.md) |
 
 ## 8. 安全约定（提交前请读）
 
@@ -173,7 +177,7 @@ iOS 侧 `PiHostRelease` 常量必须与之一致，漂移时 `HostReleaseManifes
 ## 9. 当前状态
 
 `docs/qa/implementation-status.md` 汇总了 42 条 AC：**33 条 DONE**、**9 条 EXTERNAL**（客户端已实现，但仍需上游双架构
-bundle、真机手工验证或真实服务器证据）。剩余缺口与取舍见该文件与 [`apps/ios/design/gaps.md`](apps/ios/design/gaps.md)。
+bundle、真机手工验证或真实服务器证据）。剩余缺口与取舍见该文件与本地 `apps/ios/design/gaps.md`。
 
 ## 10. 来源与许可
 

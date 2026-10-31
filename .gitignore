@@ -31,3 +31,10 @@ __pycache__/
 .DS_Store
 *.swp
 *.swo
+
+# 文档与本地工作文件不入库：需求 / 契约 / QA 证据 / 设计文档与原型 / Agent 目标记录
+# 都只留在本地工作区，不参与版本控制。要共享时另行走内部渠道，不要提交到本仓库。
+/docs/
+/AGENTS.md
+/apps/ios/design/
+/.pi/
