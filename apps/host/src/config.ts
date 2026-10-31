@@ -1,5 +1,6 @@
 import { chmod, mkdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -25,7 +26,7 @@ export type HostConfig = {
 
 /**
  * Config file shape at `<home>/config.json`. Every key is optional; a key set
- * here is a default that CLI flags and `PI_HOST_V2_*` env vars still override.
+ * here is a default that CLI flags and `PI_ADAPTOR_*` env vars still override.
  */
 export type HostConfigFile = {
   dataDir?: string;
@@ -39,8 +40,31 @@ export type HostConfigFile = {
   providerSeedFile?: string;
 };
 
-/** Default root for a fully self-contained v2 host. */
-export const DEFAULT_HOST_V2_HOME = ".pi-host-v2";
+/**
+ * Default root for a fully self-contained PI-adaptor host. Deliberately
+ * distinct from the legacy PI-Desktop host (`~/.pi-desktop`) and from the
+ * replaced `~/.pi-host-v2` root, so an old install can never be mistaken for
+ * this one.
+ */
+export const DEFAULT_HOME_DIR_NAME = ".pi-adaptor";
+
+/**
+ * Host version, read from the package manifest that ships with the bundle
+ * (`dist/config.js` → `../package.json`). This is the only place a release
+ * version is defined; `scripts/build-release.sh` names the tarball from the
+ * same field, so bytes and declared version cannot drift apart.
+ */
+function readPackageVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require("../package.json") as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version.length > 0 ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+export const HOST_VERSION = readPackageVersion();
 
 function valueAfter(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -83,9 +107,9 @@ export function readHostConfigFile(home: string, explicitPath?: string): { path:
  *
  * Isolation contract: the defaults never reference the legacy PI-Desktop host
  * (`~/.pi-desktop`) or the shared pi global dir (`~/.pi/agent`). Everything is
- * derived from `home` (default `~/.pi-host-v2`) unless a caller overrides it.
+ * derived from `home` (default `~/.pi-adaptor`) unless a caller overrides it.
  *
- * Precedence, high → low: CLI flag → `PI_HOST_V2_*` env → `<home>/config.json`
+ * Precedence, high → low: CLI flag → `PI_ADAPTOR_*` env → `<home>/config.json`
  * → derived default. Legacy generic env aliases (`PI_AGENT_DIR`,
  * `PI_SESSION_DIR`, `PI_CODING_AGENT_VERSION`) are still accepted below the
  * namespaced ones, but they are deprecated exactly because they are shared.
@@ -96,17 +120,17 @@ export function parseHostConfig(
   home = homedir(),
   fileConfig: HostConfigFile = {}
 ): HostConfig {
-  const homeDir = resolve(valueAfter(args, "--home") ?? env.PI_HOST_V2_HOME ?? join(home, DEFAULT_HOST_V2_HOME));
+  const homeDir = resolve(valueAfter(args, "--home") ?? env.PI_ADAPTOR_HOME ?? join(home, DEFAULT_HOME_DIR_NAME));
 
   const fileDataDir = typeof fileConfig.dataDir === "string" ? fileConfig.dataDir : undefined;
   const rawDataDir =
-    valueAfter(args, "--data-dir") ?? env.PI_HOST_V2_DATA_DIR ?? fileDataDir ?? join(homeDir, "data");
+    valueAfter(args, "--data-dir") ?? env.PI_ADAPTOR_DATA_DIR ?? fileDataDir ?? join(homeDir, "data");
   const dataDir = resolve(rawDataDir);
 
   const fileAgentDir = typeof fileConfig.agentDir === "string" ? fileConfig.agentDir : undefined;
   const agentDir = resolve(
     valueAfter(args, "--agent-dir") ??
-      env.PI_HOST_V2_AGENT_DIR ??
+      env.PI_ADAPTOR_AGENT_DIR ??
       env.PI_AGENT_DIR ?? // deprecated shared alias
       fileAgentDir ??
       join(homeDir, "agent")
@@ -114,18 +138,18 @@ export function parseHostConfig(
 
   const fileSessionDir = typeof fileConfig.sessionDir === "string" ? fileConfig.sessionDir : undefined;
   const configuredSessionDir =
-    valueAfter(args, "--session-dir") ?? env.PI_HOST_V2_SESSION_DIR ?? env.PI_SESSION_DIR ?? fileSessionDir;
+    valueAfter(args, "--session-dir") ?? env.PI_ADAPTOR_SESSION_DIR ?? env.PI_SESSION_DIR ?? fileSessionDir;
   const sessionRoots = configuredSessionDir
     ? [resolve(configuredSessionDir)]
     : [join(dataDir, "sessions")];
 
-  const rawPort = valueAfter(args, "--port") ?? env.PI_HOST_V2_PORT ?? fileConfig.port ?? 0;
+  const rawPort = valueAfter(args, "--port") ?? env.PI_ADAPTOR_PORT ?? fileConfig.port ?? 0;
   const port = numberFromPort(rawPort, "port");
 
   const fileSeedFile =
     typeof fileConfig.providerSeedFile === "string" ? fileConfig.providerSeedFile : undefined;
   const rawSeedFile =
-    valueAfter(args, "--provider-seed-file") ?? env.PI_HOST_V2_PROVIDER_SEED_FILE ?? fileSeedFile;
+    valueAfter(args, "--provider-seed-file") ?? env.PI_ADAPTOR_PROVIDER_SEED_FILE ?? fileSeedFile;
 
   return {
     home: homeDir,
@@ -137,9 +161,9 @@ export function parseHostConfig(
     configFile: null,
     providerSeedFile: rawSeedFile ? resolve(rawSeedFile) : null,
     port,
-    pair: args.includes("--pair") || env.PI_HOST_V2_PAIR === "1" || fileConfig.pair === true,
-    hostId: valueAfter(args, "--host-id") ?? env.PI_HOST_V2_HOST_ID ?? fileConfig.hostId ?? "",
-    hostVersion: env.PI_HOST_V2_VERSION ?? fileConfig.hostVersion ?? "0.1.0",
+    pair: args.includes("--pair") || env.PI_ADAPTOR_PAIR === "1" || fileConfig.pair === true,
+    hostId: valueAfter(args, "--host-id") ?? env.PI_ADAPTOR_HOST_ID ?? fileConfig.hostId ?? "",
+    hostVersion: env.PI_ADAPTOR_VERSION ?? fileConfig.hostVersion ?? HOST_VERSION,
     piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.3.0"
   };
 }
@@ -150,7 +174,7 @@ export function loadHostConfig(
   env: NodeJS.ProcessEnv = process.env,
   home = homedir()
 ): HostConfig {
-  const homeDir = resolve(valueAfter(args, "--home") ?? env.PI_HOST_V2_HOME ?? join(home, DEFAULT_HOST_V2_HOME));
+  const homeDir = resolve(valueAfter(args, "--home") ?? env.PI_ADAPTOR_HOME ?? join(home, DEFAULT_HOME_DIR_NAME));
   const explicitConfig = valueAfter(args, "--config");
   const file = readHostConfigFile(homeDir, explicitConfig);
   return { ...parseHostConfig(args, env, home, file.value), configFile: file.path };

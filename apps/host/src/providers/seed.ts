@@ -3,7 +3,7 @@ import { ProviderStore, type ProviderInput, type ProviderModel } from "./store.j
 
 /**
  * Provider seed file (<home>/providers.seed.json by convention, path supplied by
- * `--provider-seed-file` / `PI_HOST_V2_PROVIDER_SEED_FILE` / `config.json`).
+ * `--provider-seed-file` / `PI_ADAPTOR_PROVIDER_SEED_FILE` / `config.json`).
  *
  * It carries **plaintext** provider credentials so a freshly booted Host can run
  * connection/turn tests without a client importing a provider first. It is a

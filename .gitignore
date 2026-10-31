@@ -38,3 +38,6 @@ __pycache__/
 /AGENTS.md
 /apps/ios/design/
 /.pi/
+
+# Host 发布产物只上 GitHub Release，不入库（体积大、可用 scripts/build-release.sh 重建）
+/apps/host/release/

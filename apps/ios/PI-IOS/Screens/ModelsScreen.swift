@@ -652,8 +652,8 @@ struct ModelsScreen: View {
                                 // its own store, so a non-mirrored import is not
                                 // runnable yet — say so instead of implying success.
                                 errorMessage = connection.state.isOnline
-                                    ? "已导入到服务器，但未能写入 pi-host-v2 的 provider 存储；该模型暂时无法使用，请重试导入。"
-                                    : "已导入到服务器，但隧道未连接，未同步到 pi-host-v2；请连接后重新导入，否则该模型无法使用。"
+                                    ? "已导入到服务器，但未能写入 PI-adaptor 的 provider 存储；该模型暂时无法使用，请重试导入。"
+                                    : "已导入到服务器，但隧道未连接，未同步到 PI-adaptor；请连接后重新导入，否则该模型无法使用。"
                             }
                         case .skipped(let reason):
                             errorMessage = "模型服务已被服务器跳过：\(reason.clientGuidance)"

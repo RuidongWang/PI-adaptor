@@ -653,7 +653,7 @@ public final class SessionViewModel {
     /// accepted. A late terminal event for the previous turn must not clear a
     /// replacement turn that is already running.
     private func reduceTurnLifecycle(_ event: RACPEvent) {
-        // v2 golden（`docs/api/pi-host-v2.golden.json`）把 turn id 放在 `payload.turn.id`，
+        // v2 golden（`docs/api/pi-adaptor.golden.json`）把 turn id 放在 `payload.turn.id`，
         // 无顶层 `turnId`；现网 Host 两者都带。优先顶层以兼容旧形态，缺失时回退到 `payload.turn.id`，
         // 否则严格按冻结契约实现的 Host 会让 turn.completed/interrupted 无法清除运行态，
         // 会话永久停在「正在运行」。

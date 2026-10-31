@@ -7,14 +7,14 @@ import { BlobStore, MAX_IMAGE_BYTES } from "../src/media/blob-store.js";
 
 describe("blob store", () => {
   it("preserves concurrent upload registrations", async () => {
-    const store = new BlobStore(await mkdtemp(join(tmpdir(), "pi-host-media-race-")));
+    const store = new BlobStore(await mkdtemp(join(tmpdir(), "pi-adaptor-media-race-")));
     await store.init();
     const inputs = Array.from({ length: 4 }, (_, i) => store.create({ sessionId: "s", fileName: `${i}.png`, mimeType: "image/png", byteLength: 1, sha256: "0".repeat(64) }));
     const records = await Promise.all(inputs);
     await Promise.all(records.map((record) => store.appendChunk(record.id, 0, "YQ==")));
   });
   it("uploads, verifies, reads, and garbage-collects images", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-media-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-"));
     const store = new BlobStore(root);
     await store.init();
     const bytes = Buffer.from([0xff, 0xd8, 0xff, 0x01, 0x02, 0x03]);
@@ -36,7 +36,7 @@ describe("blob store", () => {
   });
 
   it("rejects oversized images and hash mismatch", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-media-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-"));
     const store = new BlobStore(root);
     await store.init();
     await expect(
@@ -64,7 +64,7 @@ describe("blob store", () => {
   });
 
   it("imports output images and preserves blobs shared by another session", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-media-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-"));
     const store = new BlobStore(root);
     await store.init();
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01, 0x02]);

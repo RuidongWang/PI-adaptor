@@ -1,9 +1,9 @@
-import { mkdtemp, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_HOST_V2_HOME,
+  DEFAULT_HOME_DIR_NAME,
   ensureHostDirectories,
   loadHostConfig,
   parseHostConfig,
@@ -24,7 +24,7 @@ describe("host config", () => {
   });
 
   it("creates owner-only directories", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-config-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-config-"));
     const config = parseHostConfig(["--data-dir", root, "--agent-dir", join(root, "agent")], {}, root);
     await ensureHostDirectories(config);
     expect((await stat(root)).mode & 0o777).toBe(0o700);
@@ -34,7 +34,7 @@ describe("host config", () => {
   it("isolates every default path under the v2 home and never touches the legacy host", () => {
     const home = "/home/tester";
     const config = parseHostConfig([], {}, home);
-    const v2Home = join(home, DEFAULT_HOST_V2_HOME);
+    const v2Home = join(home, DEFAULT_HOME_DIR_NAME);
     expect(config.home).toBe(v2Home);
     expect(config.dataDir).toBe(join(v2Home, "data"));
     expect(config.agentDir).toBe(join(v2Home, "agent"));
@@ -50,30 +50,30 @@ describe("host config", () => {
   });
 
   it("reads <home>/config.json as a default layer overridden by env then CLI", async () => {
-    const home = await mkdtemp(join(tmpdir(), "pi-host-home-"));
+    const home = await mkdtemp(join(tmpdir(), "pi-adaptor-home-"));
     const { mkdir } = await import("node:fs/promises");
-    await mkdir(join(home, DEFAULT_HOST_V2_HOME), { recursive: true });
+    await mkdir(join(home, DEFAULT_HOME_DIR_NAME), { recursive: true });
     await writeFile(
-      join(home, DEFAULT_HOST_V2_HOME, "config.json"),
+      join(home, DEFAULT_HOME_DIR_NAME, "config.json"),
       JSON.stringify({ agentDir: join(home, "from-file-agent"), port: 44001, hostId: "file-id" }),
       "utf8"
     );
 
     // File only.
     const fromFile = loadHostConfig([], {}, home);
-    expect(fromFile.configFile).toBe(join(home, DEFAULT_HOST_V2_HOME, "config.json"));
+    expect(fromFile.configFile).toBe(join(home, DEFAULT_HOME_DIR_NAME, "config.json"));
     expect(fromFile.agentDir).toBe(join(home, "from-file-agent"));
     expect(fromFile.port).toBe(44001);
     expect(fromFile.hostId).toBe("file-id");
 
     // Env beats file.
-    const fromEnv = loadHostConfig([], { PI_HOST_V2_PORT: "44002", PI_HOST_V2_HOST_ID: "env-id" }, home);
+    const fromEnv = loadHostConfig([], { PI_ADAPTOR_PORT: "44002", PI_ADAPTOR_HOST_ID: "env-id" }, home);
     expect(fromEnv.port).toBe(44002);
     expect(fromEnv.hostId).toBe("env-id");
     expect(fromEnv.agentDir).toBe(join(home, "from-file-agent"));
 
     // CLI beats env and file.
-    const fromCli = loadHostConfig(["--port", "44003", "--agent-dir", "/tmp/cli-agent"], { PI_HOST_V2_PORT: "44002" }, home);
+    const fromCli = loadHostConfig(["--port", "44003", "--agent-dir", "/tmp/cli-agent"], { PI_ADAPTOR_PORT: "44002" }, home);
     expect(fromCli.port).toBe(44003);
     expect(fromCli.agentDir).toBe("/tmp/cli-agent");
   });
@@ -81,7 +81,7 @@ describe("host config", () => {
   it("keeps the namespaced env over the deprecated shared aliases", () => {
     const config = parseHostConfig(
       [],
-      { PI_HOST_V2_AGENT_DIR: "/tmp/v2-agent", PI_AGENT_DIR: "/tmp/shared-agent" },
+      { PI_ADAPTOR_AGENT_DIR: "/tmp/v2-agent", PI_AGENT_DIR: "/tmp/shared-agent" },
       "/home/tester"
     );
     expect(config.agentDir).toBe("/tmp/v2-agent");
@@ -90,11 +90,11 @@ describe("host config", () => {
   });
 
   it("resolves the provider seed file across flag, env, and config file", async () => {
-    const home = await mkdtemp(join(tmpdir(), "pi-host-seedcfg-"));
+    const home = await mkdtemp(join(tmpdir(), "pi-adaptor-seedcfg-"));
     const { mkdir } = await import("node:fs/promises");
-    await mkdir(join(home, DEFAULT_HOST_V2_HOME), { recursive: true });
+    await mkdir(join(home, DEFAULT_HOME_DIR_NAME), { recursive: true });
     await writeFile(
-      join(home, DEFAULT_HOST_V2_HOME, "config.json"),
+      join(home, DEFAULT_HOME_DIR_NAME, "config.json"),
       JSON.stringify({ providerSeedFile: "/tmp/from-file.json" }),
       "utf8"
     );
@@ -104,22 +104,36 @@ describe("host config", () => {
     // File, then env over file, then CLI over env.
     expect(loadHostConfig([], {}, home).providerSeedFile).toBe("/tmp/from-file.json");
     expect(
-      loadHostConfig([], { PI_HOST_V2_PROVIDER_SEED_FILE: "/tmp/from-env.json" }, home).providerSeedFile
+      loadHostConfig([], { PI_ADAPTOR_PROVIDER_SEED_FILE: "/tmp/from-env.json" }, home).providerSeedFile
     ).toBe("/tmp/from-env.json");
     expect(
       loadHostConfig(
         ["--provider-seed-file", "/tmp/from-flag.json"],
-        { PI_HOST_V2_PROVIDER_SEED_FILE: "/tmp/from-env.json" },
+        { PI_ADAPTOR_PROVIDER_SEED_FILE: "/tmp/from-env.json" },
         home
       ).providerSeedFile
     ).toBe("/tmp/from-flag.json");
   });
 
   it("fails loudly on a malformed config file", async () => {
-    const home = await mkdtemp(join(tmpdir(), "pi-host-badcfg-"));
+    const home = await mkdtemp(join(tmpdir(), "pi-adaptor-badcfg-"));
     const { mkdir } = await import("node:fs/promises");
-    await mkdir(join(home, DEFAULT_HOST_V2_HOME), { recursive: true });
-    await writeFile(join(home, DEFAULT_HOST_V2_HOME, "config.json"), "{ not json", "utf8");
-    expect(() => readHostConfigFile(join(home, DEFAULT_HOST_V2_HOME))).toThrow(/invalid config file/);
+    await mkdir(join(home, DEFAULT_HOME_DIR_NAME), { recursive: true });
+    await writeFile(join(home, DEFAULT_HOME_DIR_NAME, "config.json"), "{ not json", "utf8");
+    expect(() => readHostConfigFile(join(home, DEFAULT_HOME_DIR_NAME))).toThrow(/invalid config file/);
+  });
+});
+
+describe("release version", () => {
+  it("reports the version declared by the shipped package manifest", async () => {
+    const { HOST_VERSION } = await import("../src/config.js");
+    const manifest = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8")
+    ) as { version?: string };
+    expect(manifest.version).toMatch(/^\d+\.\d+\.\d+/);
+    // `scripts/build-release.sh` names the tarball from the manifest, so a host
+    // advertising anything else would ship under the wrong version.
+    expect(HOST_VERSION).toBe(manifest.version);
+    expect(parseHostConfig([], {}, "/home/tester").hostVersion).toBe(manifest.version);
   });
 });

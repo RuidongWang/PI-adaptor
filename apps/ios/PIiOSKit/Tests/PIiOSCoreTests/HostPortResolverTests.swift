@@ -20,5 +20,8 @@ final class HostPortResolverTests: XCTestCase {
     func testProbeCommandLooksForProcessAndUnitPorts() {
         XCTAssertTrue(HostPortResolver.probeCommand.contains("--port"))
         XCTAssertTrue(HostPortResolver.probeCommand.contains("systemctl --user show pi-host.service"))
+        // The v2 host is `pi-adaptor`; the legacy upstream host stays `pi-host.js`.
+        XCTAssertTrue(HostPortResolver.probeCommand.contains("pi-adaptor"))
+        XCTAssertTrue(HostPortResolver.probeCommand.contains("pi-host\\.js"))
     }
 }

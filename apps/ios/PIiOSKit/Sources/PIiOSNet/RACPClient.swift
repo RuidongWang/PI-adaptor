@@ -2050,7 +2050,7 @@ struct RACPInboundEnvelope: Decodable {
 
 /// `events/closed` 通知体。
 ///
-/// v2 契约（`docs/api/pi-host-v2.md`）冻结为扁平 `{ "subscriptionId": …, "code": "UNAUTHORIZED" }`；
+/// v2 契约（`docs/api/pi-adaptor.md`）冻结为扁平 `{ "subscriptionId": …, "code": "UNAUTHORIZED" }`；
 /// 早期 v1 形状把错误包在 `error` 对象里。两种都接受，否则严格按 v2 发来的终态码
 /// （如设备被撤销的 `UNAUTHORIZED`）会被当成 `error == nil` 的可恢复关闭，导致无限重订阅而非进入终态。
 struct RACPSubscriptionClosedNotice: Decodable, Equatable {
@@ -2231,7 +2231,7 @@ final class PendingRequest: @unchecked Sendable {
 }
 
 /// `turn/interrupt` / `turn/cancel` 按 `turnId` 寻址（契约 §3.1）。
-/// v2 契约（`docs/api/pi-host-v2.md` §2）要求所有写操作携带 `context`，因此这里带上
+/// v2 契约（`docs/api/pi-adaptor.md` §2）要求所有写操作携带 `context`，因此这里带上
 /// `requestId`（每次唯一），与其它写操作一致，便于去重与链路追踪。
 struct RACPTurnIDParams: Encodable, Sendable {
     var turnId: String

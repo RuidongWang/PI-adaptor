@@ -57,7 +57,7 @@ async function setupWithHistory(): Promise<{
   auth: { device: { deviceId: string; label: string; role: "owner"; tokenHash: string; createdAt: string; lastUsedAt: string; revokedAt: null } };
   sessionId: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "pi-host-tool-item-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tool-item-"));
   const project = join(root, "project");
   await mkdir(project, { recursive: true });
   const config = parseHostConfig(

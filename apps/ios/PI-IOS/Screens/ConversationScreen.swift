@@ -1343,7 +1343,7 @@ struct ConversationScreen: View {
     /// When the v2 Host reports the pinned provider as missing but our local
     /// catalog knows it only from the legacy store, the real cause is the
     /// two-store split — name it and point at the fix (re-import writes the
-    /// provider and its key into pi-host-v2) instead of a generic message.
+    /// provider and its key into PI-adaptor) instead of a generic message.
     private static func legacyOnlyReason(
         status: ProviderBindingStatus,
         legacyOnly: Set<String>
@@ -1353,8 +1353,8 @@ struct ConversationScreen: View {
               let providerId = status.pinnedProviderId,
               legacyOnly.contains(providerId)
         else { return nil }
-        return "该模型服务只导入到了服务器的旧存储，尚未同步到 pi-host-v2，因此无法驱动会话。"
-            + "请到 设置 → 模型服务 重新导入这个服务（导入会一并写入 pi-host-v2 并保存密钥）。"
+        return "该模型服务只导入到了服务器的旧存储，尚未同步到 PI-adaptor，因此无法驱动会话。"
+            + "请到 设置 → 模型服务 重新导入这个服务（导入会一并写入 PI-adaptor 并保存密钥）。"
     }
 
     /// Best-effort self-heal for the two-store split (§7): when a session is
@@ -1636,7 +1636,7 @@ private struct SessionConfigSheet: View {
                             kind: .warning,
                             text: "部分模型未同步到服务器",
                             detail: "标记为「未同步」的模型只存在于服务器的旧存储，无法在该服务器上运行。"
-                                + "请到 设置 → 模型服务 重新导入对应服务（会写入 pi-host-v2）。"
+                                + "请到 设置 → 模型服务 重新导入对应服务（会写入 PI-adaptor）。"
                         )
                     }
                     if configLocked {
@@ -1696,7 +1696,7 @@ private struct SessionConfigSheet: View {
                                     PIListRow(
                                         title: record.displayName,
                                         subtitle: unavailable
-                                            ? "\(modelSubtitle(record)) · 未同步到 pi-host-v2"
+                                            ? "\(modelSubtitle(record)) · 未同步到 PI-adaptor"
                                             : modelSubtitle(record),
                                         value: isSelected(record) ? "当前" : nil,
                                         isEnabled: configEnabled && !unavailable,

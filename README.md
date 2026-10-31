@@ -2,7 +2,8 @@
 
 > **手机是遥控器，服务器是工作台。**
 
-PI-IOS 是一个 iOS 原生客户端，用来**遥控**运行在自有 Linux 服务器上的 `pi-host` Agent Host。
+PI-IOS 是一个 iOS 原生客户端，用来**遥控**运行在自有 Linux 服务器上的 PI-adaptor Agent Host
+（`apps/host`，旧名 `pi-host-v2`）。
 
 模型请求、工具执行、文件读写、密钥存储**全部**发生在服务器侧；手机只负责「看」「批」「发消息」「配置」。
 目标机器是一台**空 Linux 服务器**，安装动作由手机发起，不依赖桌面 App 存在。
@@ -14,7 +15,7 @@ PI-IOS 是一个 iOS 原生客户端，用来**遥控**运行在自有 Linux 服
 | 路径 | 内容 |
 |---|---|
 | `apps/ios/` | SwiftUI 客户端（`PI-IOS`）与 `PIiOSKit` SPM 包（`PIiOSCore` 领域层 / `PIiOSNet` 传输层 / 两个测试 target） |
-| `apps/host/` | `pi-host` v2：Node 22 + TypeScript Host，基于 `@earendil-works/pi-coding-agent` |
+| `apps/host/` | **PI-adaptor**：Node 22 + TypeScript Host，基于 `@earendil-works/pi-coding-agent` |
 | `server/` | 「模型服务删除」服务端增量交付物：上游补丁、双架构打包与校验脚本、交付说明 |
 | `docs/` | 需求（`specs/`）、跨端契约（`api/`）、QA 与证据（`qa/`）、流程规则（`工作流.md`） |
 | `scripts/` | 仓库级门禁：密钥/身份扫描、发布坐标一致性校验 |
@@ -94,14 +95,14 @@ pnpm install --ignore-scripts
 pnpm start -- --pair        # 打印一次性 `ppt2.` 配对令牌
 ```
 
-自包含：默认全部落在 `~/.pi-host-v2`（`data/` `agent/` `logs/` `run/`），与旧版 PI-Desktop host 零共享状态。
+自包含：默认全部落在 `~/.pi-adaptor`（`data/` `agent/` `logs/` `run/`），与旧版 PI-Desktop host 零共享状态。
 
 ```sh
-pnpm start -- --home "$HOME/.pi-host-v2" --port 19445 --pair
+pnpm start -- --home "$HOME/.pi-adaptor" --port 19445 --pair
 ```
 
-配置优先级：CLI 参数 → `PI_HOST_V2_*` 环境变量 → `<home>/config.json` → 派生默认值。
-示例配置 `apps/host/config.example.json`，systemd user unit 见 `apps/host/deploy/pi-host-v2.service`。
+配置优先级：CLI 参数 → `PI_ADAPTOR_*` 环境变量 → `<home>/config.json` → 派生默认值。
+示例配置 `apps/host/config.example.json`，systemd user unit 见 `apps/host/deploy/pi-adaptor.service`。
 
 ### 4.5 wire 级端到端
 
@@ -155,7 +156,7 @@ iOS 侧 `PiHostRelease` 常量必须与之一致，漂移时 `HostReleaseManifes
 | 产品要做什么、85 条验收标准 | `docs/specs/ios-client.md` |
 | 跨端约定（RACP 子集、provider-import 载荷、bootstrap 状态机、缓存 schema） | `docs/api/ios-client.md`（FROZEN） |
 | 模型服务删除增量契约 | `docs/api/ios-client-provider-remove-draft.md` |
-| Host v2 契约 + schema + golden fixture | `docs/api/pi-host-v2.md`、`docs/api/pi-host-v2.schema.json` |
+| Host v2 契约 + schema + golden fixture | `docs/api/pi-adaptor.md`、`docs/api/pi-adaptor.schema.json` |
 | 每条 AC 当前状态与证据 | `docs/qa/implementation-status.md` |
 | 交互与视觉规范、跳转矩阵、缺口清单、HTML 原型 | `apps/ios/design/` |
 | 开发流程规则 | `AGENTS.md` → `docs/工作流.md` |

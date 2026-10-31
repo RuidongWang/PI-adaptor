@@ -6,14 +6,14 @@ import { MetaStore } from "../src/meta/store.js";
 
 describe("metadata store", () => {
   it("preserves concurrent registrations and isolates empty stores", async () => {
-    const store = new MetaStore(await mkdtemp(join(tmpdir(), "pi-host-meta-race-")));
+    const store = new MetaStore(await mkdtemp(join(tmpdir(), "pi-adaptor-meta-race-")));
     await Promise.all(Array.from({ length: 10 }, (_, i) => store.registerProject(`/tmp/p${i}`, `p${i}`)));
     expect(await store.listProjects()).toHaveLength(10);
-    const other = new MetaStore(await mkdtemp(join(tmpdir(), "pi-host-meta-empty-")));
+    const other = new MetaStore(await mkdtemp(join(tmpdir(), "pi-adaptor-meta-empty-")));
     expect(await other.listProjects()).toEqual([]);
   });
   it("registers projects idempotently and preserves tombstones", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-meta-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-meta-"));
     const store = new MetaStore(root);
     const first = await store.registerProject("/tmp/project", "One");
     const second = await store.registerProject("/tmp/project", "Renamed");
@@ -26,7 +26,7 @@ describe("metadata store", () => {
   });
 
   it("archives sessions and keeps deleted sessions hidden", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-meta-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-meta-"));
     const store = new MetaStore(root);
     const now = "2026-01-01T00:00:00.000Z";
     await store.upsertSession({

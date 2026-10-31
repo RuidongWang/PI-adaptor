@@ -1,9 +1,9 @@
 {
-  "dataDir": "/home/ubuntu/.pi-host-v2/data",
-  "agentDir": "/home/ubuntu/.pi-host-v2/agent",
-  "sessionDir": "/home/ubuntu/.pi-host-v2/data/sessions",
+  "dataDir": "/home/ubuntu/.pi-adaptor/data",
+  "agentDir": "/home/ubuntu/.pi-adaptor/agent",
+  "sessionDir": "/home/ubuntu/.pi-adaptor/data/sessions",
   "port": 19445,
-  "hostId": "pi-host-v2-aarch64",
-  "hostVersion": "2.0.0",
+  "hostId": "pi-adaptor-aarch64",
+  "hostVersion": "2.0.1",
   "piVersion": "1.3.0"
 }

@@ -766,7 +766,7 @@ public struct RACPInputRespondParams: Codable, Equatable, Sendable {
 
 /// `input/respond` 的返回体。
 ///
-/// v2 契约（`docs/api/pi-host-v2.md` §8.4）冻结为 `{ "resolved": true, "alreadyResolved": false }`；
+/// v2 契约（`docs/api/pi-adaptor.md` §8.4）冻结为 `{ "resolved": true, "alreadyResolved": false }`；
 /// 早期 v1 golden 形状为 `{ "inputId": …, "status": "resolved" }`。这里两种都接受，
 /// 否则严格按 v2 返回时 `JSONDecoder` 会因缺少 `inputId`/`status` 抛 `keyNotFound`，
 /// 用户回答 AskTool 提问时表现为「未能读取数据」——与已修的 `turn/start` 属同一类缺陷。

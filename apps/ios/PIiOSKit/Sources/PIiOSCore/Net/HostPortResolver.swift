@@ -15,7 +15,7 @@ public enum HostPortResolver {
     /// a TTY, must not touch stdin, and must exit 0 even when nothing is found.
     ///
     /// Sources, most-specific first:
-    /// 1. a running `pi-host-v2` (apps/host `dist/main.js`) process `--port N`
+    /// 1. a running `pi-adaptor` (apps/host `dist/main.js`) process `--port N`
     ///    — this is the host the v2 RACP client speaks to;
     /// 2. a running legacy `pi-host.js` process `--port N`;
     /// 3. the last `PI_HOST_READY {"…","port":N}` line in the bootstrap log
@@ -25,7 +25,7 @@ public enum HostPortResolver {
     public static let probeCommand = """
     { \
     ps -eo args= 2>/dev/null \
-    | grep -E 'dist/main\\.js|pi-host-v2' \
+    | grep -E 'dist/main\\.js|pi-adaptor' \
     | grep -v grep \
     | grep -oE -- '--port[ =][0-9]{1,5}' \
     | grep -oE '[0-9]{1,5}'; \

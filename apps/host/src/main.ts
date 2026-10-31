@@ -12,7 +12,7 @@ await ensureHostDirectories(config);
 // Record the running pid under the isolated run dir so a systemd unit or an
 // operator can find this instance without touching any other host's state.
 await writeFile(join(config.runDir, "host.pid"), `${process.pid}\n`, { mode: 0o600 }).catch(() => undefined);
-const useDeterministic = process.env.PI_HOST_V2_DETERMINISTIC === "1";
+const useDeterministic = process.env.PI_ADAPTOR_DETERMINISTIC === "1";
 const driver = useDeterministic
   ? new DeterministicAgentDriver()
   : new PiAgentDriver(config.agentDir, [join(config.dataDir, "skills", "versions")]);

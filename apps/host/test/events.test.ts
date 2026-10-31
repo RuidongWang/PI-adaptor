@@ -6,7 +6,7 @@ import { EventJournal } from "../src/events/journal.js";
 
 describe("event journal", () => {
   it("persists and replays concurrent appends in sequence order", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-events-race-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-events-race-"));
     const journal = new EventJournal(root);
     await journal.load();
     const events = await Promise.all(Array.from({ length: 20 }, (_, i) => journal.append("host", "test", { i })));
@@ -15,7 +15,7 @@ describe("event journal", () => {
     expect(journal.replay("host", undefined, { epoch: journal.epoch, sequence: 1 }).map((event) => event.sequence)).toEqual(events.slice(1).map((event) => event.sequence));
   });
   it("replays only events after the cursor and expires old epochs", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-events-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-events-"));
     const journal = new EventJournal(root);
     await journal.load();
     const first = await journal.append("session", "turn.started", { turn: {} }, { sessionId: "s1" });
