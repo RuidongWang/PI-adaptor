@@ -34,7 +34,7 @@ class ApprovalToolDriver implements AgentDriver {
 }
 
 async function setup() {
-  const root = await mkdtemp(join(tmpdir(), "pi-host-approval-test-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-adaptor-approval-test-"));
   const project = join(root, "project");
   await mkdir(project, { recursive: true });
   const config = parseHostConfig(

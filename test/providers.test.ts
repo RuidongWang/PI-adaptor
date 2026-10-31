@@ -6,14 +6,14 @@ import { ProviderStore } from "../src/providers/store.js";
 
 describe("provider store", () => {
   it("preserves the default provider when deleting another and serializes creation", async () => {
-    const store = new ProviderStore(await mkdtemp(join(tmpdir(), "pi-host-provider-race-")), true);
+    const store = new ProviderStore(await mkdtemp(join(tmpdir(), "pi-adaptor-provider-race-")), true);
     const input = { name: "mock", type: "openai_compatible", protocol: "openai_compatible", baseUrl: "https://example.com", authKind: "none" as const, models: [] };
     const [first, second] = await Promise.all([store.create({ ...input, vendorKey: "one" }), store.create({ ...input, vendorKey: "two" })]);
     await store.delete(second.id);
     expect((await store.list()).find((entry) => entry.id === first.id)?.isDefault).toBe(true);
   });
   it("stores secrets separately and masks them", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-provider-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-"));
     const store = new ProviderStore(root, true);
     const created = await store.create({
       name: "Mock",
@@ -36,7 +36,7 @@ describe("provider store", () => {
   });
 
   it("rejects invalid auth combinations", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-provider-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-"));
     const store = new ProviderStore(root, true);
     await expect(
       store.create({

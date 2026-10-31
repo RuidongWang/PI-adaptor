@@ -352,7 +352,7 @@ export class HostService {
       return {
         protocolVersion: "1.0",
         server: {
-          name: "pi-host-v2",
+          name: "pi-adaptor",
           version: this.config.hostVersion,
           hostId: this.hostId,
           piVersion: this.config.piVersion
@@ -377,7 +377,7 @@ export class HostService {
     return {
       protocolVersion: "2.0.0",
       server: {
-        name: "pi-host-v2",
+        name: "pi-adaptor",
         version: this.config.hostVersion,
         hostId: this.hostId,
         piVersion: this.config.piVersion

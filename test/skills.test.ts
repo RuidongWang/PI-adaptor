@@ -6,7 +6,7 @@ import { SkillRegistry } from "../src/skills/registry.js";
 
 describe("skill registry", () => {
   it("cleans cloned directories after success and failure", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-skill-clone-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-skill-clone-"));
     const bin = join(root, "bin");
     await mkdir(bin);
     await writeFile(join(bin, "git"), "#!/bin/bash\ntarget=\"${@: -1}\"\nprintf '%s\\n' '---' 'name: demo' '---' > \"$target/SKILL.md\"\n");
@@ -23,9 +23,9 @@ describe("skill registry", () => {
     }
   });
   it("rejects traversal names and source directories outside the allowed root", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-skill-safe-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-skill-safe-"));
     const source = join(root, "source");
-    const outside = await mkdtemp(join(tmpdir(), "pi-host-outside-"));
+    const outside = await mkdtemp(join(tmpdir(), "pi-adaptor-outside-"));
     await mkdir(source);
     await writeFile(join(source, "SKILL.md"), "---\nname: ../../escape\n---\n");
     const registry = new SkillRegistry(join(root, "data"), root, true);
@@ -34,7 +34,7 @@ describe("skill registry", () => {
     await expect(registry.install({ type: "directory", path: source, subdir: "link" })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
   });
   it("installs immutable directory versions, updates, and deletes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-skill-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-skill-"));
     const source = join(root, "source");
     await mkdir(source, { recursive: true });
     await writeFile(join(source, "SKILL.md"), "---\nname: demo\ndescription: one\n---\n# One\n");

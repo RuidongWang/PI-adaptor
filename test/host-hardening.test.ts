@@ -31,7 +31,7 @@ class ControlledDriver implements AgentDriver {
 }
 
 async function setup(driver: AgentDriver) {
-  const root = await mkdtemp(join(tmpdir(), "pi-host-hardening-"));
+  const root = await mkdtemp(join(tmpdir(), "pi-adaptor-hardening-"));
   const project = join(root, "project");
   await mkdir(project, { recursive: true });
   const config = parseHostConfig(
@@ -66,7 +66,7 @@ const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("event journal retention", () => {
   it("reports CURSOR_EXPIRED when the cursor is below the retention watermark", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-journal-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-journal-"));
     const journal = new EventJournal(root, 3);
     await journal.load();
     for (let i = 0; i < 5; i += 1) await journal.append("host", "test", { i });
@@ -80,7 +80,7 @@ describe("event journal retention", () => {
   });
 
   it("keeps a session cursor valid when only other sessions were evicted", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-journal-scope-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-journal-scope-"));
     const journal = new EventJournal(root, 3);
     await journal.load();
     const s1 = await journal.append("session", "turn.started", {}, { sessionId: "s1" });
@@ -241,7 +241,7 @@ describe("media gc wiring", () => {
 
 describe("skill versioning", () => {
   it("changes the version when only an auxiliary file changes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-skill-hash-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-skill-hash-"));
     const source = join(root, "source");
     await mkdir(source, { recursive: true });
     await writeFile(join(source, "SKILL.md"), "---\nname: demo\ndescription: one\n---\n");

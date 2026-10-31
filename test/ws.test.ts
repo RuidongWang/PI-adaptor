@@ -37,7 +37,7 @@ function connect(url: string, token: string): Promise<WebSocket> {
 
 describe("RACP v2 websocket", () => {
   it("pairs, authenticates, registers a project, and streams a turn", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-ws-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-ws-"));
     const project = join(root, "project");
     await mkdir(project, { recursive: true });
     const config = parseHostConfig(
@@ -140,7 +140,7 @@ describe("RACP v2 websocket", () => {
         return { turnId: request.turnId, abort: async () => resolveWait(), wait: () => wait };
       }
     }
-    const root = await mkdtemp(join(tmpdir(), "pi-host-approval-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-approval-"));
     const config = parseHostConfig(
       ["--data-dir", join(root, "data"), "--agent-dir", join(root, "agent"), "--port", "0"],
       {},

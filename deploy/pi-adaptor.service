@@ -1,34 +1,34 @@
-# systemd USER unit for the isolated v2 host.
+# systemd USER unit for the isolated PI-adaptor host.
 #
 # Install (do NOT replace any unit that starts the legacy PI-Desktop pi-host):
 #   mkdir -p ~/.config/systemd/user
-#   cp pi-host-v2.service ~/.config/systemd/user/
+#   cp pi-adaptor.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
-#   systemctl --user enable --now pi-host-v2.service
+#   systemctl --user enable --now pi-adaptor.service
 #
 # The unit name, env namespace, home, and port are all distinct from the legacy
 # host so the two can run side by side with zero shared state.
 
 [Unit]
-Description=PI Host v2 (isolated, independent of PI-Desktop pi-host)
+Description=PI-adaptor (isolated, independent of PI-Desktop pi-host)
 After=network.target
 
 [Service]
 Type=simple
 
 # Fully isolated root: data/, agent/, logs/, run/ all live below it.
-Environment=PI_HOST_V2_HOME=%h/.pi-host-v2
-Environment=PI_HOST_V2_PORT=19445
-Environment=PI_HOST_V2_HOST_ID=pi-host-v2-aarch64
-Environment=PI_HOST_V2_VERSION=2.0.0
+Environment=PI_ADAPTOR_HOME=%h/.pi-adaptor
+Environment=PI_ADAPTOR_PORT=19445
+Environment=PI_ADAPTOR_HOST_ID=pi-adaptor-aarch64
+Environment=PI_ADAPTOR_VERSION=2.0.1
 
 # Belt-and-braces isolation: even HOME-derived defaults stay inside the root if
 # a future dependency reads them. Remove this line only if you deliberately want
-# the v2 host to see the login HOME.
-Environment=HOME=%h/.pi-host-v2
+# the host to see the login HOME.
+Environment=HOME=%h/.pi-adaptor
 
 # Absolute path to the built entrypoint for the deployed version.
-ExecStart=/usr/bin/node %h/.pi-host-v2/current/dist/main.js
+ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js
 
 Restart=on-failure
 RestartSec=2

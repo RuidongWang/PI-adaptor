@@ -7,7 +7,7 @@ import { TokenStore } from "../src/security/tokens.js";
 
 describe("token store", () => {
   it("serializes simultaneous pair and revoke operations", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-tokens-race-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-race-"));
     const store = new TokenStore(root);
     const pairing = await store.createPairingToken();
     const attempts = await Promise.allSettled([store.pair(pairing.token, "a"), store.pair(pairing.token, "b")]);
@@ -18,13 +18,13 @@ describe("token store", () => {
   });
 
   it("does not share empty state across separate stores", async () => {
-    const first = new TokenStore(await mkdtemp(join(tmpdir(), "pi-host-first-")));
-    const second = new TokenStore(await mkdtemp(join(tmpdir(), "pi-host-second-")));
+    const first = new TokenStore(await mkdtemp(join(tmpdir(), "pi-adaptor-first-")));
+    const second = new TokenStore(await mkdtemp(join(tmpdir(), "pi-adaptor-second-")));
     await first.createPairingToken();
     expect(await second.listDevices()).toEqual([]);
   });
   it("pairs once, authenticates, and stores only hashes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-tokens-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
     const store = new TokenStore(root);
     const pairing = await store.createPairingToken(600, new Date("2026-01-01T00:00:00Z"));
     expect(pairing.token).toMatch(/^ppt2\./);
@@ -39,7 +39,7 @@ describe("token store", () => {
   });
 
   it("rejects expired pairing tokens and revoked devices", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-tokens-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
     const store = new TokenStore(root);
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     await expect(
@@ -55,7 +55,7 @@ describe("token store", () => {
   });
 
   it("rotates with a five-minute overlap and confirms the new token", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-tokens-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
     const store = new TokenStore(root);
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:00:10Z"));
@@ -73,7 +73,7 @@ describe("token store", () => {
   });
 
   it("rejects a confirmation whose rotationId does not match", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-tokens-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
     const store = new TokenStore(root);
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:00:10Z"));
@@ -84,7 +84,7 @@ describe("token store", () => {
   });
 
   it("voids an unconfirmed rotation after restart, keeping the old token valid", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-tokens-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
     const store = new TokenStore(root);
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:00:10Z"));

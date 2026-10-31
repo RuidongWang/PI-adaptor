@@ -12,15 +12,15 @@ type FixtureGroups = {
   invalid: unknown[];
 };
 
-const schemaURL = new URL("../../../docs/api/pi-host-v2.schema.json", import.meta.url);
-const goldenURL = new URL("../../../docs/api/pi-host-v2.golden.json", import.meta.url);
+const schemaURL = new URL("../../../docs/api/pi-adaptor.schema.json", import.meta.url);
+const goldenURL = new URL("../../../docs/api/pi-adaptor.golden.json", import.meta.url);
 const require = createRequire(import.meta.url);
 const Ajv2020 = require("ajv/dist/2020") as new (options?: object) => {
   compile(schema: object): ((value: unknown) => boolean) & { errors?: unknown[] };
 };
 const addFormats = require("ajv-formats") as (ajv: object) => void;
 
-describe("pi-host-v2 contract", () => {
+describe("pi-adaptor contract", () => {
   it("validates every golden request, response, and notification", async () => {
     const schema = JSON.parse(await readFile(fileURLToPath(schemaURL), "utf8")) as object;
     const golden = JSON.parse(

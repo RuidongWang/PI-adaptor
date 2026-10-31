@@ -47,7 +47,7 @@ describe("provider seed", () => {
   });
 
   it("creates providers then idempotently updates on re-seed", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-seed-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-seed-"));
     const store = new ProviderStore(root, true);
 
     const first = await applyProviderSeed(store, parseProviderSeed({ providers: [ENTRY] }));
@@ -70,10 +70,10 @@ describe("provider seed", () => {
   });
 
   it("fails loudly when the seed file is missing or not JSON", async () => {
-    await expect(loadProviderSeed(join(tmpdir(), "pi-host-seed-does-not-exist.json"))).rejects.toThrow(
+    await expect(loadProviderSeed(join(tmpdir(), "pi-adaptor-seed-does-not-exist.json"))).rejects.toThrow(
       /not readable/
     );
-    const root = await mkdtemp(join(tmpdir(), "pi-host-seed-bad-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-seed-bad-"));
     const path = join(root, "bad.json");
     await writeFile(path, "{ not json", "utf8");
     await expect(loadProviderSeed(path)).rejects.toThrow(/not valid JSON/);

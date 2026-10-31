@@ -7,7 +7,7 @@ import { NativeSessionCatalog } from "../src/pi/session-catalog.js";
 
 describe("native session catalog", () => {
   it("scans, appends, renames, and branches real Pi v3 sessions", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-host-session-"));
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-session-"));
     const cwd = join(root, "project");
     const sessions = join(root, "sessions");
     await import("node:fs/promises").then(({ mkdir }) => mkdir(cwd, { recursive: true }));

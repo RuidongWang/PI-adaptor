@@ -3,10 +3,12 @@ set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 # Install root defaults to the isolated host home — the SAME root the systemd
-# unit uses (`PI_HOST_V2_HOME=%h/.pi-host-v2`) — so `current/dist/main.js`
+# unit uses (`PI_ADAPTOR_HOME=%h/.pi-adaptor`) — so `current/dist/main.js`
 # resolves to what this script published.
-TARGET="${PI_HOST_V2_INSTALL_DIR:-${PI_HOST_V2_HOME:-$HOME/.pi-host-v2}}"
-VERSION="${1:-0.1.0}"
+TARGET="${PI_ADAPTOR_INSTALL_DIR:-${PI_ADAPTOR_HOME:-$HOME/.pi-adaptor}}"
+# Version defaults to the manifest inside this bundle, so `current` always
+# points at a directory whose name matches the version the host reports.
+VERSION="${1:-$(node -p "require('$ROOT/package.json').version")}"
 if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ || "$VERSION" == "current" || "$VERSION" == "current.tmp" ]]; then
   printf 'invalid version: %s\n' "$VERSION" >&2
   exit 1
