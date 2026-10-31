@@ -1,0 +1,2680 @@
+# base-commit: d2c9fc44087f24260521c66530c4f92c04790105
+# base-version: pi-desktop 0.21.0 (upstream https://github.com/vastsa/PI-Desktop.git)
+# contract: docs/api/ios-client-provider-remove-draft.md (FROZEN 2026-11-03)
+# apply: git apply -p1 <this file>   (from the repository root)
+diff --git a/apps/pi-host/src/admin-socket.ts b/apps/pi-host/src/admin-socket.ts
+index 42130a5..f8429fa 100644
+--- a/apps/pi-host/src/admin-socket.ts
++++ b/apps/pi-host/src/admin-socket.ts
+@@ -3,20 +3,121 @@ import { chmod, lstat, mkdir, open, unlink } from "node:fs/promises";
+ import { createConnection, createServer, type Socket } from "node:net";
+ import { join, relative } from "node:path";
+ import {
+-  PROVIDER_SYNC_MAX_BYTES, parseProviderImportPayload, parseProviderImportSummary,
+-  type ProviderImportPayload, type ProviderImportSummary,
++  ADMIN_BINDING_STATUS_MAX_BYTES,
++  ADMIN_FORGET_MAX_BYTES,
++  ADMIN_OP_BINDING_STATUS,
++  ADMIN_OP_IMPORT,
++  ADMIN_OP_REMOVE,
++  ADMIN_OP_REMOVE_STATUS,
++  ADMIN_OP_SYNC_FORGET,
++  ADMIN_REMOVE_MAX_BYTES,
++  ADMIN_REMOVE_STATUS_MAX_BYTES,
++  BINDING_STATUS_RESPONSE_MAX_BYTES,
++  BINDING_STATUS_STDIN_MAX_BYTES,
++  FORGET_RESPONSE_MAX_BYTES,
++  FORGET_STDIN_MAX_BYTES,
++  PROVIDER_SYNC_MAX_BYTES,
++  REMOVE_RESPONSE_MAX_BYTES,
++  REMOVE_STDIN_MAX_BYTES,
++  REMOVE_STATUS_RESPONSE_MAX_BYTES,
++  REMOVE_STATUS_STDIN_MAX_BYTES,
++  parseProviderBindingStatus,
++  parseProviderBindingStatusPayload,
++  parseProviderImportPayload,
++  parseProviderImportSummary,
++  parseProviderRemovePayload,
++  parseProviderRemoveStatus,
++  parseProviderRemoveSummary,
++  parseProviderSyncForgetPayload,
++  parseProviderSyncForgetSummary,
++  type ProviderImportPayload,
++  type ProviderImportSummary,
++  type ProviderRemovePayload,
++  type ProviderSyncForgetPayload,
+ } from "@pi-desktop/shared";
+ import {
+-  IMPORT_DEADLINE_MS, ImportFailure, importFailureCode, importProviders, readCapped,
+-  type HostCaller, type ImportFailureCode,
++  IMPORT_DEADLINE_MS,
++  ImportFailure,
++  importProviders,
++  importFailureCode,
++  readCapped,
++  type AdminFailureCode,
++  type HostCaller,
+ } from "./provider-import.js";
++import {
++  bindingStatusFor,
++  forgetProvider,
++  removeProvider,
++  removeStatusFor,
++  type BindingOutcome,
++  type ForgetOutcome,
++  type RemoveOutcome,
++  type RemoveStatusOutcome,
++} from "./provider-remove.js";
+ 
++/** The unified read cap: the same frame must still accept a large `providers.import` payload. */
+ export const ADMIN_MAX_BYTES = PROVIDER_SYNC_MAX_BYTES + 128;
+-const RESPONSE_MAX_BYTES = 64 * 1024;
+-const FAILURE_CODES: readonly ImportFailureCode[] = ["INVALID_REQUEST", "PAYLOAD_TOO_LARGE", "ADMIN_UNAVAILABLE", "ADMIN_BUSY", "TIMEOUT", "IMPORT_FAILED"];
+-export type AdminResponse = { ok: true; summary: ProviderImportSummary } | { ok: false; code: ImportFailureCode };
++const IMPORT_RESPONSE_MAX_BYTES = 64 * 1024;
++/**
++ * §8 of the removal increment: the six import literals plus the fifteen the
++ * removal ops may answer with. A client that does not recognize a code here
++ * would misreport a valid failure as a protocol error.
++ */
++const FAILURE_CODES: readonly AdminFailureCode[] = [
++  "INVALID_REQUEST", "PAYLOAD_TOO_LARGE", "ADMIN_UNAVAILABLE", "ADMIN_BUSY", "TIMEOUT", "IMPORT_FAILED",
++  "NOT_FOUND", "RESULT_UNKNOWN", "REMOVE_FAILED", "SECRET_NOT_CLEARED",
++  "DEFAULT_TRANSFER_FAILED", "DEFAULT_TRANSFER_UNKNOWN", "DEFAULT_ORDER_UNDECIDABLE", "DEFAULT_TRANSFER_ORDER_UNKNOWN",
++  "PLUGIN_OWNED", "SNAPSHOT_UNSTABLE", "FORGET_FAILED", "TARGET_STILL_EXISTS", "UNSUPPORTED_OP",
++  "RESPONSE_TOO_LARGE", "RESPONSE_INVALID",
++];
++
++export type AdminOp =
++  | typeof ADMIN_OP_IMPORT
++  | typeof ADMIN_OP_REMOVE
++  | typeof ADMIN_OP_BINDING_STATUS
++  | typeof ADMIN_OP_REMOVE_STATUS
++  | typeof ADMIN_OP_SYNC_FORGET;
++
++/** §2.0: string equality only — no normalization, no aliases. */
++const ADMIN_OPS: readonly AdminOp[] = [ADMIN_OP_IMPORT, ADMIN_OP_REMOVE, ADMIN_OP_BINDING_STATUS, ADMIN_OP_REMOVE_STATUS, ADMIN_OP_SYNC_FORGET];
++
++/** §2.1.1 (b): the whole `{"op":…,"payload":…}` frame. */
++const ENVELOPE_MAX_BYTES: Record<AdminOp, number> = {
++  [ADMIN_OP_IMPORT]: ADMIN_MAX_BYTES,
++  [ADMIN_OP_REMOVE]: ADMIN_REMOVE_MAX_BYTES,
++  [ADMIN_OP_BINDING_STATUS]: ADMIN_BINDING_STATUS_MAX_BYTES,
++  [ADMIN_OP_REMOVE_STATUS]: ADMIN_REMOVE_STATUS_MAX_BYTES,
++  [ADMIN_OP_SYNC_FORGET]: ADMIN_FORGET_MAX_BYTES,
++};
++/** §2.1.1 (a): the canonical payload bytes, checked after the op is known. */
++const PAYLOAD_MAX_BYTES: Record<AdminOp, number> = {
++  [ADMIN_OP_IMPORT]: PROVIDER_SYNC_MAX_BYTES,
++  [ADMIN_OP_REMOVE]: REMOVE_STDIN_MAX_BYTES,
++  [ADMIN_OP_BINDING_STATUS]: BINDING_STATUS_STDIN_MAX_BYTES,
++  [ADMIN_OP_REMOVE_STATUS]: REMOVE_STATUS_STDIN_MAX_BYTES,
++  [ADMIN_OP_SYNC_FORGET]: FORGET_STDIN_MAX_BYTES,
++};
++/** §2.1.1 (c): enforced by the client when it reads the reply. */
++const RESPONSE_MAX_BYTES: Record<AdminOp, number> = {
++  [ADMIN_OP_IMPORT]: IMPORT_RESPONSE_MAX_BYTES,
++  [ADMIN_OP_REMOVE]: REMOVE_RESPONSE_MAX_BYTES,
++  [ADMIN_OP_BINDING_STATUS]: BINDING_STATUS_RESPONSE_MAX_BYTES,
++  [ADMIN_OP_REMOVE_STATUS]: REMOVE_STATUS_RESPONSE_MAX_BYTES,
++  [ADMIN_OP_SYNC_FORGET]: FORGET_RESPONSE_MAX_BYTES,
++};
++const BODY_KEY: Record<AdminOp, string> = {
++  [ADMIN_OP_IMPORT]: "summary",
++  [ADMIN_OP_REMOVE]: "removed",
++  [ADMIN_OP_BINDING_STATUS]: "binding",
++  [ADMIN_OP_REMOVE_STATUS]: "status",
++  [ADMIN_OP_SYNC_FORGET]: "forgotten",
++};
++
++export type AdminResponse = { ok: true; summary: ProviderImportSummary } | { ok: false; code: AdminFailureCode };
+ export type AdminSocket = { path: string; close(): Promise<void> };
+ type Log = (level: "info" | "warn", message: string, data?: Record<string, unknown>) => void;
++/** Every reply on this channel is exactly `{ok:true,<body>}` or `{ok:false,code}`. */
++type WireResponse = Record<string, unknown>;
+ 
+ export function adminSocketPath(dataDir: string): string {
+   const path = join(dataDir, "pi-host", "admin.sock");
+@@ -36,6 +137,13 @@ async function privateSocket(path: string): Promise<void> {
+   const stat = await lstat(path);
+   if (!stat.isSocket() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new ImportFailure("ADMIN_UNAVAILABLE");
+ }
++/** Client-side guard: never write even one byte into an unsafe directory. */
++async function assertOwnerOnlyDirectories(dataDir: string): Promise<void> {
++  for (const dir of [dataDir, join(dataDir, "pi-host")]) {
++    const stat = await lstat(dir);
++    if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new ImportFailure("ADMIN_UNAVAILABLE");
++  }
++}
+ function probe(path: string): Promise<"live" | "stale"> {
+   return new Promise((resolveProbe, reject) => {
+     const socket = createConnection(path);
+@@ -82,7 +190,7 @@ async function claim(dataDir: string): Promise<() => Promise<void>> {
+   throw new ImportFailure("ADMIN_BUSY");
+ }
+ 
+-/** One owner-only Unix channel, one allowed operation, one active import. */
++/** One owner-only Unix channel, one active operation (§6.1: the read ops share the same slot). */
+ export async function startAdminSocket(options: {
+   dataDir: string; getHost: () => HostCaller | null; log?: Log; timeoutMs?: number;
+ }): Promise<AdminSocket> {
+@@ -91,7 +199,7 @@ export async function startAdminSocket(options: {
+   const path = adminSocketPath(options.dataDir);
+   const sockets = new Set<Socket>();
+   const controllers = new Set<AbortController>();
+-  let active: Promise<AdminResponse> | undefined;
++  let active: Promise<WireResponse> | undefined;
+   let stopping = false;
+   let ready = false;
+   const timeoutMs = options.timeoutMs ?? IMPORT_DEADLINE_MS;
+@@ -101,6 +209,9 @@ export async function startAdminSocket(options: {
+     sockets.add(socket);
+     const controller = new AbortController();
+     controllers.add(controller);
++    // The op only becomes known after the frame is parsed; it is kept for the log line and the audit record.
++    let op: AdminOp | undefined;
++    let subject: string | undefined;
+     const timer = setTimeout(() => { controller.abort(); socket.destroy(); }, timeoutMs);
+     socket.once("close", () => {
+       clearTimeout(timer);
+@@ -109,33 +220,34 @@ export async function startAdminSocket(options: {
+       sockets.delete(socket);
+     });
+     socket.on("error", () => undefined); // errors are represented by the bounded response/closed channel
+-    void readCapped(socket, ADMIN_MAX_BYTES, timeoutMs).then(async (raw): Promise<AdminResponse> => {
++    void readCapped(socket, ADMIN_MAX_BYTES, timeoutMs).then(async (raw): Promise<WireResponse> => {
+       if (controller.signal.aborted || stopping) throw new ImportFailure("TIMEOUT");
+-      let payload: ProviderImportPayload;
+-      try {
+-        const request: unknown = JSON.parse(raw);
+-        if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) => !["op", "payload"].includes(key))
+-          || !("op" in request) || request.op !== "providers.import" || !("payload" in request)) throw new ImportFailure("INVALID_REQUEST");
+-        payload = parseProviderImportPayload(request.payload);
+-      } catch { throw new ImportFailure("INVALID_REQUEST"); }
++      const request = parseEnvelope(raw);
++      op = request.op;
++      // (b) the whole frame, then (a) the canonical payload of this op (§2.1.1 discipline 1).
++      if (Buffer.byteLength(raw, "utf8") > ENVELOPE_MAX_BYTES[request.op]) throw new ImportFailure("PAYLOAD_TOO_LARGE");
++      if (Buffer.byteLength(JSON.stringify(request.payload), "utf8") > PAYLOAD_MAX_BYTES[request.op]) throw new ImportFailure("PAYLOAD_TOO_LARGE");
++      const payload = parsePayload(request.op, request.payload);
++      subject = (payload as { providerId?: string; sessionId?: string }).providerId ?? (payload as { sessionId?: string }).sessionId;
+       if (active) throw new ImportFailure("ADMIN_BUSY");
+       const host = options.getHost();
+       if (!host) throw new ImportFailure("ADMIN_UNAVAILABLE");
+       const guarded: HostCaller = {
+-        call: (method, params) => {
++        call: (method, params, rpcTimeoutMs) => {
+           if (controller.signal.aborted || stopping || options.getHost() !== host) throw new ImportFailure("ADMIN_UNAVAILABLE");
+-          return host.call(method, params, Math.min(timeoutMs, 10_000));
++          return host.call(method, params, Math.min(rpcTimeoutMs ?? timeoutMs, 10_000));
+         },
+       };
+-      active = importProviders(guarded, options.dataDir, payload, controller.signal)
+-        .then((summary): AdminResponse => ({ ok: true, summary }))
+-        .catch((error: unknown): AdminResponse => ({ ok: false, code: importFailureCode(error) }));
++      active = dispatch(request.op, payload, guarded, options.dataDir, { signal: controller.signal, slotFree: true })
++        .catch((error: unknown): WireResponse => ({ ok: false, code: importFailureCode(error) }));
+       try { return await active; } finally { active = undefined; }
+-    }).catch((error: unknown): AdminResponse => ({ ok: false, code: importFailureCode(error) }))
++    }).catch((error: unknown): WireResponse => ({ ok: false, code: importFailureCode(error) }))
+       .then((response) => {
+         if (socket.destroyed) return;
+-        if (!response.ok) log("warn", "provider import failed", { code: response.code });
+-        else log("info", "providers imported", { imported: response.summary.imported.length, skipped: response.summary.skipped.length });
++        // Audit shape: op, the addressable id and the code only — never a secret or a configuration (§3).
++        const audit = { op, providerId: subject, ...(response.ok === true ? {} : { code: response.code }) };
++        if (response.ok !== true) log("warn", "admin operation failed", audit);
++        else log("info", "admin operation completed", audit);
+         socket.end(`${JSON.stringify(response)}\n`);
+         socket.destroySoon();
+       });
+@@ -178,29 +290,159 @@ export async function startAdminSocket(options: {
+   };
+ }
+ 
++/* -------------------------------------------------------------- dispatch */
++
++async function dispatch(op: AdminOp, payload: unknown, host: HostCaller, dataDir: string, context: { signal: AbortSignal; slotFree: boolean }): Promise<WireResponse> {
++  switch (op) {
++    case ADMIN_OP_IMPORT: {
++      const summary = await importProviders(host, dataDir, payload as ProviderImportPayload, context.signal);
++      return { ok: true, summary };
++    }
++    case ADMIN_OP_REMOVE: {
++      const outcome: RemoveOutcome = await removeProvider(host, payload as ProviderRemovePayload, context.signal);
++      return outcome.ok ? { ok: true, removed: outcome.removed } : { ...outcome };
++    }
++    case ADMIN_OP_BINDING_STATUS: {
++      const outcome: BindingOutcome = await bindingStatusFor(host, dataDir, (payload as { sessionId: string }).sessionId, context.signal);
++      return outcome.ok ? { ok: true, binding: outcome.binding } : { ok: false, code: outcome.code };
++    }
++    case ADMIN_OP_REMOVE_STATUS: {
++      const outcome: RemoveStatusOutcome = await removeStatusFor(host, dataDir, (payload as ProviderRemovePayload).providerId, context);
++      return outcome.ok ? { ok: true, status: outcome.status } : { ok: false, code: outcome.code };
++    }
++    case ADMIN_OP_SYNC_FORGET: {
++      const outcome: ForgetOutcome = await forgetProvider(host, dataDir, payload as ProviderSyncForgetPayload, context.signal);
++      return outcome.ok ? { ok: true, forgotten: outcome.forgotten } : { ok: false, code: outcome.code };
++    }
++  }
++  throw new ImportFailure("INVALID_REQUEST");
++}
++
++/** §2.0/§2.1.1: the envelope has exactly two keys and an op that matches a frozen literal byte for byte. */
++function parseEnvelope(raw: string): { op: AdminOp; payload: unknown } {
++  let request: unknown;
++  try { request = JSON.parse(raw); } catch { throw new ImportFailure("INVALID_REQUEST"); }
++  if (!request || typeof request !== "object" || Array.isArray(request)) throw new ImportFailure("INVALID_REQUEST");
++  const keys = Object.keys(request);
++  if (keys.length !== 2 || !keys.includes("op") || !keys.includes("payload")) throw new ImportFailure("INVALID_REQUEST");
++  const op = (request as { op: unknown }).op;
++  // A misspelled op is a client bug, never a capability answer (§2.4.4, T-39).
++  if (typeof op !== "string" || !(ADMIN_OPS as readonly string[]).includes(op)) throw new ImportFailure("INVALID_REQUEST");
++  return { op: op as AdminOp, payload: (request as { payload: unknown }).payload };
++}
++
++function parsePayload(op: AdminOp, payload: unknown): unknown {
++  try {
++    switch (op) {
++      case ADMIN_OP_IMPORT: return parseProviderImportPayload(payload);
++      case ADMIN_OP_REMOVE: return parseProviderRemovePayload(payload);
++      case ADMIN_OP_BINDING_STATUS: return parseProviderBindingStatusPayload(payload);
++      case ADMIN_OP_REMOVE_STATUS: return parseProviderRemovePayload(payload);
++      case ADMIN_OP_SYNC_FORGET: return parseProviderSyncForgetPayload(payload);
++    }
++  } catch {
++    throw new ImportFailure("INVALID_REQUEST");
++  }
++}
++
++/* ---------------------------------------------------------------- clients */
++
+ /** CLI client: reject unsafe paths before writing even one secret-bearing byte. */
+ export async function sendAdminRequest(dataDir: string, input: ProviderImportPayload): Promise<AdminResponse> {
+   const payload = parseProviderImportPayload(input);
+   try {
+     // Client checks only; it never creates a directory or starts a host.
+-    for (const dir of [dataDir, join(dataDir, "pi-host")]) {
+-      const stat = await lstat(dir);
+-      if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new ImportFailure("ADMIN_UNAVAILABLE");
+-    }
++    await assertOwnerOnlyDirectories(dataDir);
+     const path = adminSocketPath(dataDir);
+     await privateSocket(path);
+     const socket = createConnection(path);
+     socket.on("error", () => undefined); // the reader returns a sanitized failure
+-    const response = readCapped(socket, RESPONSE_MAX_BYTES, IMPORT_DEADLINE_MS + 5000);
++    const response = readCapped(socket, IMPORT_RESPONSE_MAX_BYTES, IMPORT_DEADLINE_MS + 5000);
+     socket.once("connect", () => socket.end(JSON.stringify({ op: "providers.import", payload })));
+     try {
+       const raw: unknown = JSON.parse(await response);
+       if (!raw || typeof raw !== "object" || !("ok" in raw)) throw new ImportFailure("ADMIN_UNAVAILABLE");
+       if (raw.ok === true && "summary" in raw && Object.keys(raw).length === 2) return { ok: true, summary: parseProviderImportSummary(raw.summary) };
+-      if (raw.ok === false && "code" in raw && Object.keys(raw).length === 2 && FAILURE_CODES.some((code) => code === raw.code)) return { ok: false, code: raw.code as ImportFailureCode };
++      if (raw.ok === false && "code" in raw && Object.keys(raw).length === 2 && FAILURE_CODES.some((code) => code === raw.code)) return { ok: false, code: raw.code as AdminFailureCode };
+       throw new ImportFailure("ADMIN_UNAVAILABLE");
+     } finally { socket.destroy(); }
+   } catch (error) {
+     throw new ImportFailure(error instanceof ImportFailure ? error.code : "ADMIN_UNAVAILABLE");
+   }
+ }
++
++export type AdminOperationResult = { ok: true; value: unknown } | { ok: false; code: AdminFailureCode };
++
++/**
++ * Client for the four removal ops.
++ *
++ * §7.2: a failure that happens *before* the frame is written is
++ * `ADMIN_UNAVAILABLE` (nothing was executed); anything after it is either the
++ * server's own code or `RESULT_UNKNOWN`/`RESPONSE_*` — never "not executed".
++ */
++export async function sendAdminOperation(dataDir: string, op: AdminOp, payload: unknown): Promise<AdminOperationResult> {
++  let written = false;
++  const writeOp = op === ADMIN_OP_REMOVE || op === ADMIN_OP_SYNC_FORGET;
++  try {
++    await assertOwnerOnlyDirectories(dataDir);
++    const path = adminSocketPath(dataDir);
++    await privateSocket(path);
++    const socket = createConnection(path);
++    socket.on("error", () => undefined);
++    const response = readCapped(socket, RESPONSE_MAX_BYTES[op], IMPORT_DEADLINE_MS + 5000);
++    socket.once("connect", () => {
++      written = true;
++      socket.end(JSON.stringify({ op, payload }));
++    });
++    try {
++      const raw: unknown = JSON.parse(await response);
++      return parseWireResponse(op, raw);
++    } finally { socket.destroy(); }
++  } catch (error) {
++    if (!written) throw new ImportFailure("ADMIN_UNAVAILABLE");
++    if (error instanceof ImportFailure) {
++      // (c) over-sized reply, (b) lost reply or body that is not parseable.
++      if (error.code === "PAYLOAD_TOO_LARGE") throw new ImportFailure("RESPONSE_TOO_LARGE");
++      if (error.code === "TIMEOUT") throw new ImportFailure("TIMEOUT");
++      throw new ImportFailure(writeOp ? "RESULT_UNKNOWN" : "RESPONSE_INVALID");
++    }
++    throw new ImportFailure(writeOp ? "RESULT_UNKNOWN" : "RESPONSE_INVALID");
++  }
++}
++
++function parseWireResponse(op: AdminOp, raw: unknown): AdminOperationResult {
++  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("ok" in raw)) throw new ImportFailure("RESPONSE_INVALID");
++  const response = raw as Record<string, unknown>;
++  if (response.ok === false) {
++    if (typeof response.code !== "string" || !FAILURE_CODES.some((code) => code === response.code)) throw new ImportFailure("RESPONSE_INVALID");
++    const allowed = op === ADMIN_OP_REMOVE && response.code === "DEFAULT_TRANSFER_ORDER_UNKNOWN"
++      ? ["ok", "code", "removed", "defaultTransfer"]
++      : ["ok", "code"];
++    if (Object.keys(response).some((key) => !allowed.includes(key))) throw new ImportFailure("RESPONSE_INVALID");
++    if (allowed.length === 4) {
++      const removed = response.removed as Record<string, unknown> | undefined;
++      const transfer = response.defaultTransfer as Record<string, unknown> | undefined;
++      if (!removed || typeof removed.providerId !== "string" || removed.secretCleared !== true) throw new ImportFailure("RESPONSE_INVALID");
++      if (!transfer || transfer.state !== "not_transferred" || transfer.reason !== "order_unknown" || transfer.orderingBasis !== "none") throw new ImportFailure("RESPONSE_INVALID");
++    }
++    return { ok: false, code: response.code as AdminFailureCode };
++  }
++  if (response.ok !== true) throw new ImportFailure("RESPONSE_INVALID");
++  const bodyKey = BODY_KEY[op];
++  if (Object.keys(response).length !== 2 || !(bodyKey in response)) throw new ImportFailure("RESPONSE_INVALID");
++  return { ok: true, value: parseBody(op, response[bodyKey]) };
++}
++
++function parseBody(op: AdminOp, body: unknown): unknown {
++  try {
++    switch (op) {
++      case ADMIN_OP_IMPORT: return parseProviderImportSummary(body);
++      case ADMIN_OP_REMOVE: return parseProviderRemoveSummary(body);
++      case ADMIN_OP_BINDING_STATUS: return parseProviderBindingStatus(body);
++      case ADMIN_OP_REMOVE_STATUS: return parseProviderRemoveStatus(body);
++      case ADMIN_OP_SYNC_FORGET: return parseProviderSyncForgetSummary(body);
++    }
++  } catch {
++    throw new ImportFailure("RESPONSE_INVALID");
++  }
++}
+diff --git a/apps/pi-host/src/cli-commands.ts b/apps/pi-host/src/cli-commands.ts
+new file mode 100644
+index 0000000..dee42fc
+--- /dev/null
++++ b/apps/pi-host/src/cli-commands.ts
+@@ -0,0 +1,122 @@
++import {
++  CLI_PROVIDER_BINDING_STATUS,
++  CLI_PROVIDER_IMPORT,
++  CLI_PROVIDER_REMOVE,
++  CLI_PROVIDER_REMOVE_STATUS,
++  CLI_PROVIDER_SYNC_FORGET,
++  FAILED_PREFIX,
++} from "@pi-desktop/shared";
++import { parseArgs, resolveConfig } from "./config.js";
++
++/**
++ * `pi-host [<subcommand>] [--data-dir <dir>] [--port <n>] [--pair] [--host-core <bin>] [--sidecar <entry>]`
++ *
++ * stdout carries exactly the lines a bootstrap script parses:
++ *   PI_HOST_READY {"hostId":..,"port":..,"version":..}
++ *   PI_HOST_PAIRING_TOKEN {"token":..,"expiresAt":..}   (with --pair)
++ *   PI_HOST_<OP> {..}                                   (subcommand results)
++ *   PI_HOST_FAILED {"code":..}                          (any subcommand failure)
++ * Everything else is structured stderr.
++ */
++
++export type CliIo = { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream };
++
++/**
++ * Every subcommand is one SSH exec: one bounded stdin line in, one stdout line
++ * out. The help block lists them one per line so a client can prove support by
++ * matching the whole token (§9.1); an unknown subcommand must never fall through
++ * to the Host start path (§9.2, T-06).
++ */
++const SUBCOMMANDS: ReadonlyArray<{ name: string; help: string; run: (argv: string[], io: CliIo) => Promise<number> }> = [
++  {
++    name: CLI_PROVIDER_IMPORT,
++    help: "import selected providers from SSH stdin",
++    run: async (argv, io) => (await import("./provider-import.js")).runProviderImport(argv, io),
++  },
++  {
++    name: CLI_PROVIDER_REMOVE,
++    help: "delete one provider from SSH stdin",
++    run: async (argv, io) => (await import("./provider-remove.js")).runProviderRemove(argv, io),
++  },
++  {
++    name: CLI_PROVIDER_BINDING_STATUS,
++    help: "report a session's model binding and its availability",
++    run: async (argv, io) => (await import("./provider-remove.js")).runProviderBindingStatus(argv, io),
++  },
++  {
++    name: CLI_PROVIDER_REMOVE_STATUS,
++    help: "report the observed removal state of one provider",
++    run: async (argv, io) => (await import("./provider-remove.js")).runProviderRemoveStatus(argv, io),
++  },
++  {
++    name: CLI_PROVIDER_SYNC_FORGET,
++    help: "drop the import receipt of one provider",
++    run: async (argv, io) => (await import("./provider-remove.js")).runProviderSyncForget(argv, io),
++  },
++];
++
++/** One line per subcommand; leading spaces are allowed, the token must match exactly. */
++export function helpText(): string {
++  return [
++    "pi-host — headless PI Agent Host (RACP-WS on loopback)",
++    ...SUBCOMMANDS.map((entry) => `  ${entry.name.padEnd(24)}${entry.help}`),
++    "",
++    "  --data-dir <dir>          host data directory (default ~/.pi-desktop)",
++    "  --port <n>                loopback port (default 0 = pick free)",
++    "  --host <addr>             bind address; loopback only",
++    "  --pair                    print a single-use pairing token at start",
++    "  --pairing-lifetime-ms <n> pairing token lifetime (default 600000)",
++    "  --host-core <path>        pi-desktop-host-core binary",
++    "  --sidecar <path>          agent sidecar entry",
++    "  --browse-root <dir>       folder-picker root (default home)",
++    "  --log-level <level>       info | warn | error",
++    "",
++  ].join("\n");
++}
++
++/**
++ * Resolves to the process exit code. A leading token that is not a flag is a
++ * subcommand: a known one runs, an unknown one is refused here — it must never
++ * reach `resolveConfig`, where it used to be skipped and started a Host.
++ */
++export async function runCli(argv: string[], io: CliIo = process): Promise<number> {
++  const first = argv[0];
++  if (first !== undefined && !first.startsWith("-")) {
++    const subcommand = SUBCOMMANDS.find((entry) => entry.name === first);
++    if (!subcommand) {
++      io.stdout.write(`${FAILED_PREFIX} ${JSON.stringify({ code: "INVALID_REQUEST" })}\n`);
++      return 1;
++    }
++    return subcommand.run(argv.slice(1), io);
++  }
++  const args = parseArgs(argv);
++  if (args.help === true) {
++    io.stdout.write(helpText());
++    return 0;
++  }
++  await startHost(args);
++  return 0;
++}
++
++async function startHost(args: ReturnType<typeof parseArgs>): Promise<void> {
++  const config = resolveConfig(args);
++  const { startPiHost } = await import("./app.js");
++  const app = await startPiHost(config);
++  process.stdout.write(`PI_HOST_READY ${JSON.stringify({ hostId: app.hostId, host: app.address.host, port: app.address.port, version: (await import("@pi-desktop/shared")).APP_VERSION })}\n`);
++  if (config.pair) {
++    const pairing = await app.issuePairingToken(config.pairingLifetimeMs);
++    process.stdout.write(`PI_HOST_PAIRING_TOKEN ${JSON.stringify(pairing)}\n`);
++  }
++  const stop = (signal: string) => {
++    app.log("info", "signal received", { signal });
++    void app.stop().finally(() => process.exit(0));
++  };
++  process.once("SIGINT", () => stop("SIGINT"));
++  process.once("SIGTERM", () => stop("SIGTERM"));
++  process.on("unhandledRejection", (reason) => {
++    app.log("error", "unhandled rejection", { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
++  });
++  process.on("uncaughtException", (error) => {
++    app.log("error", "uncaught exception", { error: error.stack ?? error.message });
++  });
++}
+diff --git a/apps/pi-host/src/cli.ts b/apps/pi-host/src/cli.ts
+index 9995f31..607de51 100644
+--- a/apps/pi-host/src/cli.ts
++++ b/apps/pi-host/src/cli.ts
+@@ -1,66 +1,17 @@
+ #!/usr/bin/env node
+-import { parseArgs, resolveConfig } from "./config.js";
++import { FAILED_PREFIX } from "@pi-desktop/shared";
++import { runCli } from "./cli-commands.js";
+ 
+ /**
+- * `pi-host [--data-dir <dir>] [--port <n>] [--pair] [--host-core <bin>] [--sidecar <entry>]`
+- *
+- * stdout carries exactly the lines a bootstrap script parses:
+- *   PI_HOST_READY {"hostId":..,"port":..,"version":..}
+- *   PI_HOST_PAIRING_TOKEN {"token":..,"expiresAt":..}   (with --pair)
+- * Everything else is structured stderr.
++ * Bin entry (`pi-host`). The command surface itself lives in `cli-commands.ts`
++ * so it can be exercised without starting a Host; this file only wires argv,
++ * the exit code and the single failure line a bootstrap script parses.
+  */
+-async function main(): Promise<void> {
+-  if (process.argv[2] === "provider-import") {
+-    const { runProviderImport } = await import("./provider-import.js");
+-    process.exitCode = await runProviderImport(process.argv.slice(3));
+-    return;
+-  }
+-  const args = parseArgs(process.argv.slice(2));
+-  if (args.help === true) {
+-    process.stdout.write(
+-      [
+-        "pi-host — headless PI Agent Host (RACP-WS on loopback)",
+-        "  provider-import          import selected providers from SSH stdin",
+-        "",
+-        "  --data-dir <dir>          host data directory (default ~/.pi-desktop)",
+-        "  --port <n>                loopback port (default 0 = pick free)",
+-        "  --host <addr>             bind address; loopback only",
+-        "  --pair                    print a single-use pairing token at start",
+-        "  --pairing-lifetime-ms <n> pairing token lifetime (default 600000)",
+-        "  --host-core <path>        pi-desktop-host-core binary",
+-        "  --sidecar <path>          agent sidecar entry",
+-        "  --browse-root <dir>       folder-picker root (default home)",
+-        "  --log-level <level>       info | warn | error",
+-        "",
+-      ].join("\n"),
+-    );
+-    return;
+-  }
+-  const config = resolveConfig(args);
+-  const { startPiHost } = await import("./app.js");
+-  const app = await startPiHost(config);
+-  process.stdout.write(`PI_HOST_READY ${JSON.stringify({ hostId: app.hostId, host: app.address.host, port: app.address.port, version: (await import("@pi-desktop/shared")).APP_VERSION })}\n`);
+-  if (config.pair) {
+-    const pairing = await app.issuePairingToken(config.pairingLifetimeMs);
+-    process.stdout.write(`PI_HOST_PAIRING_TOKEN ${JSON.stringify(pairing)}\n`);
+-  }
+-  const stop = (signal: string) => {
+-    app.log("info", "signal received", { signal });
+-    void app.stop().finally(() => process.exit(0));
+-  };
+-  process.once("SIGINT", () => stop("SIGINT"));
+-  process.once("SIGTERM", () => stop("SIGTERM"));
+-  process.on("unhandledRejection", (reason) => {
+-    app.log("error", "unhandled rejection", { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
+-  });
+-  process.on("uncaughtException", (error) => {
+-    app.log("error", "uncaught exception", { error: error.stack ?? error.message });
+-  });
+-}
+-
+-main().catch((error) => {
++runCli(process.argv.slice(2)).then((code) => {
++  process.exitCode = code;
++}).catch((error) => {
+   const code = (error as { errorCode?: string })?.errorCode ?? "INTERNAL";
+   process.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), level: "error", channel: "pi-host", message: "pi-host failed to start", data: { code, error: error instanceof Error ? error.message : String(error) } })}\n`);
+-  process.stdout.write(`PI_HOST_FAILED ${JSON.stringify({ code })}\n`);
++  process.stdout.write(`${FAILED_PREFIX} ${JSON.stringify({ code })}\n`);
+   process.exit(1);
+ });
+diff --git a/apps/pi-host/src/provider-import.ts b/apps/pi-host/src/provider-import.ts
+index 3554ec9..fe34508 100644
+--- a/apps/pi-host/src/provider-import.ts
++++ b/apps/pi-host/src/provider-import.ts
+@@ -10,15 +10,25 @@ import {
+ 
+ export type HostCaller = { call<T = unknown>(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> };
+ export const IMPORT_DEADLINE_MS = 30_000;
++/**
++ * §8 of the removal contract: the import enum keeps its six literals and the
++ * admin whitelist grows to the 21 codes the client must recognize, otherwise a
++ * valid failure would be reclassified as a protocol error.
++ */
+ export type ImportFailureCode = "INVALID_REQUEST" | "PAYLOAD_TOO_LARGE" | "ADMIN_UNAVAILABLE" | "ADMIN_BUSY" | "TIMEOUT" | "IMPORT_FAILED";
++export type AdminFailureCode = ImportFailureCode
++  | "NOT_FOUND" | "RESULT_UNKNOWN" | "REMOVE_FAILED" | "SECRET_NOT_CLEARED"
++  | "DEFAULT_TRANSFER_FAILED" | "DEFAULT_TRANSFER_UNKNOWN" | "DEFAULT_ORDER_UNDECIDABLE" | "DEFAULT_TRANSFER_ORDER_UNKNOWN"
++  | "PLUGIN_OWNED" | "SNAPSHOT_UNSTABLE" | "FORGET_FAILED" | "TARGET_STILL_EXISTS" | "UNSUPPORTED_OP"
++  | "RESPONSE_TOO_LARGE" | "RESPONSE_INVALID";
+ export class ImportFailure extends Error {
+-  readonly code: ImportFailureCode;
+-  constructor(code: ImportFailureCode) {
++  readonly code: AdminFailureCode;
++  constructor(code: AdminFailureCode) {
+     super(code);
+     this.code = code;
+   }
+ }
+-export function importFailureCode(error: unknown): ImportFailureCode {
++export function importFailureCode(error: unknown): AdminFailureCode {
+   return error instanceof ImportFailure ? error.code : "IMPORT_FAILED";
+ }
+ 
+@@ -84,9 +94,13 @@ export async function runProviderImport(
+ // disclose an API key, and contain neither provider configuration nor credentials.
+ // Pending receipts fence the ambiguous crash window between create and its reply.
+ // Changed imports create new rows; no import ever updates/deletes a remote row.
+-type Receipt = { providerId?: string; snapshot?: string };
+-type Journal = { version: 1; salt: string; receipts: Record<string, Receipt> };
++export type Receipt = { providerId?: string; snapshot?: string };
++export type Journal = { version: 1; salt: string; receipts: Record<string, Receipt> };
+ const JOURNAL_MAX_ENTRIES = 2048;
++/** The receipt journal read by both import and the removal contract (§2.4.3, §7.4). */
++export function journalPath(dataDir: string): string {
++  return join(dataDir, "pi-host", "provider-sync.json");
++}
+ function canonical(value: unknown): string {
+   return JSON.stringify(value, (_key, item: unknown) => {
+     if (item && typeof item === "object" && !Array.isArray(item)) {
+@@ -98,7 +112,7 @@ function canonical(value: unknown): string {
+ function snapshot(row: ProviderPublic): string {
+   return createHash("sha256").update(canonical(row)).digest("hex");
+ }
+-async function loadJournal(path: string): Promise<Journal> {
++export async function loadJournal(path: string): Promise<Journal> {
+   let file;
+   try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+   catch (error) {
+@@ -122,7 +136,7 @@ async function loadJournal(path: string): Promise<Journal> {
+     return raw as Journal;
+   } finally { await file.close(); }
+ }
+-async function saveJournal(path: string, journal: Journal): Promise<void> {
++export async function saveJournal(path: string, journal: Journal): Promise<void> {
+   const temp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+   const file = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+   try {
+@@ -141,7 +155,7 @@ async function saveJournal(path: string, journal: Journal): Promise<void> {
+ /** Called only under the admin socket's single-import admission fence. */
+ export async function importProviders(host: HostCaller, dataDir: string, input: ProviderImportPayload, signal: AbortSignal): Promise<ProviderImportSummary> {
+   const payload = parseProviderImportPayload(input);
+-  const path = join(dataDir, "pi-host", "provider-sync.json");
++  const path = journalPath(dataDir);
+   const journal = await loadJournal(path);
+   const summary: ProviderImportSummary = { imported: [], skipped: [], defaultSet: false };
+   const check = () => { if (signal.aborted) throw new ImportFailure("TIMEOUT"); };
+diff --git a/apps/pi-host/src/provider-remove.test.ts b/apps/pi-host/src/provider-remove.test.ts
+new file mode 100644
+index 0000000..7b01a05
+--- /dev/null
++++ b/apps/pi-host/src/provider-remove.test.ts
+@@ -0,0 +1,651 @@
++import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
++import { randomUUID } from "node:crypto";
++import { createConnection } from "node:net";
++import { mkdtemp, rm, writeFile, mkdir, readFile, lstat } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { Readable, Writable } from "node:stream";
++import {
++  ADMIN_OP_BINDING_STATUS,
++  ADMIN_OP_REMOVE,
++  ADMIN_MAX_BYTES,
++  BINDING_PREFIX,
++  REMOVE_STATUS_PREFIX,
++  FORGOTTEN_PREFIX,
++  REMOVED_PREFIX,
++  FAILED_PREFIX,
++  parseProviderBindingStatus,
++  parseProviderRemoveStatus,
++  type ProviderImportPayload,
++} from "@pi-desktop/shared";
++import { adminSocketPath, sendAdminOperation, startAdminSocket, type AdminSocket } from "./admin-socket.js";
++import { readCapped } from "./provider-import.js";
++import { runProviderBindingStatus, runProviderRemove, runProviderRemoveStatus, runProviderSyncForget } from "./provider-remove.js";
++import { helpText, runCli } from "./cli-commands.js";
++
++/**
++ * Command-level contract tests for `docs/api/ios-client-provider-remove-draft.md`
++ * (FROZEN 2026-11-03). Every test names the §12 case it covers; cases that need a
++ * real host-core binary, a real server or two architectures are listed in
++ * `server/README.md` instead of being faked here.
++ */
++
++const initialCwd = process.cwd();
++const directories: string[] = [];
++const servers: AdminSocket[] = [];
++beforeAll(() => { process.chdir(process.env.PI_SCRATCH_DIR ?? tmpdir()); });
++afterEach(async () => {
++  for (const server of servers.splice(0)) await server.close();
++  for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true });
++});
++afterAll(() => { process.chdir(initialCwd); });
++
++async function directory(): Promise<string> {
++  const dir = await mkdtemp(join(process.cwd(), "provider-remove-"));
++  directories.push(dir);
++  return dir;
++}
++
++type Row = {
++  id: string;
++  name: string;
++  enabled: boolean;
++  models: Array<{ id: string }>;
++  authKind: string;
++  hasSecret: boolean;
++  hasOauth?: boolean;
++  createdAt?: string;
++  defaultModelId?: string;
++  ownerPluginId?: string;
++};
++
++const MINUTE = "2026-01-01T00:00:00.000Z";
++
++function row(overrides: Partial<Row> = {}): Row {
++  return {
++    id: randomUUID(),
++    name: "provider",
++    enabled: true,
++    models: [{ id: "model-a" }],
++    authKind: "api_key",
++    hasSecret: true,
++    createdAt: MINUTE,
++    ...overrides,
++  };
++}
++
++class Host {
++  rows = new Map<string, Row>();
++  secrets = new Map<string, string>();
++  settings: Record<string, unknown> = {};
++  calls: Array<{ method: string; params: Record<string, unknown> }> = [];
++  session: Record<string, unknown> | null = { id: "ses_1", mode: "agent" };
++  sessionSequence: Array<Record<string, unknown> | null> = [];
++  deleteFailure?: unknown;
++  settingsFailure?: unknown;
++  listFailure?: unknown;
++  settingsSetFailure?: unknown;
++  keepSecret = false;
++  count(method: string): number {
++    return this.calls.filter((call) => call.method === method).length;
++  }
++  add(entity: Row, secret: string | null = "sk"): Row {
++    this.rows.set(entity.id, entity);
++    if (secret !== null) this.secrets.set(entity.id, secret);
++    return entity;
++  }
++  async call<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
++    this.calls.push({ method, params });
++    const id = String(params.id ?? "");
++    switch (method) {
++      case "providers.get": return { provider: structuredClone(this.rows.get(id) ?? null) } as T;
++      case "providers.list": {
++        if (this.listFailure) throw this.listFailure;
++        return { providers: structuredClone([...this.rows.values()]) } as T;
++      }
++      case "providers.create": {
++        const { secretValue, ...input } = params;
++        const created = row({ id: randomUUID(), name: String(input.name ?? "provider") });
++        this.rows.set(created.id, created);
++        if (typeof secretValue === "string") this.secrets.set(created.id, secretValue);
++        return { provider: structuredClone(created) } as T;
++      }
++      case "providers.getSecret": return { value: this.secrets.get(id) ?? null } as T;
++      case "providers.delete": {
++        if (this.deleteFailure) throw this.deleteFailure;
++        this.rows.delete(id);
++        if (!this.keepSecret) this.secrets.delete(id);
++        return { ok: true } as T;
++      }
++      case "settings.get": {
++        if (this.settingsFailure) throw this.settingsFailure;
++        return { ...this.settings } as T;
++      }
++      case "settings.set": {
++        if (this.settingsSetFailure) throw this.settingsSetFailure;
++        Object.assign(this.settings, params);
++        return { ok: true } as T;
++      }
++      case "session.get": {
++        const next = this.sessionSequence.length > 0 ? this.sessionSequence.shift() : this.session;
++        return { session: structuredClone(next ?? null) } as T;
++      }
++      default: throw new Error(`unexpected RPC ${method}`);
++    }
++  }
++}
++
++async function fixture(host = new Host()): Promise<{ dataDir: string; host: Host }> {
++  const dataDir = await directory();
++  const server = await startAdminSocket({ dataDir, getHost: () => host, timeoutMs: 5_000 });
++  servers.push(server);
++  return { dataDir, host };
++}
++
++type Runner = (argv: string[], io: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream }) => Promise<number>;
++
++async function run(runner: Runner, dataDir: string, payload: unknown): Promise<{ code: number; stdout: string }> {
++  let stdout = "";
++  const code = await runner(["--data-dir", dataDir], {
++    stdin: Readable.from([typeof payload === "string" ? payload : JSON.stringify(payload)]),
++    stdout: new Writable({ write(chunk, _encoding, done) { stdout += String(chunk); done(); } }),
++  });
++  return { code, stdout };
++}
++
++function body(stdout: string, prefix: string): Record<string, unknown> {
++  expect(stdout.startsWith(`${prefix} `)).toBe(true);
++  return JSON.parse(stdout.slice(prefix.length + 1)) as Record<string, unknown>;
++}
++
++describe("providers.remove over the owner-only admin socket", () => {
++  it("T-01/T-02/T-55 deletes once, then reports `absent` without deleting again", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row({ name: "target" }));
++    const keep = host.add(row({ name: "keep" }));
++
++    const first = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(first.code).toBe(0);
++    const removed = body(first.stdout, REMOVED_PREFIX);
++    expect(removed).toEqual({ providerId: target.id, effect: "deleted", secretCleared: true, remaining: 1, remainingEligible: 1 });
++    expect(host.count("providers.delete")).toBe(1);
++    expect(host.rows.has(keep.id)).toBe(true);
++
++    const second = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(second.code).toBe(0);
++    expect(body(second.stdout, REMOVED_PREFIX)).toEqual({ providerId: target.id, effect: "absent", secretCleared: true, remaining: 1, remainingEligible: 1 });
++    // Idempotent short circuit: no second delete, and never `NOT_FOUND`.
++    expect(host.count("providers.delete")).toBe(1);
++    expect(second.stdout).not.toContain("NOT_FOUND");
++  });
++
++  it("T-03 reports an unknown id as `absent` and issues no delete", async () => {
++    const { dataDir, host } = await fixture();
++    host.add(row());
++    const unknown = randomUUID();
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: unknown });
++    expect(result.code).toBe(0);
++    expect(body(result.stdout, REMOVED_PREFIX)).toMatchObject({ providerId: unknown, effect: "absent" });
++    expect(host.count("providers.delete")).toBe(0);
++  });
++
++  it("T-07 rejects every malformed payload without echoing it", async () => {
++    const { dataDir, host } = await fixture();
++    const good = row();
++    host.add(good);
++    for (const payload of [
++      { version: 2, providerId: good.id },
++      { providerId: good.id },
++      // A compact unknown fourth key stays inside the 111-byte envelope ceiling,
++      // so the strict parser (not the size check) is what rejects it.
++      { version: 1, providerId: good.id, f: 0 },
++      { version: 1, providerId: "not-a-uuid" },
++    ]) {
++      const result = await run(runProviderRemove, dataDir, payload);
++      expect(result.code).toBe(1);
++      expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "INVALID_REQUEST" });
++      expect(result.stdout).not.toContain(good.id);
++    }
++    // `force:true` would exceed the frozen 111-byte envelope before the parser runs:
++    // both outcomes are "not executed" (§7.2 (a)), and neither reaches the host.
++    const tooLarge = await run(runProviderRemove, dataDir, { version: 1, providerId: good.id, force: true });
++    expect(body(tooLarge.stdout, FAILED_PREFIX)).toEqual({ code: "PAYLOAD_TOO_LARGE" });
++    expect(host.calls).toEqual([]);
++  });
++
++  it("T-39 rejects a misspelled op instead of treating it as a capability answer", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    const path = adminSocketPath(dataDir);
++    for (const op of ["providers.binding-status", "providers.binding_status", "providers.remove_status", "providers.bindingStatus ", "provider.bindingStatus"]) {
++      expect(await rawRequest(path, JSON.stringify({ op, payload: { version: 1, providerId: target.id } }))).toEqual({ ok: false, code: "INVALID_REQUEST" });
++    }
++    expect(host.calls).toEqual([]);
++  });
++
++  it("T-45 refuses a plugin-owned row before any delete or settings write", async () => {
++    const { dataDir, host } = await fixture();
++    const owned = host.add(row({ ownerPluginId: "acme.plugin" }));
++    host.settings = { defaultProviderId: owned.id };
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: owned.id });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "PLUGIN_OWNED" });
++    expect(host.count("providers.delete")).toBe(0);
++    expect(host.count("settings.set")).toBe(0);
++  });
++
++  it("T-11 moves the default to the earliest eligible candidate and ties by id", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row({ createdAt: "2026-03-01T00:00:00.000Z" }));
++    const later = host.add(row({ createdAt: "2026-02-01T00:00:00.000Z" }));
++    const earliest = host.add(row({ createdAt: "2026-01-15T00:00:00.000Z" }));
++    host.settings = { defaultProviderId: target.id, defaultModelId: "model-a" };
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(result.code).toBe(0);
++    expect(body(result.stdout, REMOVED_PREFIX)).toMatchObject({
++      effect: "deleted",
++      defaultMoved: { to: { providerId: earliest.id, modelId: "model-a" }, orderingBasis: "createdAt" },
++      remaining: 2,
++      remainingEligible: 2,
++    });
++    expect(host.settings.defaultProviderId).toBe(earliest.id);
++    expect(host.settings.defaultModelId).toBe("model-a");
++    expect(later.id).not.toBe(earliest.id);
++  });
++
++  it("T-11 breaks an equal createdAt by id byte order", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row({ createdAt: "2026-05-01T00:00:00.000Z" }));
++    const second = host.add(row({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", createdAt: MINUTE }));
++    const first = host.add(row({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", createdAt: MINUTE }));
++    host.settings = { defaultProviderId: target.id };
++    const removed = body((await run(runProviderRemove, dataDir, { version: 1, providerId: target.id })).stdout, REMOVED_PREFIX);
++    expect(removed.defaultMoved).toEqual({ to: { providerId: first.id, modelId: "model-a" }, orderingBasis: "createdAt" });
++    expect(second.id > first.id).toBe(true);
++  });
++
++  it("T-12 leaves settings untouched when no remaining provider is eligible", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    host.add(row({ enabled: false }));
++    host.add(row({ models: [] }));
++    host.add(row({ hasSecret: false }));
++    host.add(row({ authKind: "oauth", hasOauth: true }));
++    host.settings = { defaultProviderId: target.id };
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(result.code).toBe(0);
++    expect(body(result.stdout, REMOVED_PREFIX)).toEqual({
++      providerId: target.id,
++      effect: "deleted",
++      secretCleared: true,
++      defaultMoved: { to: null, reason: "no_eligible_candidate", orderingBasis: "none" },
++      remaining: 4,
++      remainingEligible: 0,
++    });
++    expect(host.count("settings.set")).toBe(0);
++    expect(host.settings.defaultProviderId).toBe(target.id);
++  });
++
++  it("T-13 reports the empty state without clearing settings", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    host.settings = { defaultProviderId: target.id };
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(body(result.stdout, REMOVED_PREFIX)).toMatchObject({
++      defaultMoved: { to: null, reason: "no_remaining", orderingBasis: "none" },
++      remaining: 0,
++      remainingEligible: 0,
++    });
++    expect(host.count("settings.set")).toBe(0);
++  });
++
++  it("T-44 skips a candidate whose hasSecret and getSecret disagree", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row({ createdAt: "2026-04-01T00:00:00.000Z" }));
++    // hasSecret says yes, the real secret is gone: never a transfer target (§5.7).
++    const stale = host.add(row({ createdAt: MINUTE }), null);
++    const good = host.add(row({ createdAt: "2026-02-01T00:00:00.000Z" }));
++    host.settings = { defaultProviderId: target.id };
++    const removed = body((await run(runProviderRemove, dataDir, { version: 1, providerId: target.id })).stdout, REMOVED_PREFIX);
++    expect(removed.defaultMoved).toEqual({ to: { providerId: good.id, modelId: "model-a" }, orderingBasis: "createdAt" });
++    expect(stale.id).not.toBe(good.id);
++  });
++
++  it("T-17 reports SECRET_NOT_CLEARED and never retries the delete", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    host.keepSecret = true;
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "SECRET_NOT_CLEARED" });
++    expect(host.count("providers.delete")).toBe(1);
++  });
++
++  it("T-15/T-51 keeps a pre-write failure in the executed=false class", async () => {
++    const host = new Host();
++    const dataDir = await directory();
++    const server = await startAdminSocket({ dataDir, getHost: () => null, timeoutMs: 5_000 });
++    servers.push(server);
++    const target = host.add(row());
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "ADMIN_UNAVAILABLE" });
++  });
++
++  it("T-16/T-19 reports RESULT_UNKNOWN when the reply is lost, and REMOVE_FAILED for a peer error", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    host.deleteFailure = new Error("host RPC timeout: providers.delete");
++    const unknown = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(body(unknown.stdout, FAILED_PREFIX)).toEqual({ code: "RESULT_UNKNOWN" });
++    // The only allowed follow-up is a read: never a second write (§6.3, §7.6.1).
++    expect(host.count("providers.delete")).toBe(1);
++    expect(host.count("settings.set")).toBe(0);
++
++    host.deleteFailure = Object.assign(new Error("refused"), { errorCode: "INVALID_PARAMS" });
++    const failed = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(body(failed.stdout, FAILED_PREFIX)).toEqual({ code: "REMOVE_FAILED" });
++  });
++
++  it("T-46 refuses a default transfer whose candidates cannot be ordered", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    host.add(row({ createdAt: "not-a-time" }));
++    host.settings = { defaultProviderId: target.id };
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "DEFAULT_ORDER_UNDECIDABLE" });
++    expect(host.count("providers.delete")).toBe(0);
++    expect(host.count("settings.set")).toBe(0);
++  });
++
++  it("T-18 reports DEFAULT_TRANSFER_FAILED after the delete already happened", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row({ createdAt: "2026-04-01T00:00:00.000Z" }));
++    host.add(row({ createdAt: MINUTE }));
++    host.settings = { defaultProviderId: target.id };
++    // Only the transfer write fails; the delete and the self-check already succeeded.
++    host.settingsSetFailure = Object.assign(new Error("rejected"), { errorCode: "INVALID_PARAMS" });
++    const result = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "DEFAULT_TRANSFER_FAILED" });
++    expect(host.rows.has(target.id)).toBe(false);
++    expect(host.count("providers.delete")).toBe(1);
++  });
++
++  it("T-50 accepts the exact envelope ceiling and rejects one byte more", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    const path = adminSocketPath(dataDir);
++    const frame = JSON.stringify({ op: ADMIN_OP_REMOVE, payload: { version: 1, providerId: target.id } });
++    // The legal minimum frame is 101 bytes and must never be killed by the 73-byte stdin cap.
++    expect(Buffer.byteLength(frame)).toBe(101);
++    expect(await rawRequest(path, `${frame}${" ".repeat(111 - Buffer.byteLength(frame))}`)).toMatchObject({ ok: true });
++    expect(await rawRequest(path, `${frame}${" ".repeat(112 - Buffer.byteLength(frame))}`)).toEqual({ ok: false, code: "PAYLOAD_TOO_LARGE" });
++
++    // A legal large `providers.import` frame (> every new op ceiling) still goes through.
++    const long = "k".repeat(2_000);
++    const payload: ProviderImportPayload = {
++      version: 1,
++      providers: [{
++        sourceId: "source-1",
++        input: {
++          name: "imported", vendorKey: "custom", type: "openai_compatible", protocol: "openai_compatible",
++          baseUrl: "https://models.example/v1", authKind: "api_key", secretValue: long,
++          models: [{ id: "first", contextWindow: 10_000, maxTokens: 1_000, thinkingLevels: ["off"], defaultThinkingLevel: null }],
++        },
++      }],
++    };
++    const imported = await rawRequest(path, JSON.stringify({ op: "providers.import", payload }));
++    expect(Buffer.byteLength(JSON.stringify({ op: "providers.import", payload }))).toBeGreaterThan(1_000);
++    expect(imported).toMatchObject({ ok: true });
++  });
++});
++
++describe("providers.bindingStatus", () => {
++  const binding = (overrides: Record<string, unknown> = {}) => ({
++    sessionId: "ses_1",
++    pinned: { providerId: "p1", modelId: "model-a", thinkingLevel: null },
++    effective: { providerId: "p1", modelId: "model-a", providerSource: "pin", modelSource: "session" },
++    available: true,
++    unavailableReason: null,
++    checks: { providerKnown: true, providerEnabled: true, modelsEmpty: false, modelPresent: true, secretPresent: true, oauth: false, pluginOwned: false, secretMismatch: false },
++    unknownInputs: [],
++    consistency: { reads: 2, snapshotStable: true },
++    isDefault: false,
++    revision: null,
++    sessionUpdatedAt: null,
++    maxAgeMs: 10_000,
++    observedAt: "2026-11-01T08:00:01.120Z",
++    ...overrides,
++  });
++
++  it("T-49 accepts both sessionId bounds and rejects every strict-schema violation", () => {
++    expect(parseProviderBindingStatus(binding()).available).toBe(true);
++    const longId = "a".repeat(128);
++    const wide = binding({ sessionId: longId, available: null, unavailableReason: "unknown", unknownInputs: ["providers.list"] });
++    expect(Buffer.byteLength(JSON.stringify(wide))).toBeLessThanOrEqual(4_096);
++    expect(parseProviderBindingStatus(wide).unknownInputs).toEqual(["providers.list"]);
++
++    const { maxAgeMs: _dropped, ...missingMaxAge } = binding();
++    expect(() => parseProviderBindingStatus(missingMaxAge)).toThrow();
++    expect(() => parseProviderBindingStatus(binding({ available: "true" }))).toThrow();
++    expect(() => parseProviderBindingStatus({ ...binding(), exists: true })).toThrow();
++    expect(() => parseProviderBindingStatus(binding({ unavailableReason: "no_binding" }))).toThrow();
++  });
++
++  it("T-47 answers S1/S2/S5/S10/S11/S12 and the no-candidate case", async () => {
++    const cases: Array<{ name: string; row: Row | null; secret: string | null; expected: { available: boolean | null; reason: string | null; checks: Record<string, boolean | null> } }> = [
++      { name: "S1", row: row(), secret: "sk", expected: { available: true, reason: null, checks: { providerKnown: true, providerEnabled: true, modelsEmpty: false, modelPresent: true, secretPresent: true, oauth: false, pluginOwned: false, secretMismatch: false } } },
++      { name: "S2", row: null, secret: null, expected: { available: false, reason: "provider_missing", checks: { providerKnown: false, providerEnabled: null, modelsEmpty: null, modelPresent: null, secretPresent: null, oauth: null, pluginOwned: null, secretMismatch: null } } },
++      { name: "S5", row: row({ hasSecret: false }), secret: null, expected: { available: false, reason: "secret_missing", checks: { providerKnown: true, providerEnabled: true, modelsEmpty: false, modelPresent: true, secretPresent: false, oauth: false, pluginOwned: false, secretMismatch: false } } },
++      { name: "S10", row: row({ models: [] }), secret: "sk", expected: { available: false, reason: "models_empty", checks: { providerKnown: true, providerEnabled: true, modelsEmpty: true, modelPresent: null, secretPresent: null, oauth: false, pluginOwned: false, secretMismatch: false } } },
++      { name: "S11", row: row(), secret: "sk", expected: { available: false, reason: "model_removed", checks: { providerKnown: true, providerEnabled: true, modelsEmpty: false, modelPresent: false, secretPresent: null, oauth: false, pluginOwned: false, secretMismatch: false } } },
++      { name: "S12", row: row({ enabled: false }), secret: "sk", expected: { available: false, reason: "provider_disabled", checks: { providerKnown: true, providerEnabled: false, modelsEmpty: null, modelPresent: null, secretPresent: null, oauth: null, pluginOwned: false, secretMismatch: false } } },
++    ];
++    for (const testCase of cases) {
++      const host = new Host();
++      const entity = testCase.row ?? row({ id: "p1" });
++      if (testCase.row) host.add(entity, testCase.secret);
++      const { dataDir } = await fixture(host);
++      const session = testCase.name === "S11" ? { id: "ses_1", providerId: entity.id, modelId: "gone" } : { id: "ses_1", providerId: entity.id, modelId: "model-a" };
++      host.session = session;
++      const result = await run(runProviderBindingStatus, dataDir, { version: 1, sessionId: "ses_1" });
++      expect(result.code, `${testCase.name} exit`).toBe(0);
++      const parsed = body(result.stdout, BINDING_PREFIX);
++      expect(parsed.available, testCase.name).toBe(testCase.expected.available);
++      expect(parsed.unavailableReason, testCase.name).toBe(testCase.expected.reason);
++      expect(parsed.checks, testCase.name).toMatchObject(testCase.expected.checks);
++      expect(parsed.consistency, testCase.name).toEqual({ reads: 2, snapshotStable: true });
++    }
++  });
++
++  it("T-47 reports no_candidate for an unbound session without eligible providers", async () => {
++    const host = new Host();
++    host.add(row({ enabled: false }));
++    const { dataDir } = await fixture(host);
++    host.session = { id: "ses_1" };
++    const parsed = body((await run(runProviderBindingStatus, dataDir, { version: 1, sessionId: "ses_1" })).stdout, BINDING_PREFIX);
++    expect(parsed.available).toBe(false);
++    expect(parsed.unavailableReason).toBe("no_candidate");
++    expect(parsed.checks).toMatchObject({ providerKnown: null, providerEnabled: null });
++  });
++
++  it("T-47 reports an unknown input as available:null with the input named", async () => {
++    const host = new Host();
++    host.add(row({ id: "p1" }));
++    host.session = { id: "ses_1", providerId: "p1", modelId: "model-a" };
++    // A read-only op must never answer from a partial read.
++    host.listFailure = new TypeError("network down");
++    const { dataDir } = await fixture(host);
++    const parsed = body((await run(runProviderBindingStatus, dataDir, { version: 1, sessionId: "ses_1" })).stdout, BINDING_PREFIX);
++    expect(parsed.available).toBeNull();
++    expect(parsed.unavailableReason).toBe("unknown");
++    expect(parsed.unknownInputs).toContain("providers.list");
++  });
++
++  it("T-40 reports SNAPSHOT_UNSTABLE when the two reads disagree", async () => {
++    const host = new Host();
++    const first = host.add(row());
++    const second = host.add(row());
++    const { dataDir } = await fixture(host);
++    host.session = { id: "ses_1", providerId: first.id, modelId: "model-a" };
++    host.sessionSequence = [
++      { id: "ses_1", providerId: first.id, modelId: "model-a" },
++      { id: "ses_1", providerId: second.id, modelId: "model-a" },
++      { id: "ses_1", providerId: first.id, modelId: "model-a" },
++    ];
++    const result = await run(runProviderBindingStatus, dataDir, { version: 1, sessionId: "ses_1" });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "SNAPSHOT_UNSTABLE" });
++    expect(host.count("session.get")).toBe(3);
++  });
++
++  it("reports NOT_FOUND for an unknown session and never answers `available`", async () => {
++    const host = new Host();
++    const { dataDir } = await fixture(host);
++    host.session = null;
++    const result = await run(runProviderBindingStatus, dataDir, { version: 1, sessionId: "ses_missing" });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "NOT_FOUND" });
++  });
++});
++
++describe("providers.removeStatus", () => {
++  it("T-20/T-56 reports observations only", async () => {
++    const { dataDir, host } = await fixture();
++    const target = randomUUID();
++    host.settings = { defaultProviderId: target };
++    const result = await run(runProviderRemoveStatus, dataDir, { version: 1, providerId: target });
++    expect(result.code).toBe(0);
++    const status = body(result.stdout, REMOVE_STATUS_PREFIX);
++    expect(status).toEqual({
++      providerId: target,
++      recordPresent: false,
++      secretPresent: false,
++      defaultBinding: { isDefault: true, defaultProviderId: target },
++      enabled: null,
++      modelCount: null,
++      receiptPresent: false,
++      slotFree: true,
++      writeOrderingProof: "unproven",
++      boundSessionCount: null,
++      maxAgeMs: 10_000,
++      observedAt: expect.any(String),
++    });
++    // `exists` is gone; the schema rejects it.
++    expect(() => parseProviderRemoveStatus({ ...status, exists: false })).toThrow();
++  });
++
++  it("T-41 does not treat a repeated delete as evidence, and rejects `force` in the payload", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    host.deleteFailure = new Error("host RPC timeout: providers.delete");
++    const timedOut = await run(runProviderRemove, dataDir, { version: 1, providerId: target.id });
++    expect(body(timedOut.stdout, FAILED_PREFIX)).toEqual({ code: "RESULT_UNKNOWN" });
++    const status = body((await run(runProviderRemoveStatus, dataDir, { version: 1, providerId: target.id })).stdout, REMOVE_STATUS_PREFIX);
++    // The row is still there: the observation cannot be read as "deleted".
++    expect(status.recordPresent).toBe(true);
++    expect(host.count("providers.delete")).toBe(1);
++
++    // §7.4.3: `force` is not a contract field. A compact fourth key meets the
++    // parser (`INVALID_REQUEST`); the literal `force:true` spelling already breaks
++    // the frozen 165-byte envelope (`PAYLOAD_TOO_LARGE`) — neither is executable.
++    const forced = await run(runProviderSyncForget, dataDir, { version: 1, providerId: target.id, confirm: target.id, f: 0 });
++    expect(forced.code).toBe(1);
++    expect(body(forced.stdout, FAILED_PREFIX)).toEqual({ code: "INVALID_REQUEST" });
++    const wide = await run(runProviderSyncForget, dataDir, { version: 1, providerId: target.id, confirm: target.id, force: true });
++    expect(body(wide.stdout, FAILED_PREFIX)).toEqual({ code: "PAYLOAD_TOO_LARGE" });
++  });
++});
++
++describe("providers.sync.forget", () => {
++  const journal = (providerId: string) => JSON.stringify({
++    version: 1,
++    salt: "a".repeat(64),
++    receipts: { ["b".repeat(64)]: { providerId, snapshot: "c".repeat(64) } },
++  });
++
++  it("T-23/T-42 removes the receipt once and is idempotent afterwards", async () => {
++    const { dataDir, host } = await fixture();
++    const target = randomUUID();
++    await mkdir(join(dataDir, "pi-host"), { recursive: true, mode: 0o700 });
++    await writeFile(join(dataDir, "pi-host/provider-sync.json"), journal(target), { mode: 0o600 });
++    const first = await run(runProviderSyncForget, dataDir, { version: 1, providerId: target, confirm: target });
++    expect(first.code).toBe(0);
++    expect(body(first.stdout, FORGOTTEN_PREFIX)).toEqual({ providerId: target, removedEntries: 1, remainingEntries: 0, receiptState: "absent" });
++    const after = await readFile(join(dataDir, "pi-host/provider-sync.json"), "utf8");
++    const second = await run(runProviderSyncForget, dataDir, { version: 1, providerId: target, confirm: target });
++    expect(second.code).toBe(0);
++    expect(body(second.stdout, FORGOTTEN_PREFIX)).toEqual({ providerId: target, removedEntries: 0, remainingEntries: 0, receiptState: "absent" });
++    // The second call must not rewrite the file.
++    expect(await readFile(join(dataDir, "pi-host/provider-sync.json"), "utf8")).toBe(after);
++    expect(host.count("providers.delete")).toBe(0);
++    expect(host.count("settings.set")).toBe(0);
++  });
++
++  it("T-24 refuses to forget the receipt of a provider that still exists", async () => {
++    const { dataDir, host } = await fixture();
++    const target = host.add(row());
++    await mkdir(join(dataDir, "pi-host"), { recursive: true, mode: 0o700 });
++    const before = journal(target.id);
++    await writeFile(join(dataDir, "pi-host/provider-sync.json"), before, { mode: 0o600 });
++    const result = await run(runProviderSyncForget, dataDir, { version: 1, providerId: target.id, confirm: target.id });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "TARGET_STILL_EXISTS" });
++    expect(await readFile(join(dataDir, "pi-host/provider-sync.json"), "utf8")).toBe(before);
++  });
++
++  it("T-07 rejects a confirm that does not echo the id", async () => {
++    const { dataDir, host } = await fixture();
++    const target = randomUUID();
++    const result = await run(runProviderSyncForget, dataDir, { version: 1, providerId: target, confirm: randomUUID() });
++    expect(result.code).toBe(1);
++    expect(body(result.stdout, FAILED_PREFIX)).toEqual({ code: "INVALID_REQUEST" });
++    expect(host.calls).toEqual([]);
++  });
++});
++
++describe("CLI surface (§9.1, T-06)", () => {
++  it("declares every subcommand as a whole token on its own help line", () => {
++    const lines = helpText().split("\n").map((line) => line.trim().split(/\s+/)[0]);
++    for (const name of ["provider-import", "provider-remove", "provider-binding-status", "provider-remove-status", "provider-sync-forget"]) {
++      expect(lines).toContain(name);
++    }
++    // A whole-token match: `provider-remove` must not answer for `provider-remove-status`.
++    expect(lines).not.toContain("provider-remove-status-typo");
++  });
++
++  it("refuses an unknown subcommand immediately instead of starting a Host", async () => {
++    const dataDir = await directory();
++    for (const argv of [["definitely-not-a-subcommand", "--data-dir", dataDir], ["provider-remove-typo", "--data-dir", dataDir]]) {
++      let stdout = "";
++      const code = await runCli(argv, { stdin: Readable.from([]), stdout: new Writable({ write(chunk, _encoding, done) { stdout += String(chunk); done(); } }) });
++      expect(code).toBe(1);
++      expect(stdout).toBe(`${FAILED_PREFIX} {"code":"INVALID_REQUEST"}\n`);
++    }
++    // Nothing was created: no admin socket, no lock, no data directory.
++    await expect(lstat(join(dataDir, "pi-host"))).rejects.toMatchObject({ code: "ENOENT" });
++  });
++});
++
++async function rawRequest(path: string, body: string): Promise<unknown> {
++  const socket = createConnection(path);
++  socket.on("error", () => undefined);
++  const response = readCapped(socket, ADMIN_MAX_BYTES, 5_000);
++  socket.once("connect", () => socket.end(body));
++  try {
++    return JSON.parse(await response);
++  } finally {
++    socket.destroy();
++  }
++}
++
++describe("authored admin op constants", () => {
++  it("keeps the read op reachable and the import op untouched", async () => {
++    const { dataDir, host } = await fixture();
++    host.add(row({ id: "p1" }));
++    host.session = { id: "ses_1", providerId: "p1", modelId: "model-a" };
++    const direct = await sendAdminOperation(dataDir, ADMIN_OP_BINDING_STATUS, { version: 1, sessionId: "ses_1" });
++    expect(direct.ok).toBe(true);
++  });
++});
+diff --git a/apps/pi-host/src/provider-remove.ts b/apps/pi-host/src/provider-remove.ts
+new file mode 100644
+index 0000000..6dc0181
+--- /dev/null
++++ b/apps/pi-host/src/provider-remove.ts
+@@ -0,0 +1,678 @@
++import { homedir } from "node:os";
++import { join, resolve } from "node:path";
++
++import {
++  ADMIN_OP_BINDING_STATUS,
++  ADMIN_OP_REMOVE,
++  ADMIN_OP_REMOVE_STATUS,
++  ADMIN_OP_SYNC_FORGET,
++  BINDING_PREFIX,
++  BINDING_STATUS_STDIN_MAX_BYTES,
++  FAILED_PREFIX,
++  FORGOTTEN_PREFIX,
++  FORGET_STDIN_MAX_BYTES,
++  REMOVED_PREFIX,
++  REMOVE_STATUS_PREFIX,
++  REMOVE_STDIN_MAX_BYTES,
++  STATUS_MAX_AGE_MS,
++  candidateModelId,
++  isEligibleCandidate,
++  isRpcTimeoutError,
++  orderEligibleCandidates,
++  parseProviderBindingStatusPayload,
++  parseProviderRemovePayload,
++  parseProviderSyncForgetPayload,
++  type DefaultMoved,
++  type ProviderBindingEffective,
++  type ProviderBindingStatus,
++  type ProviderCandidateRow,
++  type ProviderRemovePayload,
++  type ProviderRemoveStatus,
++  type ProviderRemoveSummary,
++  type ProviderSyncForgetPayload,
++  type ProviderSyncForgetSummary,
++} from "@pi-desktop/shared";
++import {
++  ImportFailure,
++  importFailureCode,
++  journalPath,
++  loadJournal,
++  readCapped,
++  saveJournal,
++  type AdminFailureCode,
++  type HostCaller,
++} from "./provider-import.js";
++import type { AdminOp } from "./admin-socket.js";
++
++/** The row shape this increment reads: `providers.list` / `providers.get`, 15 measured fields. */
++export type ProviderRow = ProviderCandidateRow & { ownerPluginId?: string };
++
++export type AdminOperationContext = { signal: AbortSignal; slotFree: boolean };
++
++/** Success carries exactly one body key; a failure carries `code` only (§2.4.4, §7.2). */
++export type RemoveOutcome =
++  | { ok: true; removed: ProviderRemoveSummary }
++  | {
++      ok: false;
++      code: AdminFailureCode;
++      /** §4.2/§8: `DEFAULT_TRANSFER_ORDER_UNKNOWN` also reports what did happen. */
++      removed?: { providerId: string; secretCleared: true };
++      defaultTransfer?: { state: "not_transferred"; reason: "order_unknown"; orderingBasis: "none" };
++    };
++export type ForgetOutcome = { ok: true; forgotten: ProviderSyncForgetSummary } | { ok: false; code: AdminFailureCode };
++export type BindingOutcome = { ok: true; binding: ProviderBindingStatus } | { ok: false; code: AdminFailureCode };
++export type RemoveStatusOutcome = { ok: true; status: ProviderRemoveStatus } | { ok: false; code: AdminFailureCode };
++
++/* --------------------------------------------------------------- host reads */
++
++function check(signal: AbortSignal): void {
++  if (signal.aborted) throw new ImportFailure("TIMEOUT");
++}
++
++function isPluginOwned(row: ProviderRow | null): boolean {
++  return Boolean(row && typeof row.ownerPluginId === "string" && row.ownerPluginId.length > 0);
++}
++
++/** `providers.get` returns `{provider:null}` for a missing row; that is not an error (§2.4.1a). */
++async function readRow(host: HostCaller, id: string, signal: AbortSignal): Promise<ProviderRow | null> {
++  const result = await host.call<{ provider?: ProviderRow | null }>("providers.get", { id });
++  check(signal);
++  return result?.provider ?? null;
++}
++
++/**
++ * The only secret operation this increment allows is the emptiness check (§5.7):
++ * the value is reduced to a boolean and dropped on the same statement.
++ */
++async function readSecretPresence(host: HostCaller, id: string, signal: AbortSignal): Promise<boolean> {
++  const result = await host.call<{ value?: string | null }>("providers.getSecret", { id });
++  check(signal);
++  return typeof result?.value === "string" && result.value.length > 0;
++}
++
++type SettingsSnapshot = { defaultProviderId: string | null; defaultModelId: string | null };
++async function readSettings(host: HostCaller, signal: AbortSignal): Promise<SettingsSnapshot> {
++  const settings = await host.call<Record<string, unknown>>("settings.get");
++  check(signal);
++  // A missing key means "not set"; it is never an empty string (§4.3).
++  const providerId = typeof settings?.defaultProviderId === "string" && settings.defaultProviderId.length > 0 ? settings.defaultProviderId : null;
++  const modelId = typeof settings?.defaultModelId === "string" && settings.defaultModelId.length > 0 ? settings.defaultModelId : null;
++  return { defaultProviderId: providerId, defaultModelId: modelId };
++}
++
++async function readRows(host: HostCaller, signal: AbortSignal): Promise<ProviderRow[]> {
++  const result = await host.call<{ providers?: ProviderRow[] }>("providers.list", { includeDisabled: true });
++  check(signal);
++  return Array.isArray(result?.providers) ? result.providers.filter((row) => row && typeof row.id === "string") : [];
++}
++
++/**
++ * §2.4.3 `receiptPresent`: a read of `provider-sync.json` only. `loadJournal`
++ * never writes when the file is absent, so a missing journal cannot create one.
++ */
++async function readReceiptPresence(dataDir: string, providerId: string): Promise<boolean> {
++  const journal = await loadJournal(journalPath(dataDir)).catch(() => {
++    // A corrupt or unreadable journal yields no conclusion, never "absent".
++    throw new ImportFailure("ADMIN_UNAVAILABLE");
++  });
++  return Object.values(journal.receipts).some((receipt) => receipt.providerId === providerId);
++}
++
++/* ------------------------------------------------------- P1 plan (§4.3, §5.7) */
++
++type TransferPlan = {
++  remaining: number;
++  /** §4.3 `eligible`: pre-filter and `pluginAllowed`, before the §5.7 secret review. */
++  eligible: number;
++  ordered: ProviderCandidateRow[];
++  comparable: boolean;
++};
++
++/**
++ * §4.3 for the write path (`includePluginOwned:false`): candidate rows come from
++ * `providers.list`, and the only source of `ownerPluginId` is the single
++ * `providers.get` row — it is not one of the measured list fields. A row whose
++ * record cannot be read is unknown, so no `settings.set` may follow.
++ */
++async function planTransfer(host: HostCaller, rows: readonly ProviderRow[], targetId: string, signal: AbortSignal): Promise<TransferPlan> {
++  const remaining = rows.filter((row) => row.id !== targetId);
++  const allowed: ProviderRow[] = [];
++  for (const row of remaining) {
++    if (!isEligibleCandidate(row)) continue;
++    const record = await readRow(host, row.id, signal);
++    if (!record) throw new ImportFailure("REMOVE_FAILED");
++    if (isPluginOwned(record)) continue;
++    allowed.push(row);
++  }
++  const order = orderEligibleCandidates(allowed);
++  return { remaining: remaining.length, eligible: allowed.length, ordered: order.ordered, comparable: order.comparable };
++}
++
++/** §5.7: walk the full order and take the first candidate whose real secret is present. */
++async function pickTransferTarget(host: HostCaller, plan: TransferPlan, signal: AbortSignal): Promise<{ providerId: string; modelId: string } | null> {
++  for (const row of plan.ordered) {
++    const modelId = candidateModelId(row);
++    if (!modelId) continue;
++    const present = row.authKind === "none" ? true : await readSecretPresence(host, row.id, signal);
++    if (present) return { providerId: row.id, modelId };
++  }
++  return null;
++}
++
++function noCandidateDefaultMoved(plan: TransferPlan): DefaultMoved {
++  return plan.remaining === 0
++    ? { to: null, reason: "no_remaining", orderingBasis: "none" }
++    : { to: null, reason: "no_eligible_candidate", orderingBasis: "none" };
++}
++
++/* --------------------------------------------------------------- the removal */
++
++/**
++ * §4.1 step order — the only order this Host may use. Everything before step 5
++ * can still be reported as "not executed"; everything after it cannot.
++ */
++export async function removeProvider(host: HostCaller, payload: ProviderRemovePayload, signal: AbortSignal): Promise<RemoveOutcome> {
++  let issuedDelete = false;
++  try {
++    check(signal);
++    // 1. existence
++    const row = await readRow(host, payload.providerId, signal);
++    // 2. plugin rows are refused locally, before any delete call (T-45)
++    if (row && isPluginOwned(row)) return { ok: false, code: "PLUGIN_OWNED" };
++    // 3. default bindings
++    const settings = await readSettings(host, signal);
++    const rows = await readRows(host, signal);
++    const wasDefault = settings.defaultProviderId === payload.providerId;
++
++    if (!row) {
++      // §6.2 short circuit: an absent row is a result, not an error, and it still
++      // owes the same self-check evidence as a real delete.
++      const plan = await planTransfer(host, rows, payload.providerId, signal);
++      const secretPresent = await readSecretPresence(host, payload.providerId, signal);
++      return {
++        ok: true,
++        removed: {
++          providerId: payload.providerId,
++          effect: "absent",
++          secretCleared: !secretPresent,
++          remaining: plan.remaining,
++          remainingEligible: plan.eligible,
++        },
++      };
++    }
++
++    // 4. pre-delete decidability, only when the target is the default
++    let plan = await planTransfer(host, rows, payload.providerId, signal);
++    if (wasDefault && plan.eligible > 0 && !plan.comparable) return { ok: false, code: "DEFAULT_ORDER_UNDECIDABLE" };
++
++    // 5. the single delete RPC
++    issuedDelete = true;
++    try {
++      await host.call("providers.delete", { id: payload.providerId });
++    } catch (error) {
++      // No reply says nothing about the write; a peer error replied before writing.
++      return { ok: false, code: isUnknownOutcome(error) ? "RESULT_UNKNOWN" : "REMOVE_FAILED" };
++    }
++    check(signal);
++
++    // 6. self-check: the row and its secret must both be gone
++    if (await readRow(host, payload.providerId, signal)) return { ok: false, code: "RESULT_UNKNOWN" };
++    if (await readSecretPresence(host, payload.providerId, signal)) return { ok: false, code: "SECRET_NOT_CLEARED" };
++
++    // 7/8. default transfer, including a default that started pointing at the
++    // deleted row during the operation (§4.1 step 8).
++    const after = await readSettings(host, signal);
++    plan = await planTransfer(host, await readRows(host, signal), payload.providerId, signal);
++    const counts = { remaining: plan.remaining, remainingEligible: plan.eligible };
++    if (!wasDefault && after.defaultProviderId !== payload.providerId) {
++      return { ok: true, removed: { providerId: payload.providerId, effect: "deleted", secretCleared: true, ...counts } };
++    }
++    if (plan.eligible > 0 && !plan.comparable) {
++      return {
++        ok: false,
++        code: "DEFAULT_TRANSFER_ORDER_UNKNOWN",
++        removed: { providerId: payload.providerId, secretCleared: true },
++        defaultTransfer: { state: "not_transferred", reason: "order_unknown", orderingBasis: "none" },
++      };
++    }
++    const target = plan.eligible === 0 ? null : await pickTransferTarget(host, plan, signal);
++    if (!target) {
++      // §4.3: never clear `settings`, never pretend a transfer happened.
++      return { ok: true, removed: { providerId: payload.providerId, effect: "deleted", secretCleared: true, defaultMoved: noCandidateDefaultMoved(plan), ...counts } };
++    }
++    try {
++      await host.call("settings.set", { defaultProviderId: target.providerId, defaultModelId: target.modelId });
++    } catch (error) {
++      return { ok: false, code: isUnknownOutcome(error) ? "DEFAULT_TRANSFER_UNKNOWN" : "DEFAULT_TRANSFER_FAILED" };
++    }
++    return {
++      ok: true,
++      removed: {
++        providerId: payload.providerId,
++        effect: "deleted",
++        secretCleared: true,
++        defaultMoved: { to: target, orderingBasis: "createdAt" },
++        ...counts,
++      },
++    };
++  } catch (error) {
++    if (error instanceof ImportFailure) throw error;
++    // The delete frame may be out: nothing may be reported as "not executed".
++    throw new ImportFailure(issuedDelete ? "RESULT_UNKNOWN" : "ADMIN_UNAVAILABLE");
++  }
++}
++
++/** §7.2: a transport deadline or a lost host says nothing about the write. */
++function isUnknownOutcome(error: unknown): boolean {
++  return isRpcTimeoutError(error) || (error as { errorCode?: string } | null)?.errorCode === "HOST_UNAVAILABLE";
++}
++
++/* --------------------------------------------------------- receipts (§7.4) */
++
++/** §7.4.2: delete only the receipt entries that point at the target; never touch rows, secrets, settings or the salt. */
++export async function forgetProvider(host: HostCaller, dataDir: string, payload: ProviderSyncForgetPayload, signal: AbortSignal): Promise<ForgetOutcome> {
++  check(signal);
++  const row = await readRow(host, payload.providerId, signal);
++  if (row) return { ok: false, code: "TARGET_STILL_EXISTS" };
++  const journal = await loadJournal(journalPath(dataDir)).catch(() => null);
++  if (!journal) return { ok: false, code: "FORGET_FAILED" };
++  const keys = Object.entries(journal.receipts)
++    .filter(([, receipt]) => receipt.providerId === payload.providerId)
++    .map(([key]) => key);
++  if (keys.length === 0) {
++    // Nothing to remove: the file is not rewritten, so its bytes cannot change (§7.4.2).
++    return { ok: true, forgotten: { providerId: payload.providerId, removedEntries: 0, remainingEntries: Object.keys(journal.receipts).length, receiptState: "absent" } };
++  }
++  for (const key of keys) delete journal.receipts[key];
++  try {
++    await saveJournal(journalPath(dataDir), journal);
++  } catch {
++    // Before `rename` the old file still holds every receipt (§7.4.4).
++    return { ok: false, code: "FORGET_FAILED" };
++  }
++  return { ok: true, forgotten: { providerId: payload.providerId, removedEntries: keys.length, remainingEntries: Object.keys(journal.receipts).length, receiptState: "absent" } };
++}
++
++/* ------------------------------------------------- bindingStatus (§2.4.2) */
++
++type NormalizedRow = {
++  id: string;
++  enabled: boolean;
++  models: string[];
++  authKind: string | null;
++  hasSecret: boolean | null;
++  hasOauth: boolean | null;
++  createdAt: string | null;
++};
++type BindingSnapshot = {
++  session: { providerId: string | null; modelId: string | null; thinkingLevel: string | null; updatedAt: string | null; mode: string | null };
++  rows: NormalizedRow[];
++  settings: SettingsSnapshot;
++  target: { id: string; ownerPluginId: string | null; secretPresent: boolean | null } | null;
++  receiptPresent: boolean;
++  unknownInputs: string[];
++};
++
++function normalizeRows(rows: readonly ProviderRow[]): NormalizedRow[] {
++  return rows
++    .map((row) => ({
++      id: row.id,
++      enabled: row.enabled === true,
++      models: Array.isArray(row.models) ? row.models.map((model) => String(model?.id ?? "")) : [],
++      authKind: typeof row.authKind === "string" ? row.authKind : null,
++      hasSecret: typeof row.hasSecret === "boolean" ? row.hasSecret : null,
++      hasOauth: typeof row.hasOauth === "boolean" ? row.hasOauth : null,
++      createdAt: typeof row.createdAt === "string" ? row.createdAt : null,
++    }))
++    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
++}
++
++function textOrNull(value: unknown, max = 512): string | null {
++  return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
++}
++
++async function readBindingSnapshot(host: HostCaller, dataDir: string, sessionId: string, signal: AbortSignal): Promise<BindingSnapshot> {
++  const unknownInputs: string[] = [];
++  const detail = await host.call<{ session?: Record<string, unknown> | null }>("session.get", { id: sessionId, messageLimit: 1 });
++  check(signal);
++  const session = detail?.session;
++  if (!session) throw new ImportFailure("NOT_FOUND");
++
++  let rows: ProviderRow[] = [];
++  try {
++    rows = await readRows(host, signal);
++  } catch {
++    unknownInputs.push("providers.list");
++  }
++  let settings: SettingsSnapshot = { defaultProviderId: null, defaultModelId: null };
++  let settingsKnown = true;
++  try {
++    settings = await readSettings(host, signal);
++  } catch {
++    settingsKnown = false;
++    unknownInputs.push("settings.get");
++  }
++
++  const pinProviderId = textOrNull(session.providerId);
++  const targetId = pinProviderId ?? fallbackTarget(rows, settings, settingsKnown, unknownInputs);
++  let target: BindingSnapshot["target"] = null;
++  if (targetId) {
++    try {
++      const record = await readRow(host, targetId, signal);
++      if (!record) {
++        // §5.6.1: a successful read with no row means the provider is gone
++        // (`provider_missing`), not that the input is unknown.
++        target = { id: targetId, ownerPluginId: null, secretPresent: null };
++      } else {
++        let secretPresent = record.authKind === "none" ? true : null;
++        if (record.authKind !== "none") {
++          try {
++            secretPresent = await readSecretPresence(host, targetId, signal);
++          } catch {
++            secretPresent = null;
++            unknownInputs.push("providers.getSecret");
++          }
++        }
++        target = { id: targetId, ownerPluginId: textOrNull(record.ownerPluginId), secretPresent };
++      }
++    } catch {
++      unknownInputs.push("providers.get");
++    }
++  }
++  // The journal is only a consistency input here (it is not part of the binding
++  // verdict), so an unreadable journal cannot turn the conclusion into "unknown".
++  const receiptPresent = await readReceiptPresence(dataDir, targetId ?? "").catch(() => false);
++  return {
++    session: {
++      providerId: pinProviderId,
++      modelId: textOrNull(session.modelId),
++      thinkingLevel: textOrNull(session.thinkingLevel, 32),
++      updatedAt: textOrNull(session.updatedAt, 64),
++      mode: textOrNull(session.mode, 32),
++    },
++    rows: normalizeRows(rows),
++    settings,
++    target,
++    receiptPresent,
++    unknownInputs: [...new Set(unknownInputs)],
++  };
++}
++
++/**
++ * §5.6 target for a session without a pin: the default when it is inside the P1
++ * eligible set, otherwise the earliest eligible candidate. The read path uses
++ * `includePluginOwned:true`, so no per-row `providers.get` is needed here.
++ */
++function fallbackTarget(rows: readonly ProviderRow[], settings: SettingsSnapshot, settingsKnown: boolean, unknownInputs: string[]): string | null {
++  if (!settingsKnown) return null;
++  const eligible = rows.filter(isEligibleCandidate);
++  if (settings.defaultProviderId && eligible.some((row) => row.id === settings.defaultProviderId)) return settings.defaultProviderId;
++  const order = orderEligibleCandidates(eligible);
++  if (!order.comparable) {
++    // §4.3: an incomparable batch names no "earliest" candidate.
++    if (eligible.length > 0) unknownInputs.push("providers.list");
++    return null;
++  }
++  return order.ordered[0]?.id ?? null;
++}
++
++function sameSnapshot(left: BindingSnapshot, right: BindingSnapshot): boolean {
++  const strip = (snapshot: BindingSnapshot) => JSON.stringify({ ...snapshot, unknownInputs: [] });
++  return strip(left) === strip(right);
++}
++
++/**
++ * §5.6.1/§5.6.2 evaluation. The short-circuit order is frozen:
++ * provider_missing > provider_disabled > oauth_unsupported > models_empty >
++ * model_removed > secret_missing; `pluginOwned` and `secretMismatch` are pure
++ * information bits — they are read whenever the row exists and never short-circuit.
++ */
++function evaluateBinding(snapshot: BindingSnapshot, sessionId: string, observedAt: string, reads: number, stable: boolean): ProviderBindingStatus {
++  const pinned = { providerId: snapshot.session.providerId, modelId: snapshot.session.modelId, thinkingLevel: snapshot.session.thinkingLevel };
++  const unknownInputs = [...snapshot.unknownInputs];
++  const target = snapshot.target;
++  const row = target ? snapshot.rows.find((candidate) => candidate.id === target.id) : undefined;
++  const checks: ProviderBindingStatus["checks"] = {
++    providerKnown: null,
++    providerEnabled: null,
++    modelsEmpty: null,
++    modelPresent: null,
++    secretPresent: null,
++    oauth: null,
++    pluginOwned: null,
++    secretMismatch: null,
++  };
++  const modelIdOf = (): { modelId: string; modelSource: ProviderBindingEffective["modelSource"] } | null => {
++    if (target && pinned.providerId === target.id && pinned.modelId) return { modelId: pinned.modelId, modelSource: "session" };
++    if (target && snapshot.settings.defaultProviderId === target.id && snapshot.settings.defaultModelId) return { modelId: snapshot.settings.defaultModelId, modelSource: "default" };
++    const first = row?.models[0] ?? (target ? snapshot.rows.find((candidate) => candidate.id === target.id)?.models[0] : undefined);
++    return first ? { modelId: first, modelSource: "provider_first" } : null;
++  };
++  const effectiveOf = (): ProviderBindingEffective | null => {
++    if (!target) return null;
++    const resolved = modelIdOf();
++    if (!resolved) return null;
++    const providerSource: ProviderBindingEffective["providerSource"] = pinned.providerId
++      ? "pin"
++      : snapshot.settings.defaultProviderId === target.id
++        ? "default"
++        : "fallback";
++    return { providerId: target.id, modelId: resolved.modelId, providerSource, modelSource: resolved.modelSource };
++  };
++  const result = (available: boolean | null, unavailableReason: ProviderBindingStatus["unavailableReason"], effective: ProviderBindingEffective | null): ProviderBindingStatus => ({
++    sessionId,
++    pinned,
++    effective,
++    available,
++    unavailableReason,
++    checks,
++    unknownInputs,
++    consistency: { reads, snapshotStable: stable },
++    isDefault: Boolean(effective && snapshot.settings.defaultProviderId === effective.providerId),
++    revision: null,
++    sessionUpdatedAt: snapshot.session.updatedAt,
++    maxAgeMs: STATUS_MAX_AGE_MS,
++    observedAt,
++  });
++
++  // §5.6.2: no pin and no candidate — "which provider" itself is undetermined,
++  // so the reason is `no_candidate`, never `provider_missing`.
++  if (!pinned.providerId && !target) return result(false, "no_candidate", null);
++  if (unknownInputs.length > 0) return result(null, "unknown", effectiveOf());
++  if (!target) return result(null, "unknown", null);
++
++  checks.providerKnown = Boolean(row);
++  // §5.6.1: only a row that was actually read can settle `pluginOwned`.
++  checks.pluginOwned = row ? Boolean(target.ownerPluginId) : null;
++  if (!row) return result(false, "provider_missing", null);
++  // Pure information bit: evaluated whenever the row exists, never short-circuits.
++  checks.secretMismatch = row.authKind === "none" || row.hasSecret === null || target.secretPresent === null
++    ? false
++    : row.hasSecret !== target.secretPresent;
++  checks.providerEnabled = row.enabled;
++  if (!checks.providerEnabled) return result(false, "provider_disabled", effectiveOf());
++  checks.oauth = row.authKind === null ? null : row.authKind === "oauth" || row.hasOauth === true;
++  checks.modelsEmpty = row.models.length === 0;
++  if (checks.oauth === null) return result(null, "unknown", effectiveOf());
++  if (checks.oauth) return result(false, "oauth_unsupported", effectiveOf());
++  if (checks.modelsEmpty) return result(false, "models_empty", effectiveOf());
++  const resolved = modelIdOf();
++  checks.modelPresent = resolved ? row.models.includes(resolved.modelId) : null;
++  if (checks.modelPresent === null) return result(null, "unknown", effectiveOf());
++  if (!checks.modelPresent) return result(false, "model_removed", effectiveOf());
++  checks.secretPresent = target.secretPresent;
++  if (checks.secretPresent === null) return result(null, "unknown", effectiveOf());
++  if (!checks.secretPresent) return result(false, "secret_missing", effectiveOf());
++  return result(true, null, effectiveOf());
++}
++
++/** §2.4.2 + §7.5.2: two equivalent reads at least 50 ms apart, one extra read when they differ. */
++export async function bindingStatusFor(host: HostCaller, dataDir: string, sessionId: string, signal: AbortSignal): Promise<BindingOutcome> {
++  const first = await readBindingSnapshot(host, dataDir, sessionId, signal);
++  if (first.unknownInputs.length > 0) return { ok: true, binding: evaluateBinding(first, sessionId, new Date().toISOString(), 1, false) };
++  await new Promise((settle) => setTimeout(settle, 50));
++  check(signal);
++  const second = await readBindingSnapshot(host, dataDir, sessionId, signal);
++  if (second.unknownInputs.length === 0 && sameSnapshot(first, second)) {
++    return { ok: true, binding: evaluateBinding(second, sessionId, new Date().toISOString(), 2, true) };
++  }
++  await new Promise((settle) => setTimeout(settle, 50));
++  check(signal);
++  const third = await readBindingSnapshot(host, dataDir, sessionId, signal);
++  if (third.unknownInputs.length === 0 && sameSnapshot(second, third)) {
++    return { ok: true, binding: evaluateBinding(third, sessionId, new Date().toISOString(), 3, true) };
++  }
++  return { ok: false, code: "SNAPSHOT_UNSTABLE" };
++}
++
++/* ------------------------------------------------ removeStatus (§2.4.3) */
++
++type StatusSnapshot = {
++  recordPresent: boolean;
++  secretPresent: boolean | null;
++  enabled: boolean | null;
++  modelCount: number | null;
++  settings: SettingsSnapshot;
++  receiptPresent: boolean;
++};
++
++async function readStatusSnapshot(host: HostCaller, dataDir: string, providerId: string, signal: AbortSignal): Promise<StatusSnapshot> {
++  const record = await readRow(host, providerId, signal);
++  const settings = await readSettings(host, signal);
++  let secretPresent: boolean | null = null;
++  try {
++    // A deleted row still owes the "is the secret gone" observation (§7.3).
++    secretPresent = record && record.authKind === "none" ? true : await readSecretPresence(host, providerId, signal);
++  } catch {
++    secretPresent = null;
++  }
++  return {
++    recordPresent: Boolean(record),
++    secretPresent,
++    enabled: record ? record.enabled === true : null,
++    modelCount: record && Array.isArray(record.models) ? record.models.length : null,
++    settings,
++    receiptPresent: await readReceiptPresence(dataDir, providerId),
++  };
++}
++
++/** §2.4.3 + §7.5.2; `writeOrderingProof` stays `"unproven"` (§7.5.3, §11A.7). */
++export async function removeStatusFor(host: HostCaller, dataDir: string, providerId: string, context: AdminOperationContext): Promise<RemoveStatusOutcome> {
++  const first = await readStatusSnapshot(host, dataDir, providerId, context.signal);
++  await new Promise((settle) => setTimeout(settle, 50));
++  check(context.signal);
++  const second = await readStatusSnapshot(host, dataDir, providerId, context.signal);
++  if (JSON.stringify(first) !== JSON.stringify(second)) {
++    await new Promise((settle) => setTimeout(settle, 50));
++    check(context.signal);
++    const third = await readStatusSnapshot(host, dataDir, providerId, context.signal);
++    if (JSON.stringify(second) !== JSON.stringify(third)) return { ok: false, code: "SNAPSHOT_UNSTABLE" };
++  }
++  return {
++    ok: true,
++    status: {
++      providerId,
++      recordPresent: second.recordPresent,
++      secretPresent: second.secretPresent,
++      defaultBinding: {
++        isDefault: second.settings.defaultProviderId === providerId,
++        defaultProviderId: second.settings.defaultProviderId,
++      },
++      enabled: second.enabled,
++      modelCount: second.modelCount,
++      receiptPresent: second.receiptPresent,
++      // E1 only: no other admin operation can run while this read holds the slot.
++      slotFree: context.slotFree,
++      writeOrderingProof: "unproven",
++      boundSessionCount: null,
++      maxAgeMs: STATUS_MAX_AGE_MS,
++      observedAt: new Date().toISOString(),
++    },
++  };
++}
++
++/* ------------------------------------------------------------- CLI runners */
++
++type CliOutcome = { ok: true; value: unknown } | { ok: false; code: AdminFailureCode };
++
++/**
++ * Shared CLI discipline (§2.1): one optional `--data-dir`, one bounded stdin
++ * line, one single-line stdout record, exit code 0 or 1.
++ */
++async function runAdminCli(options: {
++  argv: string[];
++  io: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream };
++  stdinMaxBytes: number;
++  prefix: string;
++  parsePayload: (value: unknown) => unknown;
++  send: (dataDir: string, payload: unknown) => Promise<CliOutcome>;
++}): Promise<number> {
++  const { argv, io } = options;
++  try {
++    if (argv.length !== 0 && !(argv.length === 2 && argv[0] === "--data-dir" && argv[1])) throw new ImportFailure("INVALID_REQUEST");
++    const dataDir = resolve(argv[1] ?? process.env.PI_DESKTOP_DATA_DIR ?? join(homedir(), ".pi-desktop"));
++    const raw = await readCapped(io.stdin, options.stdinMaxBytes);
++    let payload: unknown;
++    try {
++      payload = options.parsePayload(JSON.parse(raw));
++    } catch {
++      throw new ImportFailure("INVALID_REQUEST");
++    }
++    const response = await options.send(dataDir, payload);
++    if (!response.ok) throw new ImportFailure(response.code);
++    io.stdout.write(`${options.prefix} ${JSON.stringify(response.value)}\n`);
++    return 0;
++  } catch (error) {
++    io.stdout.write(`${FAILED_PREFIX} ${JSON.stringify({ code: importFailureCode(error) })}\n`);
++    return 1;
++  }
++}
++
++async function sendOperation(dataDir: string, op: AdminOp, payload: unknown): Promise<CliOutcome> {
++  const { sendAdminOperation } = await import("./admin-socket.js");
++  return sendAdminOperation(dataDir, op, payload);
++}
++
++export async function runProviderRemove(argv: string[], io: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream } = process): Promise<number> {
++  return runAdminCli({
++    argv,
++    io,
++    stdinMaxBytes: REMOVE_STDIN_MAX_BYTES,
++    prefix: REMOVED_PREFIX,
++    parsePayload: parseProviderRemovePayload,
++    send: (dataDir, payload) => sendOperation(dataDir, ADMIN_OP_REMOVE, payload),
++  });
++}
++
++export async function runProviderBindingStatus(argv: string[], io: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream } = process): Promise<number> {
++  return runAdminCli({
++    argv,
++    io,
++    stdinMaxBytes: BINDING_STATUS_STDIN_MAX_BYTES,
++    prefix: BINDING_PREFIX,
++    parsePayload: parseProviderBindingStatusPayload,
++    send: (dataDir, payload) => sendOperation(dataDir, ADMIN_OP_BINDING_STATUS, payload),
++  });
++}
++
++export async function runProviderRemoveStatus(argv: string[], io: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream } = process): Promise<number> {
++  return runAdminCli({
++    argv,
++    io,
++    stdinMaxBytes: REMOVE_STDIN_MAX_BYTES,
++    prefix: REMOVE_STATUS_PREFIX,
++    parsePayload: parseProviderRemovePayload,
++    send: (dataDir, payload) => sendOperation(dataDir, ADMIN_OP_REMOVE_STATUS, payload),
++  });
++}
++
++export async function runProviderSyncForget(argv: string[], io: { stdin: NodeJS.ReadableStream; stdout: NodeJS.WritableStream } = process): Promise<number> {
++  return runAdminCli({
++    argv,
++    io,
++    stdinMaxBytes: FORGET_STDIN_MAX_BYTES,
++    prefix: FORGOTTEN_PREFIX,
++    parsePayload: parseProviderSyncForgetPayload,
++    send: (dataDir, payload) => sendOperation(dataDir, ADMIN_OP_SYNC_FORGET, payload),
++  });
++}
+diff --git a/packages/host-runtime/src/launch-resolver.test.ts b/packages/host-runtime/src/launch-resolver.test.ts
+index a893ae7..e3bad5d 100644
+--- a/packages/host-runtime/src/launch-resolver.test.ts
++++ b/packages/host-runtime/src/launch-resolver.test.ts
+@@ -53,6 +53,7 @@ const provider: HostProviderRecord = {
+   authKind: "api_key",
+   hasSecret: true,
+   enabled: true,
++  createdAt: "2026-01-01T00:00:00.000Z",
+ };
+ 
+ describe("createHeadlessLaunchResolver", () => {
+@@ -99,11 +100,12 @@ describe("createHeadlessLaunchResolver", () => {
+     expect(plain.sidecarParams.provider.modelConfig).toMatchObject({ name: "model", contextWindow: 16_000, maxTokens: 2_048 });
+     expect(plain.sidecarParams.thinkingLevel).toBe("off");
+ 
++    // Rule B (B2③ / S11): the bound model is gone from the row, so the launch is
++    // refused instead of silently running another model or another provider.
+     row.models = [row.models![0]];
+-    const unbound = await resolver.resolve("s1", { providerId: "p1", modelId: routedId }, {});
+-    expect(unbound.sidecarParams.provider.modelConfig).toMatchObject({ name: routedId, contextWindow: 128_000, maxTokens: 8_192 });
+-    expect(unbound.sidecarParams.thinkingLevel).toBe("off");
+-    expect(unbound.sidecarParams.provider.modelId).toBe(routedId);
++    await expect(resolver.resolve("s1", { providerId: "p1", modelId: routedId }, {})).rejects.toMatchObject({
++      errorCode: "MODEL_NOT_CONFIGURED",
++    });
+   });
+ 
+   it("forwards the opt-in infinite provider retry setting", async () => {
+@@ -144,3 +146,62 @@ describe("createHeadlessLaunchResolver", () => {
+     await expect(offline.resolve("s1", {}, {})).rejects.toMatchObject({ errorCode: "HOST_UNAVAILABLE" });
+   });
+ });
++
++/**
++ * Rule B (§5.2 regression items 1-4, T-26): an explicitly bound provider is
++ * resolved or refused, and only an unbound session may fall back — over the P1
++ * candidate set, never over `providers[0]` or a disabled row.
++ */
++describe("createHeadlessLaunchResolver — rule B", () => {
++  const other: HostProviderRecord = { ...provider, id: "p2", name: "Other", createdAt: "2025-06-01T00:00:00.000Z" };
++  const resolverFor = (rows: HostProviderRecord[], secrets: Record<string, string> = { p1: "sk-1", p2: "sk-2" }) => {
++    const { host, calls } = hostWith(rows, secrets);
++    return { calls, resolver: createHeadlessLaunchResolver({ getHost: () => host, dataDir: "/data", log: () => undefined }) };
++  };
++
++  it("refuses an override that is missing, disabled or has lost the requested model", async () => {
++    const missing = resolverFor([provider, other]);
++    await expect(missing.resolver.resolve("s1", {}, {}, { providerId: "gone", modelId: "gpt-a" })).rejects.toMatchObject({
++      errorCode: "MODEL_NOT_CONFIGURED",
++    });
++    const disabled = resolverFor([{ ...provider, enabled: false }, other]);
++    await expect(disabled.resolver.resolve("s1", {}, {}, { providerId: "p1" })).rejects.toMatchObject({
++      errorCode: "MODEL_NOT_CONFIGURED",
++    });
++    const removed = resolverFor([{ ...provider, models: [{ ...provider.models![0]!, id: "gpt-b" }] }, other]);
++    await expect(removed.resolver.resolve("s1", {}, {}, { providerId: "p1", modelId: "gpt-a" })).rejects.toMatchObject({
++      errorCode: "MODEL_NOT_CONFIGURED",
++    });
++  });
++
++  it("refuses a session pin with the same defects and never binds another provider", async () => {
++    const disabled = resolverFor([{ ...provider, enabled: false }, other]);
++    await expect(disabled.resolver.resolve("s1", { providerId: "p1" }, { defaultProviderId: "p2" })).rejects.toMatchObject({
++      errorCode: "MODEL_NOT_CONFIGURED",
++    });
++    const removed = resolverFor([{ ...provider, models: [{ ...provider.models![0]!, id: "gpt-b" }] }, other]);
++    await expect(removed.resolver.resolve("s1", { providerId: "p1", modelId: "gpt-a" }, { defaultProviderId: "p2" })).rejects.toMatchObject({
++      errorCode: "MODEL_NOT_CONFIGURED",
++    });
++    // The list is read with `includeDisabled:true` so "missing" and "disabled" stay distinct.
++    expect(disabled.calls.filter((call) => call.method === "providers.list").every((call) => call.params.includeDisabled === true)).toBe(true);
++  });
++
++  it("uses the default while it is eligible and otherwise the earliest eligible candidate", async () => {
++    const preferred = resolverFor([provider, other]);
++    expect((await preferred.resolver.resolve("s1", {}, { defaultProviderId: "p2", defaultModelId: "gpt-a" })).providerId).toBe("p2");
++    const fallback = resolverFor([provider, other]);
++    expect((await fallback.resolver.resolve("s1", {}, {})).providerId).toBe("p2");
++    const ineligibleDefault = resolverFor([provider, { ...other, enabled: false }]);
++    expect((await ineligibleDefault.resolver.resolve("s1", {}, { defaultProviderId: "p2" })).providerId).toBe("p1");
++  });
++
++  it("refuses when no candidate is eligible or the creation order cannot be decided", async () => {
++    const none = resolverFor([{ ...provider, enabled: false }, { ...other, hasSecret: false }]);
++    await expect(none.resolver.resolve("s1", {}, {})).rejects.toMatchObject({ errorCode: "MODEL_NOT_CONFIGURED" });
++    const unordered = resolverFor([{ ...provider, createdAt: "1" }, other]);
++    await expect(unordered.resolver.resolve("s1", {}, {})).rejects.toMatchObject({ errorCode: "MODEL_NOT_CONFIGURED" });
++    const empty = resolverFor([]);
++    await expect(empty.resolver.resolve("s1", {}, {})).rejects.toMatchObject({ errorCode: "MODEL_NOT_CONFIGURED" });
++  });
++});
+diff --git a/packages/host-runtime/src/launch-resolver.ts b/packages/host-runtime/src/launch-resolver.ts
+index 8517769..2413fac 100644
+--- a/packages/host-runtime/src/launch-resolver.ts
++++ b/packages/host-runtime/src/launch-resolver.ts
+@@ -15,6 +15,8 @@ import {
+   type SessionThinkingLevel,
+   type UserSkillRecord,
+   type UserSubagentRecord,
++  isEligibleCandidate,
++  orderEligibleCandidates,
+ } from "@pi-desktop/shared";
+ import {
+   capabilitiesFromModelConfig,
+@@ -43,10 +45,10 @@ export type HostProviderRecord = {
+   defaultModelId?: string;
+   authKind?: string;
+   apiStyle?: string;
+-  hasSecret?: boolean;
+-  hasOauth?: boolean;
+-  headers?: Record<string, string>;
+   enabled?: boolean;
++  /** RFC3339 creation stamp; the P1 order (§4.3) is `(createdAt, id)`. */
++  createdAt?: string;
++  headers?: Record<string, string>;
+ };
+ 
+ export type LaunchOverrides = {
+@@ -204,6 +206,29 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
+     return secret?.value;
+   }
+ 
++  /** B2: an explicitly requested provider is resolved or refused — never swapped. */
++  function explicitTarget(rows: readonly HostProviderRecord[], providerId: string): HostProviderRecord {
++    const row = rows.find((item) => item.id === providerId);
++    if (!row) throw launchError("The bound provider no longer exists", ErrorCodes.MODEL_NOT_CONFIGURED);
++    if (row.enabled !== true) throw launchError("The bound provider is disabled", ErrorCodes.MODEL_NOT_CONFIGURED);
++    return row;
++  }
++
++  /**
++   * B4: P1 (§4.3) — the default when it is inside the eligible set, otherwise the
++   * earliest eligible candidate. `createdAt` that cannot be ordered names no
++   * candidate, so the launch is refused rather than guessed.
++   */
++  function fallbackTarget(rows: readonly HostProviderRecord[], defaultProviderId: string | undefined): HostProviderRecord {
++    const eligible = rows.filter(isEligibleCandidate);
++    const preferred = defaultProviderId ? eligible.find((row) => row.id === defaultProviderId) : undefined;
++    if (preferred) return preferred;
++    const order = orderEligibleCandidates(eligible);
++    const first = order.comparable ? order.ordered[0] : undefined;
++    if (!first) throw launchError("No provider configured", ErrorCodes.MODEL_NOT_CONFIGURED);
++    return first as HostProviderRecord;
++  }
++
+   async function resolve(
+     sessionId: string,
+     session: Record<string, unknown>,
+@@ -212,23 +237,28 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
+   ): Promise<ResolvedLaunch> {
+     const host = requireHost();
+     const commandShell = (await resolveEffectiveCommandShell()).effective!;
+-    const providers = await host.call<{ providers: HostProviderRecord[] }>("providers.list", {
+-      includeDisabled: false,
++    const listed = await host.call<{ providers: HostProviderRecord[] }>("providers.list", {
++      // §5.2 B2: `includeDisabled` only distinguishes "missing" from "disabled".
++      // It never feeds the candidate set — that set is always filtered by `enabled === true`.
++      includeDisabled: true,
+     });
++    const allRows = Array.isArray(listed?.providers) ? listed.providers : [];
++    const providers = { providers: allRows.filter((row) => row.enabled === true) };
+     const sessionProviderId = typeof session.providerId === "string" ? session.providerId : undefined;
+     const sessionModelId = typeof session.modelId === "string" ? session.modelId : undefined;
++    // B1: the explicit target is the override first, exactly like the desktop, and never only the session pin.
+     const requestedProviderId = overrides.providerId ?? sessionProviderId;
+     if (requestedProviderId && trustedExtensionAgentKeyFromProviderId(requestedProviderId)) {
+       throw launchError("Plugin agents are not available on a headless host", ErrorCodes.MODEL_NOT_CONFIGURED);
+     }
+     const defaultProviderId = typeof settings.defaultProviderId === "string" ? settings.defaultProviderId : undefined;
+     const defaultModelId = typeof settings.defaultModelId === "string" ? settings.defaultModelId : undefined;
+-    const provider =
+-      providers.providers.find((item) => item.id === requestedProviderId) ||
+-      providers.providers.find((item) => item.id === defaultProviderId) ||
+-      providers.providers.find((item) => item.hasSecret || item.authKind === "none") ||
+-      providers.providers[0];
+-    if (!provider) throw launchError("No provider configured", ErrorCodes.MODEL_NOT_CONFIGURED);
++    // B2/B3: an explicit target that is missing, disabled or secret-less is refused —
++    // never replaced by the default, by another secret-bearing row, or by `providers[0]`.
++    // B4: without an explicit target the P1 candidate set decides, and an empty set refuses.
++    const provider = requestedProviderId
++      ? explicitTarget(allRows, requestedProviderId)
++      : fallbackTarget(allRows, defaultProviderId);
+     if (provider.authKind === OAUTH_AUTH_KIND) {
+       throw launchError(
+         "Vendor account sign-in is not available on a headless host; configure an API key provider",
+@@ -245,6 +275,11 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
+       provider.models?.[0]?.id ||
+       provider.defaultModelId;
+     if (!modelId) throw launchError("No model selected for provider", ErrorCodes.MODEL_NOT_CONFIGURED);
++    // B2③: a requested model that the row no longer carries is refused instead of
++    // silently running another model of the same provider.
++    if (!bindingForModel(provider, modelId)) {
++      throw launchError("The selected model is no longer available for this provider", ErrorCodes.MODEL_NOT_CONFIGURED);
++    }
+ 
+     const { modelConfig, capabilities, storedModel } = effectiveModelConfig(provider, modelId, provider.baseUrl);
+     const thinkingLevel = clampThinkingLevel(
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 1c05c16..4bd9af2 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -50,6 +50,7 @@ export * from "./subagent-presets.js";
+ export * from "./provider-presets.js";
+ export * from "./provider-endpoint.js";
+ export * from "./provider-sync.js";
++export * from "./provider-remove.js";
+ export * from "./model-catalog.js";
+ export * from "./github-feedback.js";
+ export * from "./network-proxy.js";
+diff --git a/packages/shared/src/provider-remove.ts b/packages/shared/src/provider-remove.ts
+new file mode 100644
+index 0000000..9246b09
+--- /dev/null
++++ b/packages/shared/src/provider-remove.ts
+@@ -0,0 +1,443 @@
++import { OAUTH_AUTH_KIND } from "./types/providers.js";
++import type { ModelBinding } from "./types/models.js";
++
++/**
++ * Model-service removal increment, `docs/api/ios-client-provider-remove-draft.md`
++ * (FROZEN 2026-11-03). This module is the single source of truth for the frozen
++ * literals (§2.0), the three byte caps per request (§2.1.1), the stdin payloads
++ * (§2.2, §2.4.2, §2.4.3, §7.4.1), the response schemas (§2.3, §2.4.5, §7.4.1)
++ * and the P1 candidate algorithm (§4.3) shared by the query path, the write path
++ * and the headless launch resolver.
++ */
++
++/** §2.0 — the only allowed spellings. Never normalized. */
++export const ADMIN_OP_IMPORT = "providers.import";
++export const ADMIN_OP_REMOVE = "providers.remove";
++export const ADMIN_OP_BINDING_STATUS = "providers.bindingStatus";
++export const ADMIN_OP_REMOVE_STATUS = "providers.removeStatus";
++export const ADMIN_OP_SYNC_FORGET = "providers.sync.forget";
++
++export const CLI_PROVIDER_IMPORT = "provider-import";
++export const CLI_PROVIDER_REMOVE = "provider-remove";
++export const CLI_PROVIDER_BINDING_STATUS = "provider-binding-status";
++export const CLI_PROVIDER_REMOVE_STATUS = "provider-remove-status";
++export const CLI_PROVIDER_SYNC_FORGET = "provider-sync-forget";
++
++export const PROVIDERS_PREFIX = "PI_HOST_PROVIDERS";
++export const REMOVED_PREFIX = "PI_HOST_REMOVED";
++export const FORGOTTEN_PREFIX = "PI_HOST_FORGOTTEN";
++export const BINDING_PREFIX = "PI_HOST_BINDING";
++export const REMOVE_STATUS_PREFIX = "PI_HOST_REMOVE_STATUS";
++export const FAILED_PREFIX = "PI_HOST_FAILED";
++
++/**
++ * §2.1.1 — (a) stdin payload ceiling, (b) whole admin envelope ceiling and
++ * (c) response ceiling, all counted on raw bytes including line endings.
++ * (a) never truncates the envelope: the socket always reads with the unified
++ * `ADMIN_MAX_BYTES` cap first and validates per op after parsing `op`.
++ */
++export const REMOVE_STDIN_MAX_BYTES = 73;
++export const BINDING_STATUS_STDIN_MAX_BYTES = 164;
++export const REMOVE_STATUS_STDIN_MAX_BYTES = 73;
++export const FORGET_STDIN_MAX_BYTES = 122;
++export const ADMIN_REMOVE_MAX_BYTES = 111;
++export const ADMIN_BINDING_STATUS_MAX_BYTES = 209;
++export const ADMIN_REMOVE_STATUS_MAX_BYTES = 117;
++export const ADMIN_FORGET_MAX_BYTES = 165;
++export const REMOVE_RESPONSE_MAX_BYTES = 1024;
++export const BINDING_STATUS_RESPONSE_MAX_BYTES = 4096;
++export const REMOVE_STATUS_RESPONSE_MAX_BYTES = 1024;
++export const FORGET_RESPONSE_MAX_BYTES = 512;
++
++/** §7.5.2 rule 5 — freshness window, always measured from `observedAt`. */
++export const STATUS_MAX_AGE_MS = 10_000;
++/** §2.1.1 — `sessionId` is variable length, 128 characters is only the upper bound. */
++export const MAX_SESSION_ID_LENGTH = 128;
++
++const PROVIDER_ID_ALLOWED = /^[a-f0-9-]{36}$/i;
++const SESSION_ID_ALLOWED = /^[A-Za-z0-9._:-]{1,128}$/;
++
++function invalid(): never {
++  // Never echo an input value, an unknown field name or a parser diagnostic.
++  throw Object.assign(new Error("Invalid provider removal payload"), { errorCode: "INVALID_ARGUMENT" });
++}
++function record(value: unknown): value is Record<string, unknown> {
++  return value !== null && typeof value === "object" && !Array.isArray(value);
++}
++function exact(value: unknown, allowed: readonly string[]): asserts value is Record<string, unknown> {
++  if (!record(value) || Object.keys(value).some((key) => !allowed.includes(key))) invalid();
++}
++function providerId(value: unknown): string {
++  if (typeof value !== "string" || !PROVIDER_ID_ALLOWED.test(value)) invalid();
++  return value;
++}
++function index(value: unknown): number {
++  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) invalid();
++  return value;
++}
++function flag(value: unknown): boolean {
++  if (typeof value !== "boolean") invalid();
++  return value;
++}
++function nullableFlag(value: unknown): boolean | null {
++  if (value !== null && typeof value !== "boolean") invalid();
++  return value as boolean | null;
++}
++
++/* ------------------------------------------------------------------ payloads */
++
++/** §2.2 — `{ "version": 1, "providerId": "<36>" }`, nothing else. */
++export type ProviderRemovePayload = { version: 1; providerId: string };
++export function parseProviderRemovePayload(value: unknown): ProviderRemovePayload {
++  exact(value, ["version", "providerId"]);
++  if (value.version !== 1) invalid();
++  return { version: 1, providerId: providerId(value.providerId) };
++}
++
++/** §2.4.2 — `{ "version": 1, "sessionId": "…" }`, nothing else. */
++export type ProviderBindingStatusPayload = { version: 1; sessionId: string };
++export function parseProviderBindingStatusPayload(value: unknown): ProviderBindingStatusPayload {
++  exact(value, ["version", "sessionId"]);
++  if (value.version !== 1) invalid();
++  if (typeof value.sessionId !== "string" || !SESSION_ID_ALLOWED.test(value.sessionId)) invalid();
++  return { version: 1, sessionId: value.sessionId };
++}
++
++/**
++ * §7.4.1 — exactly three keys in a fixed order; `confirm` must equal `providerId`
++ * byte for byte. `force` and every other fourth key are rejected, never echoed.
++ */
++export type ProviderSyncForgetPayload = { version: 1; providerId: string; confirm: string };
++export function parseProviderSyncForgetPayload(value: unknown): ProviderSyncForgetPayload {
++  exact(value, ["version", "providerId", "confirm"]);
++  if (value.version !== 1) invalid();
++  const target = providerId(value.providerId);
++  if (value.confirm !== target) invalid();
++  return { version: 1, providerId: target, confirm: target };
++}
++
++/* ------------------------------------------------------- remove (§2.3, §2.6) */
++
++export type DefaultMoved =
++  | { to: { providerId: string; modelId: string }; orderingBasis: "createdAt" }
++  | { to: null; reason: "no_remaining" | "no_eligible_candidate"; orderingBasis: "none" };
++
++/** §2.3 / §6.2 — `ok` alone never proves that this call deleted anything. */
++export type ProviderRemoveEffect = "deleted" | "absent";
++
++/**
++ * §2.6 — independent schema for `PI_HOST_REMOVED`; no field is inherited from
++ * `ProviderImportSummary`. `defaultMoved` is absent when the target was not the
++ * default, and never present together with `effect:"absent"`.
++ */
++export type ProviderRemoveSummary = {
++  providerId: string;
++  effect: ProviderRemoveEffect;
++  secretCleared: boolean;
++  defaultMoved?: DefaultMoved;
++  remaining: number;
++  remainingEligible: number;
++};
++
++export function parseProviderRemoveSummary(value: unknown): ProviderRemoveSummary {
++  exact(value, ["providerId", "effect", "secretCleared", "defaultMoved", "remaining", "remainingEligible"]);
++  const effect = value.effect;
++  if (effect !== "deleted" && effect !== "absent") invalid();
++  // §7.2: `ok:true` with `secretCleared !== true` is a protocol error, not a result.
++  if (value.secretCleared !== true) invalid();
++  const summary: ProviderRemoveSummary = {
++    providerId: providerId(value.providerId),
++    effect,
++    secretCleared: true,
++    remaining: index(value.remaining),
++    remainingEligible: index(value.remainingEligible),
++  };
++  if (value.defaultMoved !== undefined) {
++    if (effect === "absent") invalid();
++    summary.defaultMoved = parseDefaultMoved(value.defaultMoved);
++  }
++  return structuredClone(summary);
++}
++
++function parseDefaultMoved(value: unknown): DefaultMoved {
++  exact(value, ["to", "reason", "orderingBasis"]);
++  if (value.orderingBasis !== "createdAt" && value.orderingBasis !== "none") invalid();
++  if (value.to === null) {
++    if (value.orderingBasis !== "none") invalid();
++    if (value.reason !== "no_remaining" && value.reason !== "no_eligible_candidate") invalid();
++    return { to: null, reason: value.reason, orderingBasis: "none" };
++  }
++  if (value.orderingBasis !== "createdAt" || value.reason !== undefined) invalid();
++  exact(value.to, ["providerId", "modelId"]);
++  if (typeof value.to.modelId !== "string" || value.to.modelId.length === 0) invalid();
++  return { to: { providerId: providerId(value.to.providerId), modelId: value.to.modelId }, orderingBasis: "createdAt" };
++}
++
++/* ------------------------------------------------ binding status (§2.4.2/§2.4.5) */
++
++export type ProviderUnavailableReason =
++  | "provider_missing"
++  | "provider_disabled"
++  | "models_empty"
++  | "model_removed"
++  | "secret_missing"
++  | "oauth_unsupported"
++  | "no_candidate"
++  | "unknown";
++
++export const PROVIDER_UNAVAILABLE_REASONS: readonly ProviderUnavailableReason[] = [
++  "provider_missing",
++  "provider_disabled",
++  "models_empty",
++  "model_removed",
++  "secret_missing",
++  "oauth_unsupported",
++  "no_candidate",
++  "unknown",
++];
++export const PROVIDER_SOURCES = ["pin", "default", "fallback"] as const;
++export const PROVIDER_MODEL_SOURCES = ["session", "default", "provider_first"] as const;
++export const UNKNOWN_INPUTS = [
++  "providers.list",
++  "providers.get",
++  "settings.get",
++  "session.get",
++  "providers.getSecret",
++] as const;
++
++/** §5.6.1 — necessary checks, negative bits and pure information bits. */
++export type ProviderBindingChecks = {
++  providerKnown: boolean | null;
++  providerEnabled: boolean | null;
++  modelsEmpty: boolean | null;
++  modelPresent: boolean | null;
++  secretPresent: boolean | null;
++  oauth: boolean | null;
++  pluginOwned: boolean | null;
++  secretMismatch: boolean | null;
++};
++export type ProviderBindingPinned = {
++  providerId: string | null;
++  modelId: string | null;
++  thinkingLevel: string | null;
++};
++export type ProviderBindingEffective = {
++  providerId: string;
++  modelId: string;
++  providerSource: (typeof PROVIDER_SOURCES)[number];
++  modelSource: (typeof PROVIDER_MODEL_SOURCES)[number];
++};
++export type ProviderBindingStatus = {
++  sessionId: string;
++  pinned: ProviderBindingPinned;
++  effective: ProviderBindingEffective | null;
++  available: boolean | null;
++  unavailableReason: ProviderUnavailableReason | null;
++  checks: ProviderBindingChecks;
++  unknownInputs: string[];
++  consistency: { reads: number; snapshotStable: boolean };
++  isDefault: boolean;
++  revision: number | null;
++  sessionUpdatedAt: string | null;
++  maxAgeMs: number;
++  observedAt: string;
++};
++
++function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T {
++  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) invalid();
++  return value as T;
++}
++function nullableEnum<T extends string>(value: unknown, allowed: readonly T[]): T | null {
++  if (value === null) return null;
++  return enumValue(value, allowed);
++}
++function stringOrNull(value: unknown): string | null {
++  if (value === null) return null;
++  if (typeof value !== "string" || value.length === 0) invalid();
++  return value;
++}
++
++/** §2.4.5 — strict: required keys always present, nullable keys present as `null`, no unknown key. */
++export function parseProviderBindingStatus(value: unknown): ProviderBindingStatus {
++  exact(value, [
++    "sessionId", "pinned", "effective", "available", "unavailableReason", "checks", "unknownInputs",
++    "consistency", "isDefault", "revision", "sessionUpdatedAt", "maxAgeMs", "observedAt",
++  ]);
++  if (typeof value.sessionId !== "string" || value.sessionId.length === 0) invalid();
++  exact(value.pinned, ["providerId", "modelId", "thinkingLevel"]);
++  exact(value.checks, [
++    "providerKnown", "providerEnabled", "modelsEmpty", "modelPresent", "secretPresent", "oauth", "pluginOwned", "secretMismatch",
++  ]);
++  if (!Array.isArray(value.unknownInputs)) invalid();
++  const unknownInputs = value.unknownInputs.map((input) => enumValue(input, UNKNOWN_INPUTS));
++  exact(value.consistency, ["reads", "snapshotStable"]);
++  const reads = index(value.consistency.reads);
++  if (reads > 3) invalid();
++  return {
++    sessionId: value.sessionId,
++    pinned: {
++      providerId: stringOrNull(value.pinned.providerId),
++      modelId: stringOrNull(value.pinned.modelId),
++      thinkingLevel: stringOrNull(value.pinned.thinkingLevel),
++    },
++    effective: value.effective === null ? null : parseEffective(value.effective),
++    available: nullableFlag(value.available),
++    unavailableReason: nullableEnum(value.unavailableReason, PROVIDER_UNAVAILABLE_REASONS),
++    checks: {
++      providerKnown: nullableFlag(value.checks.providerKnown),
++      providerEnabled: nullableFlag(value.checks.providerEnabled),
++      modelsEmpty: nullableFlag(value.checks.modelsEmpty),
++      modelPresent: nullableFlag(value.checks.modelPresent),
++      secretPresent: nullableFlag(value.checks.secretPresent),
++      oauth: nullableFlag(value.checks.oauth),
++      pluginOwned: nullableFlag(value.checks.pluginOwned),
++      secretMismatch: nullableFlag(value.checks.secretMismatch),
++    },
++    unknownInputs,
++    consistency: { reads, snapshotStable: flag(value.consistency.snapshotStable) },
++    isDefault: flag(value.isDefault),
++    revision: value.revision === null ? null : index(value.revision),
++    sessionUpdatedAt: stringOrNull(value.sessionUpdatedAt),
++    maxAgeMs: index(value.maxAgeMs),
++    observedAt: typeof value.observedAt === "string" && value.observedAt.length > 0 ? value.observedAt : invalid(),
++  };
++}
++
++function parseEffective(value: unknown): ProviderBindingEffective {
++  exact(value, ["providerId", "modelId", "providerSource", "modelSource"]);
++  if (typeof value.providerId !== "string" || value.providerId.length === 0) invalid();
++  if (typeof value.modelId !== "string" || value.modelId.length === 0) invalid();
++  return {
++    providerId: value.providerId,
++    modelId: value.modelId,
++    providerSource: enumValue(value.providerSource, PROVIDER_SOURCES),
++    modelSource: enumValue(value.modelSource, PROVIDER_MODEL_SOURCES),
++  };
++}
++
++/* --------------------------------------------- remove status (§2.4.3/§2.4.5) */
++
++export const WRITE_ORDERING_PROOFS = ["unproven", "proven"] as const;
++
++/** §2.4.3 — observation only: it never answers "did the removal succeed". */
++export type ProviderRemoveStatus = {
++  providerId: string;
++  recordPresent: boolean;
++  secretPresent: boolean | null;
++  defaultBinding: { isDefault: boolean; defaultProviderId: string | null };
++  enabled: boolean | null;
++  modelCount: number | null;
++  receiptPresent: boolean;
++  slotFree: boolean;
++  writeOrderingProof: (typeof WRITE_ORDERING_PROOFS)[number];
++  boundSessionCount: number | null;
++  maxAgeMs: number;
++  observedAt: string;
++};
++
++export function parseProviderRemoveStatus(value: unknown): ProviderRemoveStatus {
++  exact(value, [
++    "providerId", "recordPresent", "secretPresent", "defaultBinding", "enabled", "modelCount",
++    "receiptPresent", "slotFree", "writeOrderingProof", "boundSessionCount", "maxAgeMs", "observedAt",
++  ]);
++  exact(value.defaultBinding, ["isDefault", "defaultProviderId"]);
++  return {
++    providerId: providerId(value.providerId),
++    recordPresent: flag(value.recordPresent),
++    secretPresent: nullableFlag(value.secretPresent),
++    defaultBinding: { isDefault: flag(value.defaultBinding.isDefault), defaultProviderId: stringOrNull(value.defaultBinding.defaultProviderId) },
++    enabled: nullableFlag(value.enabled),
++    modelCount: value.modelCount === null ? null : index(value.modelCount),
++    receiptPresent: flag(value.receiptPresent),
++    slotFree: flag(value.slotFree),
++    writeOrderingProof: enumValue(value.writeOrderingProof, WRITE_ORDERING_PROOFS),
++    boundSessionCount: value.boundSessionCount === null ? null : index(value.boundSessionCount),
++    maxAgeMs: index(value.maxAgeMs),
++    observedAt: typeof value.observedAt === "string" && value.observedAt.length > 0 ? value.observedAt : invalid(),
++  };
++}
++
++/* ------------------------------------------- forget summary (§7.4.1, §7.4.2) */
++
++/** Exactly four keys; `receiptState` has one value in this release. */
++export type ProviderSyncForgetSummary = {
++  providerId: string;
++  removedEntries: number;
++  remainingEntries: number;
++  receiptState: "absent";
++};
++export function parseProviderSyncForgetSummary(value: unknown): ProviderSyncForgetSummary {
++  exact(value, ["providerId", "removedEntries", "remainingEntries", "receiptState"]);
++  if (value.receiptState !== "absent") invalid();
++  return {
++    providerId: providerId(value.providerId),
++    removedEntries: index(value.removedEntries),
++    remainingEntries: index(value.remainingEntries),
++    receiptState: "absent",
++  };
++}
++
++/* ------------------------------------------------- P1 candidates (§4.3, §5.6) */
++
++/** Only the fields §4.3/§5.6 may read; `providers.list` really returns these. */
++export type ProviderCandidateRow = {
++  id: string;
++  enabled?: boolean;
++  models?: Array<{ id: string }>;
++  authKind?: string;
++  hasSecret?: boolean;
++  hasOauth?: boolean;
++  createdAt?: string;
++  defaultModelId?: string;
++};
++
++/** §4.3 — `models[0].id` is the model a candidate would run; `defaultModelId` never overrides it. */
++export function candidateModelId(row: ProviderCandidateRow): string | null {
++  const first = row.models?.[0];
++  return first && typeof first.id === "string" && first.id.length > 0 ? first.id : null;
++}
++
++/**
++ * §4.3 qualification, minus `pluginAllowed` (that needs one `providers.get` per
++ * row and lives where the row records are available). `enabled` is compared
++ * strictly: a missing field is not "enabled".
++ */
++export function isEligibleCandidate(row: ProviderCandidateRow): boolean {
++  if (row.enabled !== true) return false;
++  if (!Array.isArray(row.models) || row.models.length < 1) return false;
++  if (row.authKind === OAUTH_AUTH_KIND || row.hasOauth === true) return false;
++  // `hasSecret` is only the pre-filter; §5.7 re-checks the real secret on candidates.
++  return row.authKind === "none" ? true : row.hasSecret === true;
++}
++
++const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
++
++/** §4.3 — `createdAt` is comparable only when it parses as RFC3339/ISO8601 with a zone. */
++export function parseCreatedAtInstant(value: unknown): number | null {
++  if (typeof value !== "string" || !RFC3339.test(value)) return null;
++  const instant = Date.parse(value);
++  return Number.isFinite(instant) ? instant : null;
++}
++
++export type CandidateOrdering = {
++  ordered: ProviderCandidateRow[];
++  orderingBasis: "createdAt" | "none";
++  /** True only when every candidate's `createdAt` is comparable. */
++  comparable: boolean;
++};
++
++/**
++ * §4.3 full order: `(createdAt asc, id bytes asc)`. One incomparable candidate
++ * makes the whole batch incomparable and the ordered list empty — there is no
++ * "fall back to id order" and no reliance on the `providers.list` order.
++ */
++export function orderEligibleCandidates(rows: readonly ProviderCandidateRow[]): CandidateOrdering {
++  if (rows.length === 0) return { ordered: [], orderingBasis: "none", comparable: false };
++  const instants = rows.map((row) => parseCreatedAtInstant(row.createdAt));
++  if (instants.some((instant) => instant === null)) return { ordered: [], orderingBasis: "none", comparable: false };
++  const ordered = rows
++    .map((row, position) => ({ row, instant: instants[position] as number }))
++    .sort((left, right) => left.instant - right.instant || (left.row.id < right.row.id ? -1 : left.row.id > right.row.id ? 1 : 0))
++    .map(({ row }) => row);
++  return { ordered, orderingBasis: "createdAt", comparable: true };
++}

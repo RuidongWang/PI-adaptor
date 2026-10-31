@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 局域网访问说明：SSH 隧道与 RACP 都要连用户添加的局域网服务器，
+	     缺这条系统会在首次连接时直接拒绝（不弹授权）。 -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>需要访问局域网以连接你添加的服务器：App 通过 SSH 隧道与服务器上的 pi-host 通信，只连接你自己配置的服务器地址。</string>
+
+	<!-- ATS：本地网络与回环（ws://127.0.0.1 的 RACP 通道）不得被静默拦掉。
+	     只放开本地网络，不放开任意明文外网请求。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+
+	<!-- 让 App 的 Documents 在「文件」App 里可见（"我的 iPhone / PI-IOS"）：
+	     用户可以把私钥文件放进这里，再由 App 的私钥文件选择器选中。
+	     这同时让 Finder / iTunes 文件共享可用，模拟器上也能用 simctl 直接放文件。 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+</dict>
+</plist>
