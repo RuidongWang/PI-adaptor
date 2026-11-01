@@ -19,16 +19,9 @@ Type=simple
 # Fully isolated root: data/, agent/, logs/, run/ all live below it.
 Environment=PI_ADAPTOR_HOME=%h/.pi-adaptor
 Environment=PI_ADAPTOR_PORT=19445
-Environment=PI_ADAPTOR_HOST_ID=pi-adaptor-aarch64
-Environment=PI_ADAPTOR_VERSION=2.0.1
-
-# Belt-and-braces isolation: even HOME-derived defaults stay inside the root if
-# a future dependency reads them. Remove this line only if you deliberately want
-# the host to see the login HOME.
-Environment=HOME=%h/.pi-adaptor
 
 # Absolute path to the built entrypoint for the deployed version.
-ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js
+ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js --home %h/.pi-adaptor --port 19445
 
 Restart=on-failure
 RestartSec=2
