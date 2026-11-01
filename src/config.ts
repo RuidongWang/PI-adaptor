@@ -42,8 +42,8 @@ export type HostConfigFile = {
 
 /**
  * Default root for a fully self-contained PI-adaptor host. Deliberately
- * distinct from the legacy PI-Desktop host (`~/.pi-desktop`) and from the
- * replaced `~/.pi-host-v2` root, so an old install can never be mistaken for
+ * distinct from the legacy PI-Desktop host (`~/.pi-desktop`) and from any
+ * earlier PI-adaptor data root, so an old install can never be mistaken for
  * this one.
  */
 export const DEFAULT_HOME_DIR_NAME = ".pi-adaptor";

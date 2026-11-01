@@ -1,10 +1,9 @@
 # PI-adaptor
 
 Node 22 + TypeScript Host built on `@earendil-works/pi-coding-agent@1.3.0`.
-This is the host that PI-IOS drives over RACP v2 (protocol `2.0.0`); it was
-previously published as `pi-host-v2` and now carries the project name
-**PI-adaptor** everywhere: package, directories, environment namespace, systemd
-unit and release artifacts.
+This is the host that PI-IOS drives over RACP v2 (protocol `2.0.0`). The project
+name **PI-adaptor** applies everywhere: package, directories, environment
+namespace, systemd unit and release artifacts.
 
 ## Run
 
