@@ -32,7 +32,7 @@ final class SSHErrorMappingTests: XCTestCase {
         XCTAssertEqual(phase, "SSH 握手与认证")
         let text = SSHTransportError.closedByPeer(phase: phase).description
         XCTAssertTrue(text.contains("EOF"))
-        XCTAssertTrue(text.contains("SSH 端口"), "必须提示检查是否把 SSH 端口填成了 pi-host 端口")
+        XCTAssertTrue(text.contains("SSH 端口"), "必须提示检查是否把 SSH 端口填成了 PI-adaptor 端口")
         XCTAssertTrue(text.contains("sshd"))
     }
 

@@ -1,6 +1,7 @@
 import Foundation
 
-/// Validation for the short-lived token printed by `pi-host --pair`.
+/// Validation for the short-lived token printed by PI-adaptor. `ppt1` remains
+/// recognized only for an explicitly selected legacy compatibility flow.
 public enum RACPPairingToken {
     public static func normalize(_ raw: String) -> String? {
         let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)

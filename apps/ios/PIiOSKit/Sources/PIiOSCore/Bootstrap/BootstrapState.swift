@@ -185,6 +185,14 @@ public struct BootstrapStateFile: Equatable, Sendable {
         failureCodeRaw.map(BootstrapFailureCode.init(raw:))
     }
 
+    /// Optional structured diagnostics added by the PI-adaptor installer.
+    /// Unknown keys stay untouched in `error`; these fields are only a typed
+    /// presentation layer.
+    public var failureDetails: BootstrapFailureDetails? {
+        guard let error else { return nil }
+        return BootstrapFailureDetails(error: error)
+    }
+
     /// 三方状态：运行中 / 成功 / 失败（失败必带码，含未知码）。
     public var outcome: BootstrapOutcome {
         switch status {
@@ -200,6 +208,92 @@ public struct BootstrapStateFile: Equatable, Sendable {
     /// 停滞判定用的进度样本（契约 §5.3 第 2 条只看 `step` 与 `downloadedBytes`）。
     public func progressSample(at date: Date) -> BootstrapProgressSample {
         BootstrapProgressSample(step: step, downloadedBytes: artifact?.downloadedBytes ?? 0, observedAt: date)
+    }
+}
+
+public struct BootstrapFailureDetails: Equatable, Sendable {
+    public struct LegacyUnit: Equatable, Sendable {
+        public var unit: String
+        public var originalActive: Bool?
+        public var originalEnabled: Bool?
+        public var portOccupied: Bool?
+
+        public init(
+            unit: String,
+            originalActive: Bool? = nil,
+            originalEnabled: Bool? = nil,
+            portOccupied: Bool? = nil
+        ) {
+            self.unit = unit
+            self.originalActive = originalActive
+            self.originalEnabled = originalEnabled
+            self.portOccupied = portOccupied
+        }
+    }
+
+    public var reason: String?
+    public var phase: String?
+    public var expectedName: String?
+    public var actualName: String?
+    public var expectedVersion: String?
+    public var actualVersion: String?
+    public var installDirectory: String?
+    public var unitName: String?
+    public var port: Int?
+    public var legacyUnits: [LegacyUnit]
+
+    public init(error: JSONValue) {
+        let details = error.value(at: ["details"])
+        reason = details?.value(at: ["reason"])?.stringValue
+        phase = details?.value(at: ["phase"])?.stringValue
+        expectedName = details?.value(at: ["expectedName"])?.stringValue
+        actualName = details?.value(at: ["actualName"])?.stringValue
+        expectedVersion = details?.value(at: ["expectedVersion"])?.stringValue
+        actualVersion = details?.value(at: ["actualVersion"])?.stringValue
+        installDirectory = details?.value(at: ["installDirectory"])?.stringValue
+        unitName = details?.value(at: ["unitName"])?.stringValue
+        port = details?.value(at: ["port"])?.intValue
+        legacyUnits = details?.value(at: ["legacyUnits"])?.arrayValue?.compactMap { value in
+            guard let unit = value.value(at: ["unit"])?.stringValue,
+                  !unit.isEmpty
+            else { return nil }
+            return LegacyUnit(
+                unit: unit,
+                originalActive: value.value(at: ["originalActive"])?.boolValue,
+                originalEnabled: value.value(at: ["originalEnabled"])?.boolValue,
+                portOccupied: value.value(at: ["portOccupied"])?.boolValue
+            )
+        } ?? []
+    }
+
+    public var displayText: String? {
+        var lines: [String] = []
+        if let phase { lines.append("失败阶段：\(phase)") }
+        if let reason { lines.append("原因：\(reason)") }
+        if let expectedName, let actualName {
+            lines.append("运行名称：期望 \(expectedName)，实际 \(actualName)")
+        }
+        if let expectedVersion, let actualVersion {
+            lines.append("运行版本：期望 \(expectedVersion)，实际 \(actualVersion)")
+        }
+        if let installDirectory { lines.append("激活目录：\(installDirectory)") }
+        if let unitName { lines.append("服务：\(unitName)") }
+        if let port { lines.append("端口：\(port)") }
+        for legacy in legacyUnits {
+            var state: [String] = []
+            if let originalActive = legacy.originalActive {
+                state.append("原 active=\(originalActive)")
+            }
+            if let originalEnabled = legacy.originalEnabled {
+                state.append("原 enabled=\(originalEnabled)")
+            }
+            if let portOccupied = legacy.portOccupied {
+                state.append("端口冲突=\(portOccupied)")
+            }
+            let suffix = state.isEmpty ? "" : "（\(state.joined(separator: "，"))）"
+            lines.append("Legacy 服务：\(legacy.unit)\(suffix)")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 }
 
@@ -366,7 +460,7 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
     public var displayMessage: String {
         switch self {
         case .noHome:
-            return "找不到目标用户的主目录（$HOME），无法写入 .pi-desktop/pi-host"
+            return "找不到目标用户的主目录（$HOME），无法写入 .pi-adaptor"
         case .missingTar:
             return "缺少安装包 tarball"
         case .missingSha256Tool:
@@ -384,19 +478,19 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         case .unexpectedArchiveLayout:
             return "压缩包目录结构与预期不符"
         case .installFailed:
-            return "安装到 pi-host/current 失败"
+            return "安装 PI-adaptor release 失败"
         case .installedVerificationFailed:
             return "安装后自检失败"
         case .missingNode:
             return "bundle 内缺少 Node 运行时"
         case .nodeTooOld:
-            return "Node 版本过低（要求 22 及以上）"
+            return "Node 版本过低（要求 22.19.0 及以上）"
         case .hostStopTimeout:
-            return "停止 pi-host 超时"
+            return "停止旧 Host 或 PI-adaptor 服务超时"
         case .hostStartFailed:
-            return "启动 pi-host 失败"
+            return "启动 PI-adaptor 失败"
         case .hostExited:
-            return "pi-host 进程已退出"
+            return "PI-adaptor 进程已退出"
         case .readyTimeout:
             return "等待 Host 就绪超时"
         case .receiptFailed:
@@ -408,9 +502,9 @@ public enum BootstrapFailureCode: Equatable, Hashable, Sendable {
         case .pairFailed:
             return "配对失败：配对令牌可能已过期，请重启 Host 取新令牌再配对，不复用旧令牌（AC-01.9）"
         case .unitFailed:
-            return "写 systemd unit 失败：sudo 密码错误或无 sudo 权限；解包与 current 切换已完成，不自动回滚（AC-01.11）"
+            return "pi-adaptor.service 启动失败或旧服务仍占用端口；安装器会回滚 current 与服务状态"
         case .verifyDeviceFailed:
-            return "用设备令牌重连校验失败，未达到「unit active 且设备令牌重连成功」的终态（AC-01.8）"
+            return "运行身份、完整版本或 ping 校验失败；不会把旧 Host 当作安装成功"
         case let .unknown(raw):
             return raw.isEmpty ? "Host 报告失败但没有给出失败码，请查看 Host 日志" : "未识别的失败码：\(raw)"
         }

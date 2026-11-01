@@ -195,6 +195,12 @@ final class ConnectionDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testRemoteUnavailableGuidanceUsesPIAdaptorName() {
+        let message = ConnectionFailureKind.remoteUnavailable.userMessage
+        XCTAssertTrue(message.contains("PI-adaptor"))
+        XCTAssertFalse(message.contains("pi-host"))
+    }
+
     func testRACPDisplayUsesFixedMessagesForKnownCodes() {
         let cases: [(RACPErrorCode, String)] = [
             (.unauthorized, ConnectionFailureKind.authentication.userMessage),

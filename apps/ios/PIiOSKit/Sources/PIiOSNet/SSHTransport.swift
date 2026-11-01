@@ -42,7 +42,7 @@ public enum SSHTransportError: Error, Equatable, CustomStringConvertible {
     /// 对端在握手/转发阶段直接关闭了连接（NIO `ChannelError.eof` 等）。
     /// 之前这类错误会以 `NIOCore.ChannelError错误9` 的原文出现在界面上，看不出该查什么。
     case closedByPeer(phase: String)
-    /// 服务器拒绝打开转发通道：目标回环端口上没有服务在监听（pi-host 未启动或端口不符）。
+    /// 服务器拒绝打开转发通道：目标回环端口上没有服务在监听（PI-adaptor 未启动或端口不符）。
     case tunnelRefused(phase: String, detail: String)
     /// 其它网络层失败（不可达、地址无效等），保留原始描述用于排查。
     case networkFailure(phase: String, detail: String)
@@ -69,14 +69,14 @@ public enum SSHTransportError: Error, Equatable, CustomStringConvertible {
             return "SSH 通道已关闭"
         case .closedByPeer(let phase):
             return "服务器在「\(phase)」阶段直接关闭了连接（EOF）。"
-                + "常见原因：SSH 端口填成了 pi-host 的端口；sshd 未运行或被防火墙拦在中间；"
+                + "常见原因：SSH 端口填成了 PI-adaptor 的端口；sshd 未运行或被防火墙拦在中间；"
                 + "服务器限流（MaxStartups）或正在重启；账号被 sshd 拒绝（DenyUsers / AllowUsers）。"
                 + "先在另一台机器上用 `ssh -v 用户@地址 -p 端口` 确认能登录，再来连。"
         case .tunnelRefused(let phase, let detail):
             return "「\(phase)」被服务器拒绝：目标端口上没有服务在监听（\(detail)）。"
-                + "这通常表示 pi-host 没在跑，或设置里的 pi-host 端口与服务实际端口不一致："
+                + "这通常表示 PI-adaptor 没在跑，或设置里的 PI-adaptor 端口与服务实际端口不一致："
                 + "在服务器上执行 `ss -ltn | grep <端口>` 确认；"
-                + "pi-host 用 `--port 0` 启动时端口是随机的，需要用固定端口（如 `--port 33381`）重启后才能长期连接。"
+                + "PI-adaptor 用 `--port 0` 启动时端口是随机的，需要用固定端口（如 `--port 33381`）重启后才能长期连接。"
         case .networkFailure(let phase, let detail):
             return "「\(phase)」网络失败：\(detail)。检查地址与端口、手机网络/VPN，以及服务器防火墙是否放行该端口。"
         }
@@ -247,7 +247,7 @@ public final class SSHTransport {
             return sshMapped
         }
         if let sshError = error as? NIOSSHError, sshError.type == .channelSetupRejected {
-            // 服务器拒绝转发：目标回环端口没人监听。这是 pi-host 未启动/端口不符的典型症状。
+            // 服务器拒绝转发：目标回环端口没人监听。这是 PI-adaptor 未启动/端口不符的典型症状。
             return SSHTransportError.tunnelRefused(phase: phase, detail: sshError.description)
         }
         if let channelError = error as? ChannelError {

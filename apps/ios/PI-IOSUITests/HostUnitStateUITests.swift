@@ -23,7 +23,7 @@ final class HostUnitStateUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["未连接"].waitForExistence(timeout: 5))
         let restart = app.descendants(matching: .any)["settings.restartCommand"]
         XCTAssertTrue(restart.waitForExistence(timeout: 5))
-        XCTAssertTrue(restart.label.contains("systemctl --user restart pi-host.service"))
+        XCTAssertTrue(restart.label.contains("systemctl --user restart pi-adaptor.service"))
     }
 
     private func launch(scenario: String) {

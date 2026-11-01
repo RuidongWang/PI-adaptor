@@ -248,7 +248,7 @@ public enum ProviderRemoveFailureCode: Equatable, Sendable {
         case .targetStillExists:
             return "目标模型服务仍然存在，未清除其导入回执"
         case .unsupportedOp:
-            return "当前 Host 不支持该操作（能力缺失），请升级服务器上的 pi-host"
+            return "当前 PI-adaptor 不支持该操作（能力缺失），请升级服务器上的 PI-adaptor 2.0.1"
         case .responseTooLarge:
             return "Host 响应超过上限，结果不确定，请在服务器上人工确认"
         case .responseInvalid:

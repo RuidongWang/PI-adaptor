@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 ///
 /// 本页现在真的会连一次服务器：「保存并测试连接」= 写入本机记录 + 凭证进 Keychain +
 /// 一次真实 SSH 握手/认证/`exec`；首次连接会先停在指纹核对（AC-02.1）。
-/// 配对使用 `pi-host --pair` 输出的一次性令牌；安装入口转到真实 bootstrap 状态机。
+/// 配对使用 `pi-adaptor` 输出的一次性令牌；安装入口转到真实 bootstrap 状态机。
 struct ServersScreen: View {
     let hostID: UUID?
     let push: (SettingsRoute) -> Void
@@ -209,8 +209,8 @@ struct ServersScreen: View {
             PIRowDivider()
             formRow {
                 PIFormField(
-                    label: "pi-host 端口",
-                    hint: "可留空：连接时会通过 SSH 自动探测服务器上 pi-host 监听的端口，无需手动填写",
+                    label: "PI-adaptor 端口",
+                    hint: "可留空：连接时会通过 SSH 自动探测服务器上 PI-adaptor 监听的端口，无需手动填写",
                     error: errors.hostPort
                 ) {
                     TextField("自动探测", text: $draft.hostPort)
@@ -391,17 +391,16 @@ struct ServersScreen: View {
         }
     }
 
-    // MARK: - pi-host 连接与危险区
+    // MARK: - PI-adaptor 连接与危险区
 
     private func pairingSection(for host: HostRecord) -> some View {
-        let account = KeychainStore.account(username: host.username, host: host.host, port: host.port)
         let hasDeviceToken = KeychainStore.loadDeviceToken(hostID: host.id) != nil
         return PIGroup(
-            "pi-host 连接",
-            footer: "配对令牌由服务器执行 `pi-host --pair` 时输出，只能使用一次。配对成功后设备令牌只保存在本机 Keychain。"
+            "PI-adaptor 连接",
+            footer: "配对令牌由服务器执行 `pi-adaptor --pair` 时输出，只能使用一次。配对成功后设备令牌只保存在本机 Keychain。"
         ) {
             PIListRow(
-                title: "安装或修复 pi-host",
+                title: "安装或修复 PI-adaptor",
                 subtitle: "远端探测、下载校验、systemd 常驻、配对与设备令牌重连",
                 isEnabled: !isSaving && !isPairing && !isDeleting,
                 showsChevron: true,
@@ -416,7 +415,7 @@ struct ServersScreen: View {
                     showsDivider: true
                 )
                 PIListRow(
-                    title: "连接 pi-host",
+                    title: "连接 PI-adaptor",
                     subtitle: "通过 SSH 隧道连接 127.0.0.1:\(host.hostPort.map(String.init) ?? "未设置")",
                     isEnabled: !isSaving && !isPairing && !isDeleting,
                     showsChevron: true,
@@ -427,9 +426,9 @@ struct ServersScreen: View {
                 VStack(alignment: .leading, spacing: PISpacing.s8) {
                     PIFormField(
                         label: "一次性配对令牌",
-                        hint: "格式：ppt1.… 或 ppt2.…；在服务器执行 `pi-host --pair` 后复制"
+                        hint: "默认安装格式：ppt2.…；安装流程会在远端启动 PI-adaptor --pair"
                     ) {
-                        SecureField("ppt1.… / ppt2.…", text: $pairingToken)
+                        SecureField("ppt2.…", text: $pairingToken)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
@@ -517,7 +516,7 @@ struct ServersScreen: View {
             Text("本机写了什么")
                 .font(PIFont.captionStrong)
                 .foregroundStyle(PIColor.text2)
-            Text("state-v1.json：地址、端口、用户名、认证方式、名称与 pi-host 端口。Keychain（仅本机）：密码或私钥、设备令牌、已固定的主机指纹。API Key 与令牌都不会出现在本机文件、日志或剪贴板里。")
+            Text("state-v1.json：地址、端口、用户名、认证方式、名称与 PI-adaptor 端口。Keychain（仅本机）：密码或私钥、设备令牌、已固定的主机指纹。API Key 与令牌都不会出现在本机文件、日志或剪贴板里。")
                 .font(PIFont.caption)
                 .foregroundStyle(PIColor.text3)
                 .fixedSize(horizontal: false, vertical: true)

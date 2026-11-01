@@ -5,7 +5,8 @@ import XCTest
 @testable import PIiOSNet
 
 final class BootstrapRunnerTests: XCTestCase {
-    private let token = "ppt1.runner_token"
+    private let token = "ppt2." + "runner_pairing_token"
+    private let issuedToken = "pdt2." + "runner_device_token"
 
     private func configuration(
         attemptId: String = "boot_test"
@@ -38,13 +39,13 @@ final class BootstrapRunnerTests: XCTestCase {
             status: status,
             host: BootstrapHostInfo(platform: "linux", arch: "arm64"),
             artifact: BootstrapArtifactInfo(
-                name: "pi-host-0.21.0-linux-arm64.tar.gz",
+                name: "pi-adaptor-0.21.0-linux-arm64.tar.gz",
                 sha256: String(repeating: "a", count: 64),
                 bytes: 100,
                 downloadedBytes: downloadedBytes
             ),
             service: BootstrapServiceInfo(
-                unitPath: "/home/ubuntu/.config/systemd/user/pi-host.service",
+                unitPath: "/home/ubuntu/.config/systemd/user/pi-adaptor.service",
                 state: step == .done ? "active" : "absent"
             ),
             error: error,
@@ -57,8 +58,9 @@ final class BootstrapRunnerTests: XCTestCase {
         )
     }
 
-    private func pairingResult() -> SSHExecResult {
-        let json = #"{"token":"\#(token)","expiresAt":1234,"host":"127.0.0.1","port":43871}"#
+    private func pairingResult(token: String? = nil) -> SSHExecResult {
+        let selectedToken = token ?? self.token
+        let json = #"{"token":"\#(selectedToken)","expiresAt":1234,"host":"127.0.0.1","port":43871}"#
         return SSHExecResult(exitStatus: 0, stdout: Data(json.utf8), stderr: Data())
     }
 
@@ -93,7 +95,7 @@ final class BootstrapRunnerTests: XCTestCase {
         let pairing = RecordingPairer(
             result: BootstrapPairedDevice(
                 deviceId: "dev_1",
-                deviceToken: "pdt1.secret",
+                deviceToken: issuedToken,
                 roles: ["owner"]
             )
         )
@@ -121,12 +123,14 @@ final class BootstrapRunnerTests: XCTestCase {
         XCTAssertEqual(success.device.deviceId, "dev_1")
         XCTAssertEqual(success.port, 43_871)
         XCTAssertEqual(success.state.step, .done)
+        XCTAssertEqual(success.serverInfo.serverName, "pi-adaptor")
+        XCTAssertEqual(success.serverInfo.serverVersion, "0.21.0")
         XCTAssertEqual(pairing.callCount, 1)
         XCTAssertEqual(pairing.material?.token, token)
         XCTAssertEqual(pairing.deviceLabel, "Test iPhone")
         XCTAssertEqual(pairing.transportIdentity, recordedTransport(transport))
         XCTAssertEqual(verifier.callCount, 1)
-        XCTAssertEqual(verifier.device?.deviceToken, "pdt1.secret")
+        XCTAssertEqual(verifier.device?.deviceToken, issuedToken)
         XCTAssertEqual(verifier.transportIdentity, recordedTransport(transport))
         XCTAssertTrue(transport.closed)
         XCTAssertEqual(transport.count(for: BootstrapRemoteCommand.probe), 1)
@@ -221,6 +225,61 @@ final class BootstrapRunnerTests: XCTestCase {
         XCTAssertEqual(transport.count(for: BootstrapRemoteCommand.writePairingOK), 0)
     }
 
+    func testDefaultRunnerRejectsLegacyPPT1WithoutCallingPairer() async throws {
+        let transport = MockBootstrapTransport(
+            responses: [
+                BootstrapRemoteCommand.probe: [
+                    SSHExecResult(
+                        exitStatus: 0,
+                        stdout: Data("platform=Linux\narch=aarch64\n".utf8),
+                        stderr: Data()
+                    ),
+                ],
+                BootstrapRemoteCommand.installScript: [success()],
+                BootstrapRemoteCommand.launch: [success()],
+                BootstrapRemoteCommand.readState: [
+                    try state(.startPair),
+                    try state(
+                        .pair,
+                        status: .failed,
+                        error: .object(["code": .string("pair-failed")])
+                    ),
+                ],
+                BootstrapRemoteCommand.readPairing: [
+                    pairingResult(token: "ppt1." + "legacy_token_for_test"),
+                ],
+                BootstrapRemoteCommand.writePairingFailed: [success()],
+            ]
+        )
+        let pairing = RecordingPairer(
+            result: BootstrapPairedDevice(
+                deviceId: "must_not_run",
+                deviceToken: "pdt2." + "not_used",
+                roles: ["owner"]
+            )
+        )
+        let runner = BootstrapRunner(
+            transport: transport,
+            pairing: pairing,
+            verifier: RecordingVerifier(),
+            configuration: BootstrapRunnerConfiguration(
+                pollInterval: 0.001,
+                overallTimeout: 2,
+                commandTimeout: 2
+            ),
+            sleeper: { _ in }
+        )
+
+        let result = try await runner.run(configuration: try configuration())
+
+        guard case let .failed(failure) = result else {
+            return XCTFail("默认 PI-adaptor 安装必须拒绝 ppt1：\(result)")
+        }
+        XCTAssertEqual(failure.code, .pairFailed)
+        XCTAssertTrue(failure.detail?.contains("ppt1") ?? false)
+        XCTAssertEqual(pairing.callCount, 0)
+    }
+
     func testVerificationCallbackFailureWritesFailureMarker() async throws {
         let transport = MockBootstrapTransport(
             responses: [
@@ -244,7 +303,7 @@ final class BootstrapRunnerTests: XCTestCase {
             transport: transport,
             pairing: RecordingPairer(result: BootstrapPairedDevice(
                 deviceId: "dev_verify",
-                deviceToken: "pdt1.verify",
+                deviceToken: issuedToken,
                 roles: []
             )),
             verifier: verifier,
@@ -267,6 +326,96 @@ final class BootstrapRunnerTests: XCTestCase {
         XCTAssertEqual(verifier.callCount, 1)
     }
 
+    func testRuntimeNameMismatchReturnsFailureDetail() async throws {
+        let result = try await runVerificationFailure(
+            serverInfo: RACPServerInfo(
+                protocolVersion: "1.0",
+                serverName: "pi-host",
+                serverVersion: "0.21.0",
+                hostId: "host_old",
+                connectionId: "conn_old",
+                roles: ["owner"]
+            )
+        )
+        guard case let .failed(failure) = result else {
+            return XCTFail("旧 Host 名称不得通过安装验证：\(result)")
+        }
+        XCTAssertEqual(failure.code, .verifyDeviceFailed)
+        XCTAssertTrue(failure.detail?.contains("pi-host") ?? false)
+        XCTAssertTrue(failure.detail?.contains("pi-adaptor") ?? false)
+        XCTAssertTrue(failure.detail?.contains("pi-adaptor.service") ?? false)
+        XCTAssertTrue(failure.detail?.contains("43871") ?? false)
+    }
+
+    func testRuntimeVersionMismatchReturnsFailureDetail() async throws {
+        let result = try await runVerificationFailure(
+            serverInfo: RACPServerInfo(
+                protocolVersion: "1.0",
+                serverName: "pi-adaptor",
+                serverVersion: "0.20.0",
+                hostId: "host_old",
+                connectionId: "conn_old",
+                roles: ["owner"]
+            )
+        )
+        guard case let .failed(failure) = result else {
+            return XCTFail("错误版本不得通过安装验证：\(result)")
+        }
+        XCTAssertEqual(failure.code, .verifyDeviceFailed)
+        XCTAssertTrue(failure.detail?.contains("0.21.0") ?? false)
+        XCTAssertTrue(failure.detail?.contains("0.20.0") ?? false)
+        XCTAssertTrue(failure.detail?.contains("pi-adaptor.service") ?? false)
+        XCTAssertTrue(failure.detail?.contains("43871") ?? false)
+    }
+
+    private func runVerificationFailure(
+        serverInfo: RACPServerInfo
+    ) async throws -> BootstrapRunResult {
+        let transport = MockBootstrapTransport(
+            responses: [
+                BootstrapRemoteCommand.probe: [
+                    SSHExecResult(
+                        exitStatus: 0,
+                        stdout: Data("platform=Linux\narch=aarch64\n".utf8),
+                        stderr: Data()
+                    ),
+                ],
+                BootstrapRemoteCommand.installScript: [success()],
+                BootstrapRemoteCommand.launch: [success()],
+                BootstrapRemoteCommand.readState: [
+                    try state(.startPair),
+                    try state(.verifyDevice),
+                    try state(
+                        .verifyDevice,
+                        status: .failed,
+                        error: .object(["code": .string("verify-device-failed")])
+                    ),
+                ],
+                BootstrapRemoteCommand.readPairing: [pairingResult()],
+                BootstrapRemoteCommand.writePairingOK: [success()],
+                BootstrapRemoteCommand.writeVerificationFailed: [success()],
+            ]
+        )
+        let runner = BootstrapRunner(
+            transport: transport,
+            pairing: RecordingPairer(
+                result: BootstrapPairedDevice(
+                    deviceId: "dev_mismatch",
+                    deviceToken: issuedToken,
+                    roles: ["owner"]
+                )
+            ),
+            verifier: RecordingVerifier(serverInfo: serverInfo),
+            configuration: BootstrapRunnerConfiguration(
+                pollInterval: 0.001,
+                overallTimeout: 2,
+                commandTimeout: 2
+            ),
+            sleeper: { _ in }
+        )
+        return try await runner.run(configuration: try configuration())
+    }
+
     func testPairingFileCanAppearAfterInitialPollWithoutLosingTheAttempt() async throws {
         let empty = SSHExecResult(exitStatus: 0, stdout: Data(), stderr: Data())
         let transport = MockBootstrapTransport(
@@ -279,6 +428,9 @@ final class BootstrapRunnerTests: XCTestCase {
                 BootstrapRemoteCommand.readState: [
                     try state(.startPair),
                     try state(.startPair),
+                    try state(.stopManual),
+                    try state(.startUnit),
+                    try state(.verifyDevice),
                     try state(.done, status: .ok),
                 ],
                 BootstrapRemoteCommand.readPairing: [empty, pairingResult()],
@@ -287,7 +439,7 @@ final class BootstrapRunnerTests: XCTestCase {
         )
         let pairing = RecordingPairer(result: BootstrapPairedDevice(
             deviceId: "dev_late",
-            deviceToken: "pdt1.late",
+            deviceToken: issuedToken,
             roles: []
         ))
         let runner = BootstrapRunner(
@@ -501,26 +653,39 @@ private final class RecordingPairer: BootstrapPairingCallback, @unchecked Sendab
 private final class RecordingVerifier: BootstrapDeviceVerificationCallback, @unchecked Sendable {
     private let lock = NSLock()
     private let error: Error?
+    private let serverInfo: RACPServerInfo
     private(set) var callCount = 0
     private(set) var device: BootstrapPairedDevice?
     private(set) var transportIdentity: ObjectIdentifier?
 
-    init(error: Error? = nil) {
+    init(
+        error: Error? = nil,
+        serverInfo: RACPServerInfo = RACPServerInfo(
+            protocolVersion: "1.0",
+            serverName: "pi-adaptor",
+            serverVersion: "0.21.0",
+            hostId: "host_test",
+            connectionId: "conn_test",
+            roles: ["owner"]
+        )
+    ) {
         self.error = error
+        self.serverInfo = serverInfo
     }
 
     func verify(
         using transport: any BootstrapCommandTransport,
         port: Int,
         device: BootstrapPairedDevice
-    ) async throws {
-        let error = withLock {
+    ) async throws -> RACPServerInfo {
+        let (error, serverInfo) = withLock {
             callCount += 1
             self.device = device
             transportIdentity = ObjectIdentifier(transport as AnyObject)
-            return self.error
+            return (self.error, self.serverInfo)
         }
         if let error { throw error }
+        return serverInfo
     }
 
     private func withLock<T>(_ body: () -> T) -> T {

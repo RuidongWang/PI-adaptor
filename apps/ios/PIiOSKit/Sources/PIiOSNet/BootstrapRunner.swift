@@ -54,7 +54,7 @@ public protocol BootstrapDeviceVerificationCallback {
         using transport: any BootstrapCommandTransport,
         port: Int,
         device: BootstrapPairedDevice
-    ) async throws
+    ) async throws -> RACPServerInfo
 }
 
 public struct BootstrapRunnerConfiguration: Sendable {
@@ -65,6 +65,10 @@ public struct BootstrapRunnerConfiguration: Sendable {
     public var commandTimeout: TimeInterval
     public var pairingCallbackTimeout: TimeInterval
     public var verificationCallbackTimeout: TimeInterval
+    /// New PI-adaptor installs must use a token produced by this attempt.
+    /// Legacy `ppt1` support exists only for an explicitly selected
+    /// compatibility flow and must never be enabled by the default installer.
+    public var allowLegacyPPT1: Bool
 
     public init(
         pollInterval: TimeInterval = 1,
@@ -72,7 +76,8 @@ public struct BootstrapRunnerConfiguration: Sendable {
         stallThreshold: TimeInterval = BootstrapStallDetector.defaultThreshold,
         commandTimeout: TimeInterval = 30,
         pairingCallbackTimeout: TimeInterval = 2 * 60,
-        verificationCallbackTimeout: TimeInterval = 60
+        verificationCallbackTimeout: TimeInterval = 60,
+        allowLegacyPPT1: Bool = false
     ) {
         self.pollInterval = max(0.01, pollInterval)
         self.overallTimeout = max(0.01, overallTimeout)
@@ -80,6 +85,7 @@ public struct BootstrapRunnerConfiguration: Sendable {
         self.commandTimeout = max(1, commandTimeout)
         self.pairingCallbackTimeout = max(0.1, pairingCallbackTimeout)
         self.verificationCallbackTimeout = max(0.1, verificationCallbackTimeout)
+        self.allowLegacyPPT1 = allowLegacyPPT1
     }
 }
 
@@ -102,21 +108,28 @@ public struct BootstrapRunSuccess: Equatable, Sendable {
     public let state: BootstrapStateFile
     public let device: BootstrapPairedDevice
     public let port: Int
+    public let serverInfo: RACPServerInfo
 }
 
 public struct BootstrapRunFailure: Equatable, Sendable {
     public let state: BootstrapStateFile
     public let code: BootstrapFailureCode
     public let callbackFailure: BootstrapCallbackFailure?
+    /// A non-secret explanation for a client-side callback failure. This is
+    /// deliberately returned separately from `state.error`, whose shape belongs
+    /// to the remote script.
+    public let detail: String?
 
     public init(
         state: BootstrapStateFile,
         code: BootstrapFailureCode,
-        callbackFailure: BootstrapCallbackFailure? = nil
+        callbackFailure: BootstrapCallbackFailure? = nil,
+        detail: String? = nil
     ) {
         self.state = state
         self.code = code
         self.callbackFailure = callbackFailure
+        self.detail = detail
     }
 }
 
@@ -148,6 +161,42 @@ public enum BootstrapRunnerError: Error, Equatable, CustomStringConvertible {
             return "配对文件格式不正确"
         case .timedOut:
             return "bootstrap 超过 15 分钟仍未完成"
+        }
+    }
+}
+
+enum BootstrapRuntimeIdentityError: Error, Equatable {
+    case nameMismatch(
+        expected: String,
+        actual: String,
+        expectedVersion: String,
+        actualVersion: String,
+        port: Int,
+        unitName: String
+    )
+    case versionMismatch(
+        expected: String,
+        actual: String,
+        serverName: String,
+        port: Int,
+        unitName: String
+    )
+
+    var displayText: String {
+        switch self {
+        case let .nameMismatch(
+            expected,
+            actual,
+            expectedVersion,
+            actualVersion,
+            port,
+            unitName
+        ):
+            return "运行身份不匹配：期望 \(expected) \(expectedVersion)，实际 \(actual) \(actualVersion)；"
+                + "服务 \(unitName)，端口 \(port)。"
+        case let .versionMismatch(expected, actual, serverName, port, unitName):
+            return "运行版本不匹配：\(serverName) 期望 \(expected)，实际 \(actual)；"
+                + "服务 \(unitName)，端口 \(port)。"
         }
     }
 }
@@ -250,8 +299,10 @@ public final class BootstrapRunner {
         var announcedStall: String?
         var pairAttempted = false
         var pairingFailure: BootstrapCallbackFailure?
+        var callbackFailureDetail: String?
         var verifyAttempted = false
         var pairedDevice: BootstrapPairedDevice?
+        var verifiedServerInfo: RACPServerInfo?
         var activeElapsed: TimeInterval = 0
         var activeSegmentStart: Date? = now()
 
@@ -271,12 +322,15 @@ public final class BootstrapRunner {
 
                 switch state.status {
                 case .ok:
-                    if state.step == .done, let pairedDevice {
+                    if state.step == .done,
+                       let pairedDevice,
+                       let verifiedServerInfo {
                         return .succeeded(
                             BootstrapRunSuccess(
                                 state: state,
                                 device: pairedDevice,
-                                port: scriptConfiguration.port
+                                port: scriptConfiguration.port,
+                                serverInfo: verifiedServerInfo
                             )
                         )
                     }
@@ -285,7 +339,8 @@ public final class BootstrapRunner {
                         BootstrapRunFailure(
                             state: state,
                             code: state.failureCode ?? .unknown(""),
-                            callbackFailure: pairingFailure
+                                callbackFailure: pairingFailure,
+                                detail: callbackFailureDetail
                         )
                     )
                 case .running:
@@ -298,7 +353,10 @@ public final class BootstrapRunner {
                         activeElapsed += now().timeIntervalSince(end)
                         activeSegmentStart = nil
                     }
-                    let result = try await pair(deviceLabel: deviceLabel)
+                    let result = try await pair(
+                        deviceLabel: deviceLabel,
+                        allowLegacyPPT1: configuration.allowLegacyPPT1
+                    )
                     switch result {
                     case .notReady:
                         break
@@ -307,9 +365,10 @@ public final class BootstrapRunner {
                         pairedDevice = device
                         _ = try await exec(BootstrapRemoteCommand.writePairingOK, stdin: nil)
                         await emit(.pairingCompleted(deviceId: device.deviceId))
-                    case .failed:
+                    case let .failed(detail):
                         pairAttempted = true
                         pairingFailure = .pairing
+                        callbackFailureDetail = detail
                         _ = try? await exec(BootstrapRemoteCommand.writePairingFailed, stdin: nil)
                     }
                     activeSegmentStart = now()
@@ -325,7 +384,7 @@ public final class BootstrapRunner {
                     }
                     await emit(.verificationStarted)
                     do {
-                        try await withTimeout(
+                        let serverInfo = try await withTimeout(
                             seconds: configuration.verificationCallbackTimeout
                         ) {
                             try await self.verifier.verify(
@@ -334,10 +393,23 @@ public final class BootstrapRunner {
                                 device: pairedDevice
                             )
                         }
+                        try Self.validateRuntimeIdentity(
+                            serverInfo,
+                            expectedName: scriptConfiguration.release.serverName,
+                            expectedVersion: scriptConfiguration.release.version,
+                            port: scriptConfiguration.port,
+                            unitName: scriptConfiguration.release.unitName
+                        )
+                        verifiedServerInfo = serverInfo
                         _ = try await exec(BootstrapRemoteCommand.writeVerificationOK, stdin: nil)
                         await emit(.verificationCompleted)
                     } catch {
                         pairingFailure = .verification
+                        callbackFailureDetail = Self.verificationFailureDetail(
+                            error,
+                            port: scriptConfiguration.port,
+                            unitName: scriptConfiguration.release.unitName
+                        )
                         _ = try? await exec(BootstrapRemoteCommand.writeVerificationFailed, stdin: nil)
                     }
                     activeSegmentStart = now()
@@ -375,11 +447,12 @@ public final class BootstrapRunner {
     private enum PairAttempt {
         case notReady
         case paired(BootstrapPairedDevice)
-        case failed
+        case failed(String)
     }
 
     private func pair(
-        deviceLabel: String?
+        deviceLabel: String?,
+        allowLegacyPPT1: Bool
     ) async throws -> PairAttempt {
         let rawPairing = try await exec(
             BootstrapRemoteCommand.readPairing,
@@ -393,11 +466,18 @@ public final class BootstrapRunner {
         let material: BootstrapPairingMaterial
         do {
             material = try JSONDecoder().decode(BootstrapPairingMaterial.self, from: rawPairing)
+            guard material.token.hasPrefix("ppt2.")
+                    || (allowLegacyPPT1 && material.token.hasPrefix("ppt1.")) else {
+                return .failed(
+                    "本次 PI-adaptor 安装只接受当前进程生成的 ppt2 配对令牌；已拒绝旧 ppt1 令牌。"
+                )
+            }
             _ = try BootstrapPairingMaterial(
                 token: material.token,
                 expiresAt: material.expiresAt,
                 host: material.host,
-                port: material.port
+                port: material.port,
+                allowLegacyPPT1: allowLegacyPPT1
             )
         } catch {
             throw BootstrapRunnerError.malformedPairingFile
@@ -416,8 +496,47 @@ public final class BootstrapRunner {
             }
             return .paired(device)
         } catch {
-            return .failed
+            return .failed("客户端配对失败：\(error.localizedDescription)")
         }
+    }
+
+    private static func validateRuntimeIdentity(
+        _ info: RACPServerInfo,
+        expectedName: String,
+        expectedVersion: String,
+        port: Int,
+        unitName: String
+    ) throws {
+        if info.serverName != expectedName {
+            throw BootstrapRuntimeIdentityError.nameMismatch(
+                expected: expectedName,
+                actual: info.serverName,
+                expectedVersion: expectedVersion,
+                actualVersion: info.serverVersion,
+                port: port,
+                unitName: unitName
+            )
+        }
+        if info.serverVersion != expectedVersion {
+            throw BootstrapRuntimeIdentityError.versionMismatch(
+                expected: expectedVersion,
+                actual: info.serverVersion,
+                serverName: info.serverName,
+                port: port,
+                unitName: unitName
+            )
+        }
+    }
+
+    private static func verificationFailureDetail(
+        _ error: Error,
+        port: Int,
+        unitName: String
+    ) -> String {
+        if let mismatch = error as? BootstrapRuntimeIdentityError {
+            return mismatch.displayText
+        }
+        return "设备身份与 ping 验证失败；目标 \(unitName)，端口 \(port)。\(error.localizedDescription)"
     }
 
     private struct ProbeIdentity {

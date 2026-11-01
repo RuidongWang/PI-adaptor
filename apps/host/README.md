@@ -26,15 +26,56 @@ The Host binds only `127.0.0.1`. Reach it through the existing SSH
 
 ```sh
 # Version comes from package.json (single source); the script refuses to build
-# a tarball whose declared version differs from the built host's version.
-scripts/build-release.sh                 # -> release/pi-adaptor-<version>.tar.gz(+.sha256)
+# bytes whose runtime version differs from the release manifest.
+scripts/build-release.sh
+# -> release/pi-adaptor-2.0.1-linux-x64.tar.gz(+.sha256)
+# -> release/pi-adaptor-2.0.1-linux-arm64.tar.gz(+.sha256)
 
-# On the server, from an unpacked bundle:
-scripts/install.sh                       # -> ~/.pi-adaptor/<version>, then repoints current
+# The immutable release directory includes the full asset SHA-256.
+scripts/install.sh --install \
+  --bundle /absolute/path/pi-adaptor-2.0.1-linux-arm64 \
+  --home "$HOME/.pi-adaptor" \
+  --version 2.0.1 \
+  --target linux-arm64 \
+  --asset-sha256 <64-lowercase-hex> \
+  --manifest-sha256 <64-lowercase-hex>
 ```
 
-`install.sh` publishes into a version directory and atomically repoints
-`current`, so a failed install never corrupts the running version.
+`install.sh` publishes into
+`~/.pi-adaptor/releases/2.0.1-<full asset sha256>` and atomically replaces
+`~/.pi-adaptor/current`. It also implements `--verify` and `--rollback` as
+defined in `docs/api/pi-adaptor-install-release.md`. The generated bootstrap
+uses the architecture-specific tarball selected from the server's `uname -m`.
+
+Verify the active installation on the Linux server:
+
+```sh
+readlink -f "$HOME/.pi-adaptor/current"
+node -p 'require(process.argv[1]).name + " " + require(process.argv[1]).version' \
+  "$HOME/.pi-adaptor/current/package.json"
+systemctl --user show pi-adaptor.service \
+  --property=ActiveState --property=ExecStart --value
+jq '{step,status,error}' "$HOME/.pi-adaptor/.bootstrap/state.json"
+```
+
+The expected active directory ends in
+`releases/2.0.1-<full asset sha256>`, the package is
+`@pi-ios/pi-adaptor 2.0.1`, the unit is active, and `ExecStart` contains
+`~/.pi-adaptor/current/dist/main.js`. A successful bootstrap state also has
+`status=ok` and an `error=null`; the app should report RACP
+`server.name=pi-adaptor` and `server.version=2.0.1`.
+
+The release gate checks the manifest, Swift constants, both deterministic
+archives, archive layout and target native dependency before publication:
+
+```sh
+# Local gate: both architecture archives and adjacent checksums are mandatory.
+python3 ../../scripts/check-host-release-consistency.py
+
+# Pre-publication gate: also verifies the GitHub tag, both assets, and
+# downloaded checksums through gh/GitHub HTTP.
+python3 ../../scripts/check-host-release-consistency.py --published
+```
 
 ## Isolated configuration (independent of the legacy PI-Desktop host)
 

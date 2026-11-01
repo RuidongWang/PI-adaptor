@@ -106,6 +106,40 @@ final class BootstrapTests: XCTestCase {
         XCTAssertTrue(file.failureCode?.displayMessage.contains("brand-new-die") ?? false)
     }
 
+    func testFailureDetailsExposeLegacyUnitsAndRecoveryState() throws {
+        let error = #"""
+        {
+          "code":"pair-failed",
+          "details":{
+            "reason":"legacy-service-conflict",
+            "phase":"pair",
+            "expectedName":"pi-adaptor",
+            "actualName":"pi-host",
+            "expectedVersion":"2.0.1",
+            "actualVersion":"0.21.0",
+            "unitName":"pi-adaptor.service",
+            "port":43871,
+            "legacyUnits":[
+              {
+                "unit":"pi-host.service",
+                "originalActive":true,
+                "originalEnabled":true,
+                "portOccupied":true
+              }
+            ]
+          }
+        }
+        """#
+        let file = try decode(step: "pair", status: "failed", error: error)
+        let details = try XCTUnwrap(file.failureDetails)
+        XCTAssertEqual(details.legacyUnits.count, 1)
+        XCTAssertEqual(details.legacyUnits[0].unit, "pi-host.service")
+        XCTAssertEqual(details.legacyUnits[0].originalActive, true)
+        XCTAssertEqual(details.legacyUnits[0].originalEnabled, true)
+        XCTAssertTrue(details.displayText?.contains("Legacy 服务：pi-host.service") ?? false)
+        XCTAssertTrue(details.displayText?.contains("原 active=true") ?? false)
+    }
+
     func testAC01_9_clientSideFailureCodesAreDistinctFromUpstream() {
         XCTAssertEqual(BootstrapFailureCode.upstreamCodes.count, 19, "上游 19 个真实 die 码")
         XCTAssertEqual(BootstrapFailureCode.clientSideCodes.count, 4)
@@ -142,7 +176,7 @@ final class BootstrapTests: XCTestCase {
         }
         XCTAssertEqual(
             BootstrapPlatformProbe.artifactName(version: "0.21.0", target: .linuxX64),
-            "pi-host-0.21.0-linux-x64.tar.gz"
+            "pi-adaptor-0.21.0-linux-x64.tar.gz"
         )
     }
 
@@ -156,7 +190,7 @@ final class BootstrapTests: XCTestCase {
         }
         XCTAssertEqual(
             BootstrapPlatformProbe.artifactName(version: "0.21.0", target: .linuxArm64),
-            "pi-host-0.21.0-linux-arm64.tar.gz"
+            "pi-adaptor-0.21.0-linux-arm64.tar.gz"
         )
     }
 

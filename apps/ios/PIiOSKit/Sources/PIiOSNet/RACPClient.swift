@@ -594,6 +594,25 @@ public actor RACPClient {
         continuation.finish()
     }
 
+    /// Bounded cleanup for recovery paths. `teardown` ultimately closes SSH/NIO
+    /// resources whose close futures may not cooperate with task cancellation.
+    @discardableResult
+    public func stopBestEffort(timeout: TimeInterval = 1) async -> Bool {
+        runTask?.cancel()
+        runTask = nil
+        let completed = await boundedAsyncValue(seconds: timeout) { [self] in
+            await teardown(reason: nil)
+            continuation.finish()
+            return true
+        }
+        if completed != true {
+            // Make the update stream terminal even if an underlying close future
+            // continues in the background. No caller waits for that orphaned close.
+            continuation.finish()
+        }
+        return completed == true
+    }
+
     public func currentState() -> RACPTunnelState { state }
     public func info() -> RACPServerInfo? { serverInfo }
 
@@ -634,7 +653,7 @@ public actor RACPClient {
     ) async throws -> RACPPairResult {
         guard (1...65_535).contains(hostPort),
               let token = RACPPairingToken.normalize(pairingToken) else {
-            throw RACPClientError.protocolMismatch("需要有效的 pi-host 端口与一次性配对令牌")
+            throw RACPClientError.protocolMismatch("需要有效的 PI-adaptor 端口与一次性配对令牌")
         }
         let client = RACPClient(
             suppliedTransport: transport,
@@ -656,7 +675,7 @@ public actor RACPClient {
         guard (1...65_535).contains(hostPort),
               !deviceToken.isEmpty,
               !deviceToken.contains(where: \.isWhitespace) else {
-            throw RACPClientError.protocolMismatch("需要有效的 pi-host 端口与设备令牌")
+            throw RACPClientError.protocolMismatch("需要有效的 PI-adaptor 端口与设备令牌")
         }
         let client = RACPClient(
             suppliedTransport: transport,
@@ -1311,6 +1330,33 @@ public actor RACPClient {
 
     /// 撤销某台设备的配对（AC-03.1）。
     public func revokeDevice(deviceId: String) async throws -> Bool {
+        guard !deviceId.isEmpty, !deviceId.contains(where: \.isWhitespace) else {
+            throw RACPClientError.protocolMismatch("需要有效的 deviceId")
+        }
+        let context = RACPV2Context(
+            requestId: "req_\(UUID().uuidString)",
+            idempotencyKey: "revoke_\(UUID().uuidString)"
+        )
+        let params = RACPV2RevokeParams(deviceId: deviceId, context: context)
+        let value: JSONValue = try await v2Request(
+            method: RACPV2Method.revoke.rawValue,
+            params: .object([
+                "deviceId": .string(params.deviceId),
+                "context": .object([
+                    "requestId": .string(params.context.requestId),
+                    "idempotencyKey": .string(
+                        params.context.idempotencyKey ?? "revoke_\(UUID().uuidString)"
+                    ),
+                ]),
+            ])
+        )
+        let result = try RACPSessionRevokeResult.decoded(from: value)
+        return result.revoked
+    }
+
+    /// Explicitly legacy `pi-host` operation. PI-adaptor installs and their
+    /// staging cleanup must call `revokeDevice` (v2 `connection/revoke`).
+    public func revokeLegacyDevice(deviceId: String) async throws -> Bool {
         let result: RACPSessionRevokeResult = try await request(
             .sessionRevoke,
             params: RACPSessionRevokeParams(deviceId: deviceId)

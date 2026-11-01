@@ -1,6 +1,7 @@
 import SwiftUI
+import PIiOSCore
 
-/// 设置子页路由（information-architecture.md §3：设置 → 服务器 / 安装 pi-host）。
+/// 设置子页路由（information-architecture.md §3：设置 → 服务器 / 安装 PI-adaptor）。
 enum SettingsRoute: Hashable {
     case addServer
     case editServer(UUID)
@@ -86,7 +87,7 @@ struct SettingsScreen: View {
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("将清除本机保存的配对记录与设备凭证；服务器上的 pi-host 安装、运行与会话不受影响。")
+                Text("将清除本机保存的配对记录与设备凭证；服务器上的 PI-adaptor 安装、运行与会话不受影响。")
             }
             .task(id: model.currentHost?.id) {
                 await refreshHostUnitStatus()
@@ -133,7 +134,7 @@ struct SettingsScreen: View {
             if model.hosts.isEmpty {
                 PIEmptyState(
                     title: "还没有服务器",
-                    message: "添加一台服务器后，才能在服务器页安装 pi-host 并完成配对。当前只保存本机记录。",
+                    message: "添加一台服务器后，才能在服务器页安装 PI-adaptor 并完成配对。当前只保存本机记录。",
                     actionTitle: "＋ 添加服务器",
                     action: { path.append(.addServer) }
                 )
@@ -145,7 +146,7 @@ struct SettingsScreen: View {
                     if let current = model.currentHost, current.pairedAt == nil {
                         PIListRow(
                             title: "重新配对",
-                            subtitle: "打开服务器页，使用 pi-host 的一次性令牌完成配对",
+                            subtitle: "打开服务器页，使用 PI-adaptor 的一次性令牌完成配对",
                             showsChevron: true,
                             showsDivider: false,
                             action: { path.append(.editServer(current.id)) }
@@ -235,7 +236,7 @@ struct SettingsScreen: View {
                     if hostUnitSnapshot?.isActive != true || !connection.state.isOnline {
                         PIListRow(
                             title: "重启命令",
-                            subtitle: "systemctl --user restart pi-host.service",
+                            subtitle: "systemctl --user restart pi-adaptor.service",
                             isEnabled: false,
                             showsDivider: true
                         )
@@ -281,13 +282,24 @@ struct SettingsScreen: View {
                 if case .offline(let reason) = connection.state, let reason {
                     PIStatusBanner(kind: .info, text: "未连接", detail: reason)
                 }
+                if let info = connection.info,
+                   info.serverName != PiHostRelease.runtimeServerName
+                    || info.serverVersion != ConnectionModel.defaultHostInstallReleaseVersion {
+                    PIStatusBanner(
+                        kind: .danger,
+                        text: "运行版本不匹配",
+                        detail: "期望 \(PiHostRelease.runtimeServerName) \(ConnectionModel.defaultHostInstallReleaseVersion)，"
+                            + "实际 \(info.serverName) \(info.serverVersion)。请重新安装 PI-adaptor。"
+                    )
+                    .accessibilityIdentifier("settings.runtimeVersionMismatch")
+                }
                 if !connection.state.isOnline, model.currentHost != nil {
                     // AC-17：服务停止时给出可复制的重启命令，不假装在线。
                     PICard {
                         Text("Host 离线时的排查")
                             .font(PIFont.captionStrong)
                             .foregroundStyle(PIColor.text2)
-                        Text("在服务器上确认服务状态并重启：systemctl --user restart pi-host（系统级 unit 用 sudo systemctl restart pi-host）。App 不会自动重启服务器上的进程。")
+                        Text("在服务器上确认服务状态并重启：systemctl --user restart pi-adaptor.service。App 不会自动重启服务器上的进程。")
                             .font(PIFont.caption)
                             .foregroundStyle(PIColor.text3)
                             .fixedSize(horizontal: false, vertical: true)
@@ -305,7 +317,7 @@ struct SettingsScreen: View {
     }
 
     private var tunnelFooter: String {
-        "隧道是 SSH `direct-tcpip` 到服务器 127.0.0.1:<pi-host 端口>，在其上跑 RACP WebSocket。断开后会自动按 1s/2s/4s/8s 退避重连。"
+        "隧道是 SSH `direct-tcpip` 到服务器 127.0.0.1:<PI-adaptor 端口>，在其上跑 RACP WebSocket。断开后会自动按 1s/2s/4s/8s 退避重连。"
     }
 
     private func refreshHostUnitStatus() async {
@@ -345,7 +357,7 @@ struct SettingsScreen: View {
             return "本机没有凭证：先在服务器页「保存并测试连接」"
         }
         if KeychainStore.loadDeviceToken(hostID: host.id) == nil {
-            return "本机没有设备令牌：先在服务器页完成 pi-host 配对"
+            return "本机没有设备令牌：先在服务器页完成 PI-adaptor 配对"
         }
         return nil
     }

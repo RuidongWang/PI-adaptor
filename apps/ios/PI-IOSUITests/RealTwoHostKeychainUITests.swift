@@ -86,7 +86,7 @@ final class RealTwoHostKeychainUITests: XCTestCase {
 
     private func connectPiHost() {
         let connect = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "连接 pi-host"))
+            .matching(NSPredicate(format: "label CONTAINS %@", "连接 PI-adaptor"))
             .firstMatch
         XCTAssertTrue(connect.waitForExistence(timeout: 10))
         connect.tap()

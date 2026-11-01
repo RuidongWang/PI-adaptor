@@ -1,32 +1,32 @@
 {
-  "schemaVersion": 1,
-  "note": "pi-host 发布坐标的唯一权威源。iOS 的 PiHostRelease 常量、server/scripts/assemble-pi-host-bundles.sh 与发布说明都必须与它一致；改动版本号或产物字节时改这里，并让 scripts/check-host-release-consistency.py 与 HostReleaseManifestTests 通过。",
-  "repository": "RuidongWang/PI-IOS-host",
-  "version": "0.21.0+remove.1",
-  "releaseTag": "v0.21.0+remove.1",
-  "upstreamVersion": "0.21.0",
-  "upstreamCommit": "d2c9fc44087f24260521c66530c4f92c04790105",
-  "minHostVersion": "0.21.0",
-  "upstreamAssets": {
-    "linux-x64": {
-      "name": "pi-host-0.21.0-linux-x64.tar.gz",
-      "sha256": "b9646b3086efbedf79beea56c9bd3ea68f72295c1cddaba3426c6f71a5bcbca7"
-    },
-    "linux-arm64": {
-      "name": "pi-host-0.21.0-linux-arm64.tar.gz",
-      "sha256": "a40527fe8012e111bb981ba75b30076f58dae6899a567713171eaa006dba073a"
-    }
+  "schemaVersion": 2,
+  "repository": "RuidongWang/PI-adaptor",
+  "version": "2.0.1",
+  "releaseTag": "pi-adaptor-v2.0.1",
+  "protocolVersion": "2.0.0",
+  "runtime": {
+    "serverName": "pi-adaptor"
+  },
+  "install": {
+    "home": "~/.pi-adaptor",
+    "versionsDirectory": "~/.pi-adaptor/releases",
+    "currentLink": "~/.pi-adaptor/current",
+    "unitName": "pi-adaptor.service",
+    "entrypoint": "dist/main.js",
+    "installer": "scripts/install.sh",
+    "packageManifest": "package.json",
+    "minimumNodeVersion": "22.19.0"
   },
   "artifacts": {
     "linux-x64": {
-      "bundleDirectory": "pi-host-0.21.0+remove.1-linux-x64",
-      "file": "pi-host-0.21.0+remove.1-linux-x64.tar.gz",
-      "sha256": "53b25d752258fb4d02c7092c54b9daf6c649aade8c4899959a7cb00b1c44c856"
+      "bundleDirectory": "pi-adaptor-2.0.1-linux-x64",
+      "file": "pi-adaptor-2.0.1-linux-x64.tar.gz",
+      "sha256": "c7e49db8aecc097c478417f3b16e572b6fa6fc41e3cba61229ae4ae62ff31080"
     },
     "linux-arm64": {
-      "bundleDirectory": "pi-host-0.21.0+remove.1-linux-arm64",
-      "file": "pi-host-0.21.0+remove.1-linux-arm64.tar.gz",
-      "sha256": "d4c77cadf9bcf5f9364176ed6e72bcd3d4557ad10d79bb6796cc7398b206737a"
+      "bundleDirectory": "pi-adaptor-2.0.1-linux-arm64",
+      "file": "pi-adaptor-2.0.1-linux-arm64.tar.gz",
+      "sha256": "bb52c1fe06c3d421ed5483b8eac1da3376ba7594a1e880a5ee1ead5da182eb31"
     }
   }
 }

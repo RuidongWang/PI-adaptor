@@ -183,7 +183,7 @@ struct ModelsScreen: View {
         if isFetching {
             PIStatusBanner(kind: .info, text: "正在获取模型", detail: "请求由服务器发出，API Key 通过 SSH stdin 传递。")
         } else if isImporting {
-            PIStatusBanner(kind: .info, text: "正在导入模型服务", detail: "正在调用服务器上的 provider-import。")
+            PIStatusBanner(kind: .info, text: "正在导入模型服务", detail: "正在调用服务器上的 RACP provider/create。")
         } else if let errorMessage {
             PIStatusBanner(
                 kind: .danger,
@@ -580,7 +580,7 @@ struct ModelsScreen: View {
         let payload = composition.payload
         let importFingerprint = configurationFingerprint
         guard let data = try? ProviderImportEncoder.encode(payload) else {
-            errorMessage = "无法编码 provider-import 载荷"
+            errorMessage = "无法编码 provider/create 载荷"
             return
         }
 
@@ -591,32 +591,6 @@ struct ModelsScreen: View {
             do {
                 let receipt = try await connection.importProvider(record: host, payload: data)
                 let sourceId = payload.providers[0].sourceId
-                // The v2 Host resolves a session's provider only from its own
-                // store, but this import lands in the legacy SSH store. Mirror it
-                // into the Host store and record the Host-side id so the model a
-                // user picks here can actually run a turn.
-                var effectiveProviderId: String?
-                var legacyProviderId: String?
-                var mirroredToV2 = false
-                if case .success(let success) = receipt,
-                   case .imported(let legacyId) = success.outcome(forSourceId: sourceId) {
-                    legacyProviderId = legacyId
-                    effectiveProviderId = legacyId
-                    // Only mirror while the import still applies to the host the
-                    // caller started on; switching hosts mid-import must not
-                    // create the provider (and its secret) somewhere else.
-                    if model.canApplyProviderOperation(operation),
-                       let mirrored = try? await connection.registerHostProvider(
-                        name: input.name,
-                        vendorKey: "imported-\(UUID().uuidString)",
-                        baseURL: input.baseUrl ?? "",
-                        apiKey: normalizedAPIKey,
-                        models: input.models
-                       ) {
-                        effectiveProviderId = mirrored.id
-                        mirroredToV2 = true
-                    }
-                }
                 await MainActor.run {
                     isImporting = false
                     guard model.canApplyProviderOperation(operation) else { return }
@@ -627,18 +601,14 @@ struct ModelsScreen: View {
                             guard model.recordImportedProvider(
                                 context: operation,
                                 input: input,
-                                providerId: effectiveProviderId ?? providerId,
+                                providerId: providerId,
                                 serverDefaultSet: success.defaultSet,
-                                legacyProviderId: legacyProviderId,
-                                hostV2Mirror: mirroredToV2
+                                hostV2Mirror: true
                             ) else { return }
-                            // Keep the key locally (Keychain only) so this provider
-                            // can be mirrored into the v2 store or re-imported later
-                            // without the user retyping it.
                             _ = KeychainStore.saveProviderKey(
                                 normalizedAPIKey,
                                 hostID: operation.hostID,
-                                providerId: effectiveProviderId ?? providerId
+                                providerId: providerId
                             )
                             if configurationFingerprint == importFingerprint {
                                 apiKey = ""
@@ -646,14 +616,6 @@ struct ModelsScreen: View {
                             statusMessage = "已导入 \(input.models.count) 个模型"
                             if isFirstProvider, success.defaultSet, let firstModel = input.models.first {
                                 statusMessage = "已导入 \(input.models.count) 个模型，默认模型为 \(firstModel.alias ?? firstModel.id)"
-                            }
-                            if !mirroredToV2 {
-                                // The v2 Host resolves a session's model only from
-                                // its own store, so a non-mirrored import is not
-                                // runnable yet — say so instead of implying success.
-                                errorMessage = connection.state.isOnline
-                                    ? "已导入到服务器，但未能写入 PI-adaptor 的 provider 存储；该模型暂时无法使用，请重试导入。"
-                                    : "已导入到服务器，但隧道未连接，未同步到 PI-adaptor；请连接后重新导入，否则该模型无法使用。"
                             }
                         case .skipped(let reason):
                             errorMessage = "模型服务已被服务器跳过：\(reason.clientGuidance)"

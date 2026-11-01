@@ -5,9 +5,11 @@ import XCTest
 @testable import PIiOSNet
 
 final class BootstrapInstallAdaptersTests: XCTestCase {
+    private let issuedToken = "pdt2." + "adapter_device_token"
+
     private func material(port: Int = 43_871) throws -> BootstrapPairingMaterial {
         try BootstrapPairingMaterial(
-            token: "ppt1.test-token",
+            token: "ppt2." + "adapter_pairing_token",
             expiresAt: 1_800_000_000,
             host: "127.0.0.1",
             port: port
@@ -18,6 +20,7 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
         let transport = AdapterTransport()
         let recorder = PairingRecorder()
         let material = try material()
+        let token = issuedToken
         let adapter = BootstrapInstallPairingAdapter(
             exchange: { received, receivedMaterial, label in
                 recorder.record(
@@ -27,7 +30,7 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
                 )
                 return RACPPairResult(
                     deviceId: "dev_install",
-                    deviceToken: "pdt1.install-token",
+                    deviceToken: token,
                     roles: ["owner"]
                 )
             },
@@ -43,7 +46,7 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
         )
 
         XCTAssertEqual(device.deviceId, "dev_install")
-        XCTAssertEqual(device.deviceToken, "pdt1.install-token")
+        XCTAssertEqual(device.deviceToken, issuedToken)
         XCTAssertEqual(device.roles, ["owner"])
         XCTAssertEqual(recorder.transportIdentity, ObjectIdentifier(transport))
         XCTAssertEqual(recorder.material?.port, 43_871)
@@ -55,11 +58,12 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
 
     func testPairingAdapterDoesNotReturnDeviceWhenPersistenceFails() async throws {
         let recorder = PairingRecorder()
+        let token = issuedToken
         let adapter = BootstrapInstallPairingAdapter(
             exchange: { _, _, _ in
                 RACPPairResult(
                     deviceId: "dev_keychain_failure",
-                    deviceToken: "pdt1.install-token",
+                    deviceToken: token,
                     roles: ["owner"]
                 )
             },
@@ -82,15 +86,41 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
         XCTAssertEqual(recorder.persistedDevice?.deviceId, "dev_keychain_failure")
     }
 
+    func testPairingAdapterRejectsLegacyDeviceToken() async throws {
+        let recorder = PairingRecorder()
+        let adapter = BootstrapInstallPairingAdapter(
+            exchange: { _, _, _ in
+                RACPPairResult(
+                    deviceId: "dev_legacy",
+                    deviceToken: "pdt1." + "legacy_token_for_test",
+                    roles: ["owner"]
+                )
+            },
+            persist: { recorder.recordPersisted($0) }
+        )
+
+        do {
+            _ = try await adapter.pair(
+                using: AdapterTransport(),
+                material: try material(),
+                deviceLabel: nil
+            )
+            XCTFail("PI-adaptor 安装不得接受旧 pdt1 设备令牌")
+        } catch {
+            XCTAssertEqual(error as? BootstrapInstallAdapterError, .legacyDeviceToken)
+        }
+        XCTAssertNil(recorder.persistedDevice)
+    }
+
     func testVerificationAdapterUsesSameTransportPortAndDeviceToken() async throws {
         let transport = AdapterTransport()
         let recorder = VerificationRecorder()
         let device = BootstrapPairedDevice(
             deviceId: "dev_verify",
-            deviceToken: "pdt1.verify-token",
+            deviceToken: issuedToken,
             roles: ["owner"]
         )
-        let adapter = BootstrapInstallVerificationAdapter { received, port, receivedDevice in
+        let adapter = BootstrapInstallVerificationAdapter(verify: { received, port, receivedDevice in
             recorder.record(
                 transport: ObjectIdentifier(received as AnyObject),
                 port: port,
@@ -98,8 +128,8 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
             )
             return RACPServerInfo(
                 protocolVersion: "1.0",
-                serverName: "pi-host",
-                serverVersion: "0.21.0",
+                serverName: "pi-adaptor",
+                serverVersion: "2.0.1",
                 hostId: "host_1",
                 connectionId: "conn_1",
                 roles: ["owner"],
@@ -107,13 +137,15 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
                 applyCeilingToPairedDevices: nil,
                 capabilities: nil
             )
-        }
+        })
 
-        try await adapter.verify(using: transport, port: 43_871, device: device)
+        let info = try await adapter.verify(using: transport, port: 43_871, device: device)
 
         XCTAssertEqual(recorder.transportIdentity, ObjectIdentifier(transport))
         XCTAssertEqual(recorder.port, 43_871)
         XCTAssertEqual(recorder.device, device)
+        XCTAssertEqual(info.serverName, "pi-adaptor")
+        XCTAssertEqual(info.serverVersion, "2.0.1")
     }
 
     func testDefaultAdapterRejectsNonSSHTransportWithoutPersisting() async throws {
@@ -151,8 +183,8 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
                 }
                 return RACPServerInfo(
                     protocolVersion: "1.0",
-                    serverName: "pi-host",
-                    serverVersion: "0.21.0",
+                    serverName: "pi-adaptor",
+                    serverVersion: "2.0.1",
                     hostId: "host_install",
                     connectionId: "conn_install",
                     roles: ["owner"],
@@ -163,22 +195,24 @@ final class BootstrapInstallAdaptersTests: XCTestCase {
             }
         )
 
-        try await adapter.verify(
+        let info = try await adapter.verify(
             using: AdapterTransport(),
             port: 43_871,
             device: BootstrapPairedDevice(
                 deviceId: "dev_retry",
-                deviceToken: "{{SECRET_cnnr7rtr}}",
+                deviceToken: issuedToken,
                 roles: ["owner"]
             )
         )
         let attemptCount = await attempts.value
         XCTAssertEqual(attemptCount, 2)
+        XCTAssertEqual(info.serverName, "pi-adaptor")
+        XCTAssertEqual(info.serverVersion, "2.0.1")
     }
 
     func testLogCommandTargetsOwnerOnlyBootstrapLogWithTailAndDoesNotLeakToken() {
         let command = BootstrapInstallDiagnostics.logCommand
-        XCTAssertTrue(command.contains("$HOME/.pi-desktop/pi-host/.bootstrap/bootstrap.log"))
+        XCTAssertTrue(command.contains("$HOME/.pi-adaptor/.bootstrap/bootstrap.log"))
         XCTAssertTrue(command.contains("tail -n 240"))
         XCTAssertFalse(command.contains("ppt1."))
         XCTAssertFalse(command.contains("pdt1."))

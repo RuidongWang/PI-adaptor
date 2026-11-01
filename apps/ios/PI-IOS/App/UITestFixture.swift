@@ -394,7 +394,7 @@ struct UITestFixture {
             activeState: "inactive",
             unitFileState: "disabled"
         )
-        fixture.connectionState = .offline(reason: "pi-host systemd unit inactive")
+        fixture.connectionState = .offline(reason: "pi-adaptor systemd unit inactive")
         return fixture
     }
 

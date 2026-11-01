@@ -48,6 +48,33 @@ final class RACPCommandWireTests: XCTestCase {
         XCTAssertEqual(params["deviceId"] as? String, "dev_abc")
     }
 
+    func testInstallationRevokeUsesV2MethodAndWriteContext() async throws {
+        let socket = RevokeRecordingSocket()
+        let client = RACPClient(
+            testingSocket: socket,
+            subscriptionId: nil,
+            subscribedSessionId: nil
+        )
+        let pump = Task {
+            for await data in socket.inbound {
+                await client.receiveForTesting(data)
+            }
+        }
+
+        let revoked = try await client.revokeDevice(deviceId: "dev_staged")
+        XCTAssertTrue(revoked)
+
+        let request = try XCTUnwrap(socket.request())
+        XCTAssertEqual(request.method, "connection/revoke")
+        XCTAssertNotEqual(request.method, "session/revoke")
+        XCTAssertEqual(request.deviceId, "dev_staged")
+        XCTAssertFalse(try XCTUnwrap(request.requestId).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(request.idempotencyKey).isEmpty)
+
+        pump.cancel()
+        await socket.close()
+    }
+
     func testInputAnswersEncodeArraysAndSkips() throws {
         let params = RACPInputRespondParams(
             inputId: "in_1",
@@ -123,5 +150,61 @@ final class RACPCommandWireTests: XCTestCase {
 
     func testProviderOperationsUseTenSecondUserVisibleBudget() {
         XCTAssertEqual(RemoteProviderOperations.userVisibleTimeout, 10)
+    }
+}
+
+private struct RecordedRevokeRequest: Sendable {
+    let method: String
+    let deviceId: String?
+    let requestId: String?
+    let idempotencyKey: String?
+}
+
+private final class RevokeRecordingSocket: RACPSocket, @unchecked Sendable {
+    let inbound: AsyncStream<Data>
+    private let continuation: AsyncStream<Data>.Continuation
+    private let lock = NSLock()
+    private var recorded: RecordedRevokeRequest?
+
+    init() {
+        var sink: AsyncStream<Data>.Continuation!
+        inbound = AsyncStream { sink = $0 }
+        continuation = sink
+    }
+
+    func send(text: String) async throws {
+        guard let data = text.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = object["id"],
+              let method = object["method"] as? String,
+              let params = object["params"] as? [String: Any]
+        else { return }
+        let context = params["context"] as? [String: Any]
+        lock.withLock {
+            recorded = RecordedRevokeRequest(
+                method: method,
+                deviceId: params["deviceId"] as? String,
+                requestId: context?["requestId"] as? String,
+                idempotencyKey: context?["idempotencyKey"] as? String
+            )
+        }
+        let response = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["revoked": true],
+        ])
+        continuation.yield(response)
+    }
+
+    func request() -> RecordedRevokeRequest? {
+        lock.withLock { recorded }
+    }
+
+    func close() async {
+        continuation.finish()
+    }
+
+    func waitUntilClosed() async {
+        await Task.yield()
     }
 }

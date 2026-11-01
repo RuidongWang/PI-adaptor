@@ -163,10 +163,22 @@ public enum PiHostBootstrapOutputParser {
 
     private static func parsePairing(_ payload: [String: Any]) -> PiHostPairingLine? {
         guard let token = payload["token"] as? String,
-              !token.isEmpty else {
+              !token.isEmpty,
+              let host = payload["host"] as? String,
+              host == "127.0.0.1" || host == "::1",
+              let portNumber = numericValue(payload["port"]),
+              validPort(portNumber) != nil,
+              let expiresNumber = numericValue(payload["expiresAt"]) else {
             return nil
         }
-        let expiresAt = numericValue(payload["expiresAt"])?.int64Value ?? 0
+        let expiresValue = expiresNumber.doubleValue
+        guard expiresValue.isFinite,
+              expiresValue.rounded() == expiresValue,
+              expiresValue > 0,
+              expiresValue <= Double(Int64.max) else {
+            return nil
+        }
+        let expiresAt = Int64(expiresValue)
         return PiHostPairingLine(token: token, expiresAt: expiresAt)
     }
 

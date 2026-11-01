@@ -104,7 +104,7 @@ public enum ConnectionFailureKind: String, Equatable, Sendable {
         case .hostKey:
             return "主机密钥校验失败：服务器指纹与已固定记录不一致，可能存在中间人风险；本机不会自动忽略指纹变化。若确为你自己重装服务器导致，请先在服务器设置里移除旧指纹，再重新核对新指纹。"
         case .remoteUnavailable:
-            return "服务器或 pi-host 暂不可用：请检查 Host 进程、端口与防火墙。"
+            return "服务器或 PI-adaptor 暂不可用：请检查 PI-adaptor 服务、端口与防火墙。"
         case .protocolViolation:
             return "连接协议异常或版本不兼容：请核对客户端与 Host 版本。"
         case .unknown:

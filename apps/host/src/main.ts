@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { ensureHostDirectories, loadHostConfig } from "./config.js";
 import { DeterministicAgentDriver, PiAgentDriver } from "./agent/driver.js";
 import { applyProviderSeed, loadProviderSeed } from "./providers/seed.js";
+import { pairingTokenLine, readyLine } from "./bootstrap-output.js";
 import { HostService } from "./server/host-service.js";
 import { startWebSocketServer } from "./server/ws.js";
 
@@ -28,20 +29,22 @@ if (config.providerSeedFile) {
 }
 // Reclaim expired uploads and unreferenced blobs on startup and hourly.
 service.startMaintenance();
+const server = await startWebSocketServer(service, config.port);
 if (config.pair) {
   const pairing = await service.createPairingToken(600);
-  process.stdout.write(`PI_HOST_PAIRING_TOKEN ${pairing.token}\n`);
+  process.stdout.write(pairingTokenLine({
+    token: pairing.token,
+    expiresAt: pairing.expiresAt,
+    port: server.port
+  }));
 }
-const server = await startWebSocketServer(service, config.port);
 const fingerprint = createHash("sha256").update(`${service.hostId}:${server.port}`).digest("hex").slice(0, 16);
-process.stdout.write(
-  `PI_HOST_READY ${JSON.stringify({
-    version: config.hostVersion,
-    hostId: service.hostId,
-    port: server.port,
-    fingerprint
-  })}\n`
-);
+process.stdout.write(readyLine({
+  version: config.hostVersion,
+  hostId: service.hostId,
+  port: server.port,
+  fingerprint
+}));
 
 async function shutdown(): Promise<void> {
   service.stopMaintenance();

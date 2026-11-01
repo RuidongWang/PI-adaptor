@@ -151,6 +151,16 @@ public struct RACPV2Context: Codable, Equatable, Sendable {
     }
 }
 
+public struct RACPV2RevokeParams: Encodable, Equatable, Sendable {
+    public var deviceId: String
+    public var context: RACPV2Context
+
+    public init(deviceId: String, context: RACPV2Context) {
+        self.deviceId = deviceId
+        self.context = context
+    }
+}
+
 public struct RACPV2RawRequest<Params: Encodable & Sendable>: Encodable, Sendable {
     public let jsonrpc = "2.0"
     public let id: RACPIdentifier

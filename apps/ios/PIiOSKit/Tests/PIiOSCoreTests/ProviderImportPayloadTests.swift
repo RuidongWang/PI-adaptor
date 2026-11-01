@@ -612,6 +612,7 @@ final class ProviderImportPayloadTests: XCTestCase {
             ("ADMIN_BUSY", .adminBusy),
             ("TIMEOUT", .timeout),
             ("IMPORT_FAILED", .importFailed),
+            ("CONFLICT", .conflict),
         ]
         for (raw, code) in expected {
             let receipt = ProviderImportReceiptParser.parse(stdout: "PI_HOST_FAILED {\"code\":\"\(raw)\"}", exitCode: 1)
@@ -631,6 +632,13 @@ final class ProviderImportPayloadTests: XCTestCase {
         XCTAssertEqual(failure.code, .unknown("SOMETHING_NEW"))
         XCTAssertEqual(failure.rawCode, "SOMETHING_NEW")
         XCTAssertTrue(failure.displayMessage.contains("SOMETHING_NEW"), "未知码必须原样展示")
+    }
+
+    func testAdminUnavailableGuidanceUsesPIAdaptorUnit() {
+        let message = ProviderImportFailureCode.adminUnavailable.displayMessage
+        XCTAssertTrue(message.contains("PI-adaptor"))
+        XCTAssertTrue(message.contains("pi-adaptor.service"))
+        XCTAssertFalse(message.contains("pi-host"))
     }
 
     func testAC04_6_explainsEachSkippedReasonWithoutAutoRetry() {

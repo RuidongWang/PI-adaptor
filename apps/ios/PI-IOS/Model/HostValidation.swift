@@ -17,7 +17,7 @@ struct HostDraft: Equatable {
     /// 私钥口令（仅 `authKind == .privateKey` 时有意义；空表示私钥未加密）。
     /// 与私钥一样只进 Keychain，不进 `state-v1.json`（spec AC-G4）。
     var passphrase: String = ""
-    /// pi-host 的 RACP 端口（可留空：留空时只测试 SSH，不建 RACP 隧道）。
+    /// PI-adaptor 的 RACP 端口（可留空：留空时只测试 SSH，不建 RACP 隧道）。
     var hostPort: String = ""
     /// 用户选择的私钥文件名（只用于回显；内容在 `secret` 里，随凭证进 Keychain）。
     var keyFileName: String?
@@ -90,7 +90,7 @@ enum HostValidator {
         return nil
     }
 
-    /// pi-host 端口可留空；填了就必须是 1–65535。
+    /// PI-adaptor 端口可留空；填了就必须是 1–65535。
     static func hostPortError(_ raw: String) -> String? {
         let text = raw.piTrimmed
         if text.isEmpty { return nil }

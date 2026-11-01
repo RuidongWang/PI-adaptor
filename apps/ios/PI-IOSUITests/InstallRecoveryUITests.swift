@@ -17,7 +17,7 @@ final class InstallRecoveryUITests: XCTestCase {
     func testPairFailureOffersPairOnlyRecoveryCopy() {
         openInstallFailure("pair-expired")
         XCTAssertTrue(
-            app.staticTexts["安装包已下载并切换完成，当前只差重新启动配对；重试不会重新下载或解包。"]
+            app.staticTexts["安装器会在配对失败后恢复原 current 和服务状态；请重试以启动新的 PI-adaptor 配对进程。"]
                 .waitForExistence(timeout: 5)
         )
         XCTAssertEqual(app.buttons["installHost.start"].label, "重新配对")
@@ -55,11 +55,11 @@ final class InstallRecoveryUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 5))
 
         let install = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "安装或修复 pi-host")
+            NSPredicate(format: "label CONTAINS %@", "安装或修复 PI-adaptor")
         ).firstMatch
         for _ in 0..<8 where !install.isHittable { app.swipeUp() }
         XCTAssertTrue(install.isHittable)
         install.tap()
-        XCTAssertTrue(app.navigationBars["安装 pi-host"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 5))
     }
 }

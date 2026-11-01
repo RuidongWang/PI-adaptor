@@ -17,11 +17,17 @@ final class HostPortResolverTests: XCTestCase {
         XCTAssertNil(HostPortResolver.resolve(stdout: "\n  \nnope\n"))
     }
 
-    func testProbeCommandLooksForProcessAndUnitPorts() {
+    func testDefaultProbeUsesOnlyPIAdaptor() {
         XCTAssertTrue(HostPortResolver.probeCommand.contains("--port"))
-        XCTAssertTrue(HostPortResolver.probeCommand.contains("systemctl --user show pi-host.service"))
-        // The v2 host is `pi-adaptor`; the legacy upstream host stays `pi-host.js`.
+        XCTAssertTrue(HostPortResolver.probeCommand.contains("systemctl --user show pi-adaptor.service"))
         XCTAssertTrue(HostPortResolver.probeCommand.contains("pi-adaptor"))
-        XCTAssertTrue(HostPortResolver.probeCommand.contains("pi-host\\.js"))
+        XCTAssertFalse(HostPortResolver.probeCommand.contains("pi-host\\.js"))
+        XCTAssertFalse(HostPortResolver.probeCommand.contains(".pi-desktop/pi-host"))
+        XCTAssertFalse(HostPortResolver.probeCommand.contains("systemctl --user show pi-host.service"))
+    }
+
+    func testLegacyProbeIsExplicitlySeparate() {
+        XCTAssertTrue(HostPortResolver.legacyProbeCommand.contains("pi-host\\.js"))
+        XCTAssertTrue(HostPortResolver.legacyProbeCommand.contains("systemctl --user show pi-host.service"))
     }
 }

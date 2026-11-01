@@ -11,7 +11,12 @@ final class BootstrapScriptTests: XCTestCase {
         port: Int = 43_871
     ) throws -> BootstrapScriptConfiguration {
         let release = try XCTUnwrap(
-            PiHostRelease(version: "0.21.0+remove.1", target: target)
+            PiHostRelease(
+                version: "2.0.1",
+                target: target,
+                baseURL: "https://example.test/pi-adaptor-v2.0.1",
+                pinnedChecksum: digest
+            )
         )
         return try BootstrapScriptConfiguration(
             release: release,
@@ -30,8 +35,8 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.hasPrefix("#!/bin/sh\n"))
         XCTAssertTrue(script.contains("set -eu"))
         XCTAssertTrue(script.contains("umask 077"))
-        XCTAssertTrue(script.contains(#"ARTIFACT_URL='https://github.com/vastsa/PI-Desktop/releases/download/v0.21.0+remove.1/pi-host-0.21.0+remove.1-linux-arm64.tar.gz'"#))
-        XCTAssertTrue(script.contains(#"CHECKSUM_URL='https://github.com/vastsa/PI-Desktop/releases/download/v0.21.0+remove.1/pi-host-0.21.0+remove.1-linux-arm64.tar.gz.sha256'"#))
+        XCTAssertTrue(script.contains(#"ARTIFACT_URL='https://example.test/pi-adaptor-v2.0.1/pi-adaptor-2.0.1-linux-arm64.tar.gz'"#))
+        XCTAssertTrue(script.contains(#"CHECKSUM_URL='https://example.test/pi-adaptor-v2.0.1/pi-adaptor-2.0.1-linux-arm64.tar.gz.sha256'"#))
         XCTAssertTrue(script.contains(#"PART="$WORK/$ARTIFACT_NAME.part""#))
         XCTAssertTrue(script.contains("curl -fL -C -"))
         XCTAssertTrue(script.contains("wget -c"))
@@ -65,7 +70,7 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertEqual(positions.compactMap { $0 }, positions.compactMap { $0 }.sorted())
 
         let verifyHash = try XCTUnwrap(script.range(of: #"actual_sha256=$(sha256_of "$PART")"#)?.lowerBound)
-        let install = try XCTUnwrap(script.range(of: #"sh "$unpack/$BUNDLE_DIR/install.sh""#)?.lowerBound)
+        let install = try XCTUnwrap(script.range(of: #""$unpack/$BUNDLE_DIR/scripts/install.sh" --install"#)?.lowerBound)
         XCTAssertLessThan(verifyHash, install, "sha256 验证必须先于 current 切换")
 
         let execStartLine = script.components(separatedBy: .newlines)
@@ -82,26 +87,28 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.contains(#"STATE="$WORK/state.json""#))
         XCTAssertTrue(script.contains(#"printf '{"version":1,"attemptId":"%s","step":"%s","status":"%s",' "$ATTEMPT_ID" "$next_step" "$status""#))
         XCTAssertTrue(script.contains(#"chmod 600 "$tmp""#))
-        XCTAssertTrue(script.contains(#"unit_path="$unit_dir/pi-host.service""#))
+        XCTAssertTrue(script.contains(#"BASE="$HOME/.pi-adaptor""#))
+        XCTAssertTrue(script.contains(#"unit_path="$unit_dir/$UNIT_NAME""#))
         XCTAssertTrue(script.contains(#"systemctl --user daemon-reload"#))
         XCTAssertTrue(script.contains(#"loginctl enable-linger"#))
-        XCTAssertTrue(script.contains(#"ExecStart="%s" "%s/current/pi-host.js" --port %s"#))
-        XCTAssertTrue(script.contains(#"systemctl --user start pi-host.service"#))
-        XCTAssertTrue(script.contains(#"systemctl --user is-active --quiet pi-host.service"#))
+        XCTAssertTrue(script.contains(#"ExecStart="%s" "%s/current/dist/main.js""#))
+        XCTAssertTrue(script.contains(#"systemctl --user start "$UNIT_NAME""#))
+        XCTAssertTrue(script.contains(#"systemctl --user is-active --quiet "$UNIT_NAME""#))
+        XCTAssertTrue(script.contains(#"\"reason\":\"$details_reason\""#))
     }
 
     func testArtifactResumeAndFailurePrecisionArePresent() throws {
         let script = BootstrapScriptBuilder.build(try configuration())
         let download = try XCTUnwrap(script.range(of: #"resume_download "$ARTIFACT_URL" "$PART" &"#)?.lowerBound)
         let checksum = try XCTUnwrap(script.range(of: #"actual_sha256=$(sha256_of "$PART")"#)?.lowerBound)
-        let currentSwitch = try XCTUnwrap(script.range(of: #"sh "$unpack/$BUNDLE_DIR/install.sh""#)?.lowerBound)
+        let currentSwitch = try XCTUnwrap(script.range(of: #""$unpack/$BUNDLE_DIR/scripts/install.sh" --install"#)?.lowerBound)
         XCTAssertLessThan(download, checksum)
         XCTAssertLessThan(checksum, currentSwitch)
         for code in [
             "missing-tar", "missing-sha256-tool", "bootstrap-permissions",
             "stage-failed", "download-failed", "checksum-mismatch", "extract-failed",
             "unexpected-archive-layout", "install-failed", "installed-verification-failed",
-            "missing-node", "node-too-old", "host-stop-timeout", "host-start-failed",
+            "missing-node", "missing-bash", "node-too-old", "host-stop-timeout", "host-start-failed",
             "host-exited", "ready-timeout", "receipt-failed", "artifact-permissions",
             "pair-failed", "unit-failed", "verify-device-failed",
         ] {
@@ -112,7 +119,12 @@ final class BootstrapScriptTests: XCTestCase {
 
     func testAttemptIdPortAndTimeoutsRejectUnsafeValues() throws {
         let release = try XCTUnwrap(
-            PiHostRelease(version: "0.21.0", target: .linuxX64)
+            PiHostRelease(
+                version: "2.0.1",
+                target: .linuxX64,
+                baseURL: "https://example.test/releases",
+                pinnedChecksum: digest
+            )
         )
         for attempt in ["", "has space", "quote'bad", "../escape", String(repeating: "a", count: 97)] {
             XCTAssertThrowsError(
@@ -176,14 +188,14 @@ final class BootstrapScriptTests: XCTestCase {
 
     func testPairingMaterialValidationAndRedaction() throws {
         let material = try BootstrapPairingMaterial(
-            token: "ppt1.valid_token",
+            token: "ppt2." + "valid-token",
             expiresAt: 1_234,
             host: "127.0.0.1",
             port: 43_871
         )
         XCTAssertFalse(material.redactedDescription.contains(material.token))
 
-        for token in ["", "ppt1.", "pdt1.bad", "ppt1.has space", "ppt1.quote\""] {
+        for token in ["", "ppt2.", "pdt2.bad", "ppt1." + "legacy-token", "ppt2.has space", "ppt2.quote\""] {
             XCTAssertThrowsError(
                 try BootstrapPairingMaterial(
                     token: token,
@@ -195,10 +207,19 @@ final class BootstrapScriptTests: XCTestCase {
         }
         XCTAssertThrowsError(
             try BootstrapPairingMaterial(
-                token: "ppt1.valid",
+                token: "ppt2." + "valid-token",
                 expiresAt: 0,
                 host: "0.0.0.0",
                 port: 43_871
+            )
+        )
+        XCTAssertNoThrow(
+            try BootstrapPairingMaterial(
+                token: "ppt1." + "legacy-token",
+                expiresAt: 0,
+                host: "127.0.0.1",
+                port: 43_871,
+                allowLegacyPPT1: true
             )
         )
     }

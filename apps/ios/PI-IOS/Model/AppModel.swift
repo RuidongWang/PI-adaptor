@@ -1223,7 +1223,9 @@ final class AppModel: ObservableObject {
     }
 
     private func connectCurrentHostIfPaired() async {
-        guard let host = currentHost, host.pairedAt != nil else { return }
+        guard let host = currentHost else { return }
+        await connection.recoverStagedPairings(record: host)
+        guard host.pairedAt != nil else { return }
         await setCurrentHost(id: host.id)
     }
 
@@ -1266,7 +1268,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 撤销本机配对（AC-03.1）：先要求服务器 `session/revoke` 成功，再清本机凭证。
+    /// 撤销本机配对（AC-03.1）：先要求服务器 v2 `connection/revoke` 成功，再清本机凭证。
     ///
     /// 服务器没确认时**保留**本机凭证并如实返回结果——只删本地会让用户以为设备已被切断访问。
     @discardableResult

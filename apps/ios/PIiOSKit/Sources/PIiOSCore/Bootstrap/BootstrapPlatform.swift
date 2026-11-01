@@ -91,8 +91,8 @@ public enum BootstrapPlatformProbe {
         return BootstrapArtifactTarget.allCases.first { $0.unameMachineAliases.contains(value) }
     }
 
-    /// 产物名：`pi-host-<ver>-linux-<arch>.tar.gz`（契约 §5.1 示例与 AC-01.5）。
+    /// 产物名：`pi-adaptor-<ver>-linux-<arch>.tar.gz`。
     public static func artifactName(version: String, target: BootstrapArtifactTarget) -> String {
-        "pi-host-\(version)-\(target.rawValue).tar.gz"
+        "pi-adaptor-\(version)-\(target.rawValue).tar.gz"
     }
 }

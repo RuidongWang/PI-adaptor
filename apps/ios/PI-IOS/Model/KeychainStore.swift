@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import PIiOSCore
 import PIiOSNet
 
 /// 凭证与主机指纹的唯一落盘位置（spec AC-G4）。
@@ -112,11 +113,28 @@ enum KeychainStore {
         let deviceToken: String
     }
 
+    struct PairingCredential: Equatable {
+        let deviceId: String
+        let deviceToken: String
+    }
+
     /// Device tokens are scoped by the host record UUID, not only its SSH
     /// endpoint. Two Hosts may intentionally point at the same SSH server with
-    /// different pi-host ports and must not overwrite each other.
+    /// different PI-adaptor ports and must not overwrite each other.
     private static func deviceTokenAccount(hostID: UUID) -> String {
         "host-token:\(hostID.uuidString.lowercased())"
+    }
+
+    private static func pairing(from data: Data?) -> PairingCredential? {
+        guard let data,
+              let pairing = try? JSONDecoder().decode(StoredPairing.self, from: data),
+              !pairing.deviceId.isEmpty,
+              pairing.deviceToken.hasPrefix("pdt2.")
+        else { return nil }
+        return PairingCredential(
+            deviceId: pairing.deviceId,
+            deviceToken: pairing.deviceToken
+        )
     }
 
     private static func validPairing(hostID: UUID) -> StoredPairing? {
@@ -140,6 +158,131 @@ enum KeychainStore {
               (deviceToken.hasPrefix("pdt1.") || deviceToken.hasPrefix("pdt2.")),
               let data = try? JSONEncoder().encode(StoredPairing(deviceId: deviceId, deviceToken: deviceToken)) else { return false }
         return set(data, service: Service.deviceToken, account: deviceTokenAccount(hostID: hostID))
+    }
+
+    /// Persists the device credential issued by the current reinstall attempt.
+    /// The active host token remains untouched until `promoteStagedPairing`
+    /// has verified that the runtime is the configured PI-adaptor release.
+    @discardableResult
+    static func saveStagedPairing(
+        deviceId: String,
+        deviceToken: String,
+        hostID: UUID,
+        attemptId: String,
+        targetPort: Int
+    ) -> Bool {
+        guard let staged = BootstrapStagedCredential(
+            hostID: hostID,
+            attemptId: attemptId,
+            targetPort: targetPort,
+            deviceId: deviceId,
+            deviceToken: deviceToken
+        ),
+        let data = try? JSONEncoder().encode(staged)
+        else { return false }
+        return set(
+            data,
+            service: Service.deviceToken,
+            account: BootstrapStagedCredential.account(
+                hostID: hostID,
+                attemptId: attemptId
+            )
+        )
+    }
+
+    static func loadStagedPairing(hostID: UUID, attemptId: String) -> PairingCredential? {
+        let account = BootstrapStagedCredential.account(
+            hostID: hostID,
+            attemptId: attemptId
+        )
+        guard let data = get(service: Service.deviceToken, account: account),
+              let staged = BootstrapStagedCredential.decode(
+                account: account,
+                data: data,
+                expectedHostID: hostID
+              )
+        else { return nil }
+        return PairingCredential(
+            deviceId: staged.deviceId,
+            deviceToken: staged.deviceToken
+        )
+    }
+
+    /// Enumerates only attempt-scoped accounts for this Host. Primary
+    /// `host-token:` records are excluded before decoding, so recovery can
+    /// never select or overwrite the currently active credential.
+    static func loadAllStagedPairings(hostID: UUID) -> [BootstrapStagedCredential] {
+        let prefix = "\(BootstrapStagedCredential.accountPrefix)"
+            + "\(hostID.uuidString.lowercased()):"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Service.deviceToken,
+            kSecReturnAttributes as String: true,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let items = result as? [[String: Any]]
+        else { return [] }
+        let candidates: [(account: String, data: Data)] = items.compactMap { item in
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  account.hasPrefix(prefix),
+                  let data = item[kSecValueData as String] as? Data
+            else { return nil }
+            return (account, data)
+        }
+        return BootstrapStagedCredential.recoverable(
+            from: candidates,
+            expectedHostID: hostID
+        )
+    }
+
+    static func loadActivePairing(hostID: UUID) -> PairingCredential? {
+        guard let pairing = validPairing(hostID: hostID) else { return nil }
+        return PairingCredential(
+            deviceId: pairing.deviceId,
+            deviceToken: pairing.deviceToken
+        )
+    }
+
+    /// Commits the staged credential only after runtime identity, version, and
+    /// ping have all passed. Writing the primary record first means a failed
+    /// staging cleanup can only leave redundant data; it can never replace a
+    /// valid active token with a half-promoted value.
+    @discardableResult
+    static func promoteStagedPairing(hostID: UUID, attemptId: String) -> Bool {
+        guard let staged = loadStagedPairing(hostID: hostID, attemptId: attemptId),
+              savePairing(
+                deviceId: staged.deviceId,
+                deviceToken: staged.deviceToken,
+                hostID: hostID
+              )
+        else { return false }
+        _ = clearStagedPairing(hostID: hostID, attemptId: attemptId)
+        return true
+    }
+
+    @discardableResult
+    static func clearStagedPairing(hostID: UUID, attemptId: String) -> Bool {
+        delete(
+            service: Service.deviceToken,
+            account: BootstrapStagedCredential.account(
+                hostID: hostID,
+                attemptId: attemptId
+            )
+        )
+    }
+
+    @discardableResult
+    static func clearStagedPairing(_ staged: BootstrapStagedCredential) -> Bool {
+        delete(
+            service: Service.deviceToken,
+            account: BootstrapStagedCredential.account(
+                hostID: staged.hostID,
+                attemptId: staged.attemptId
+            )
+        )
     }
 
     static func loadDeviceId(hostID: UUID) -> String? {

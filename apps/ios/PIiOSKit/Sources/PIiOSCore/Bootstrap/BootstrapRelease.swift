@@ -1,34 +1,43 @@
 import Foundation
 
-/// Pure release coordinates for a `pi-host` artifact.
+/// Pure release coordinates for a PI-adaptor artifact.
 ///
-/// Mirrors the relevant rules in PI-Desktop's `pi-host-release.ts`: the app
-/// version selects both the downloaded bundle and the checksum, and only the
-/// two published Linux targets are valid.
+/// The app version selects the bundle, checksum, install root and systemd unit.
+/// Production callers use `patched`/`production`, which always pin a checksum.
 public struct PiHostRelease: Equatable, Sendable {
-    public static let defaultRepository = "vastsa/PI-Desktop"
-    /// 本项目自托管发布（provider-remove 增量包）的唯一来源。
-    /// 版本号、发布标签与各目标 sha256 必须与仓库根的 `host-release.json` 一致；
-    /// `HostReleaseManifestTests` 会在漂移时直接失败，避免「版本号改了、包还是旧的」。
-    public static let patchedRepository = "RuidongWang/PI-IOS-host"
-    public static let patchedReleaseVersion = "0.21.0+remove.1"
-    /// 发布标签由版本派生（`v<version>`），不再单独写死，避免标签与版本号各改一半。
-    public static var patchedReleaseTag: String { "v\(patchedReleaseVersion)" }
+    public static let defaultRepository = "RuidongWang/PI-adaptor"
+    public static let releaseRepository = "RuidongWang/PI-adaptor"
+    public static let releaseVersion = "2.0.1"
+    public static let releaseTag = "pi-adaptor-v2.0.1"
+    public static let runtimeServerName = "pi-adaptor"
+    public static let installHomeName = ".pi-adaptor"
+    public static let unitName = "pi-adaptor.service"
+    public static let entrypoint = "dist/main.js"
+    public static let minimumNodeVersion = "22.19.0"
+
+    // Source-compatible aliases. New callers should prefer the non-patched names.
+    public static let patchedRepository = releaseRepository
+    public static let patchedReleaseVersion = releaseVersion
+    public static var patchedReleaseTag: String { releaseTag }
     public static var defaultPatchedBaseURL: String {
         "https://github.com/\(patchedRepository)/releases/download/\(patchedReleaseTag)"
     }
     public static let patchedChecksums: [BootstrapArtifactTarget: String] = [
-        .linuxX64: "53b25d752258fb4d02c7092c54b9daf6c649aade8c4899959a7cb00b1c44c856",
-        .linuxArm64: "d4c77cadf9bcf5f9364176ed6e72bcd3d4557ad10d79bb6796cc7398b206737a",
+        .linuxX64: "c7e49db8aecc097c478417f3b16e572b6fa6fc41e3cba61229ae4ae62ff31080",
+        .linuxArm64: "bb52c1fe06c3d421ed5483b8eac1da3376ba7594a1e880a5ee1ead5da182eb31",
     ]
 
     public let repository: String
     public let version: String
+    public let releaseTag: String
     public let target: BootstrapArtifactTarget
     public let bundleDirectoryName: String
     public let artifactName: String
     public let artifactURL: String
     public let checksumURL: String
+    public let serverName: String
+    public let unitName: String
+    public let minimumNodeVersion: String
     /// A release may pin the expected digest in the app so an HTTP mirror cannot
     /// substitute both the bundle and its adjacent checksum file.
     public let pinnedChecksum: String?
@@ -45,15 +54,20 @@ public struct PiHostRelease: Equatable, Sendable {
         }
 
         let artifactName = BootstrapPlatformProbe.artifactName(version: version, target: target)
-        let baseURL = "https://github.com/\(repository)/releases/download/v\(version)"
+        let tag = "pi-adaptor-v\(version)"
+        let baseURL = "https://github.com/\(repository)/releases/download/\(tag)"
 
         self.repository = repository
         self.version = version
+        self.releaseTag = tag
         self.target = target
         self.bundleDirectoryName = String(artifactName.dropLast(".tar.gz".count))
         self.artifactName = artifactName
         self.artifactURL = "\(baseURL)/\(artifactName)"
         self.checksumURL = "\(baseURL)/\(artifactName).sha256"
+        self.serverName = Self.runtimeServerName
+        self.unitName = Self.unitName
+        self.minimumNodeVersion = Self.minimumNodeVersion
         self.pinnedChecksum = nil
     }
 
@@ -71,11 +85,15 @@ public struct PiHostRelease: Equatable, Sendable {
         let artifactName = BootstrapPlatformProbe.artifactName(version: version, target: target)
         self.repository = "self-hosted"
         self.version = version
+        self.releaseTag = "pi-adaptor-v\(version)"
         self.target = target
         self.bundleDirectoryName = String(artifactName.dropLast(".tar.gz".count))
         self.artifactName = artifactName
         self.artifactURL = "\(baseURL)/\(artifactName)"
         self.checksumURL = "\(baseURL)/\(artifactName).sha256"
+        self.serverName = Self.runtimeServerName
+        self.unitName = Self.unitName
+        self.minimumNodeVersion = Self.minimumNodeVersion
         self.pinnedChecksum = pinnedChecksum
     }
 
@@ -92,6 +110,13 @@ public struct PiHostRelease: Equatable, Sendable {
             baseURL: baseURL,
             pinnedChecksum: checksum
         )
+    }
+
+    public static func production(
+        target: BootstrapArtifactTarget,
+        baseURL: String = defaultPatchedBaseURL
+    ) -> PiHostRelease? {
+        patched(target: target, baseURL: baseURL)
     }
 
     /// Trims surrounding whitespace, tolerates one release-tag `v`, and rejects

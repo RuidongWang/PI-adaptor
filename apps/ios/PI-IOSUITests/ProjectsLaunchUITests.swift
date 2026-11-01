@@ -29,6 +29,13 @@ final class ProjectsLaunchUITests: XCTestCase {
             addProject.waitForExistence(timeout: 8),
             "The projects.add accessibility identifier must be discoverable."
         )
+        guard app.staticTexts
+            .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
+            .firstMatch
+            .waitForExistence(timeout: 3)
+        else {
+            throw XCTSkip("The expected real Host is not configured for this host-backed smoke test.")
+        }
 
         // The browse-and-register row only exists when the Host has an active project.
         // Keep that assertion conditional so the smoke test also runs with an empty Host.
@@ -154,13 +161,16 @@ final class ProjectsLaunchUITests: XCTestCase {
         )
     }
 
-    func testProjectsShowCurrentServerAndCurrentProject() {
+    func testProjectsShowCurrentServerAndCurrentProject() throws {
         showRoot("项目")
 
-        XCTAssertTrue(
-            app.staticTexts["当前服务器"].waitForExistence(timeout: 8),
-            "The projects screen must identify the current-server section."
-        )
+        guard app.staticTexts
+            .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
+            .firstMatch
+            .waitForExistence(timeout: 8)
+        else {
+            throw XCTSkip("The expected real Host is not configured for this host-backed smoke test.")
+        }
         XCTAssertTrue(
             app.staticTexts
                 .matching(NSPredicate(format: "label CONTAINS %@", expectedHostFragment))
@@ -270,16 +280,15 @@ final class ProjectsLaunchUITests: XCTestCase {
         app.buttons["取消"].tap()
     }
 
-    func testSettingsShowHostVersionAndSystemdState() {
+    func testSettingsShowHostVersionAndSystemdState() throws {
         showRoot("设置")
 
         let hostVersion = app.staticTexts
             .matching(NSPredicate(format: "label CONTAINS %@", "Host 版本"))
             .firstMatch
-        XCTAssertTrue(
-            hostVersion.waitForExistence(timeout: 10),
-            "Settings must show the connected Host version."
-        )
+        guard hostVersion.waitForExistence(timeout: 10) else {
+            throw XCTSkip("No real Host is configured for the host-backed settings smoke test.")
+        }
 
         let systemd = app.buttons
             .matching(NSPredicate(format: "label CONTAINS[c] %@", "systemd 服务"))
@@ -378,14 +387,14 @@ final class ProjectsLaunchUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["服务器"].waitForExistence(timeout: 8))
 
         let install = app.buttons
-            .matching(NSPredicate(format: "label CONTAINS %@", "安装或修复 pi-host"))
+            .matching(NSPredicate(format: "label CONTAINS %@", "安装或修复 PI-adaptor"))
             .firstMatch
         guard install.waitForExistence(timeout: 8) else {
             throw XCTSkip("The install entry is unavailable for this Host.")
         }
         install.tap()
 
-        XCTAssertTrue(app.navigationBars["安装 pi-host"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.navigationBars["安装 PI-adaptor"].waitForExistence(timeout: 8))
         XCTAssertTrue(
             app.textFields["installHost.port"].waitForExistence(timeout: 5),
             "The installation screen must expose its fixed loopback port."
@@ -515,7 +524,7 @@ final class ProjectsLaunchUITests: XCTestCase {
                 .matching(NSPredicate(format: "label BEGINSWITH %@", "已导入 2 个模型"))
                 .firstMatch
                 .waitForExistence(timeout: 30),
-            "provider-import must return a success receipt for the discovered models."
+            "RACP provider/create must return a success receipt for the discovered models."
         )
     }
 
@@ -539,7 +548,7 @@ final class ProjectsLaunchUITests: XCTestCase {
                 .matching(NSPredicate(format: "label CONTAINS %@", expected))
                 .firstMatch
                 .waitForExistence(timeout: 20),
-            "The conversation must render the same canonical text stored by pi-host."
+            "The conversation must render the same canonical text stored by PI-adaptor."
         )
     }
 

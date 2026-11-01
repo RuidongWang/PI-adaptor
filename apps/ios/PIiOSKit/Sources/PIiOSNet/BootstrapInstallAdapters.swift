@@ -4,6 +4,7 @@ import PIiOSCore
 public enum BootstrapInstallAdapterError: Error, Equatable, CustomStringConvertible {
     case requiresSSHTransport
     case persistenceFailed
+    case legacyDeviceToken
 
     public var description: String {
         switch self {
@@ -11,6 +12,8 @@ public enum BootstrapInstallAdapterError: Error, Equatable, CustomStringConverti
             return "安装器没有取得可复用的 SSH 连接"
         case .persistenceFailed:
             return "设备令牌已签发，但未能写入本机 Keychain"
+        case .legacyDeviceToken:
+            return "PI-adaptor 安装只接受本次配对签发的 pdt2 设备令牌"
         }
     }
 }
@@ -55,6 +58,9 @@ public struct BootstrapInstallPairingAdapter: BootstrapPairingCallback {
         deviceLabel: String?
     ) async throws -> BootstrapPairedDevice {
         let result = try await exchange(transport, material, deviceLabel)
+        guard result.deviceToken.hasPrefix("pdt2.") else {
+            throw BootstrapInstallAdapterError.legacyDeviceToken
+        }
         let device = BootstrapPairedDevice(
             deviceId: result.deviceId,
             deviceToken: result.deviceToken,
@@ -108,14 +114,13 @@ public struct BootstrapInstallVerificationAdapter: BootstrapDeviceVerificationCa
         using transport: any BootstrapCommandTransport,
         port: Int,
         device: BootstrapPairedDevice
-    ) async throws {
+    ) async throws -> RACPServerInfo {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(retryTimeout))
         var lastError: Error?
         repeat {
             do {
-                _ = try await verifyExchange(transport, port, device)
-                return
+                return try await verifyExchange(transport, port, device)
             } catch {
                 lastError = error
                 guard Self.isRetryable(error), clock.now < deadline else { throw error }
@@ -155,7 +160,7 @@ public enum BootstrapInstallDiagnostics {
     /// remote launcher. The pairing token travels through a FIFO and is removed
     /// before this file is exposed.
     public static let logCommand =
-        #"tail -n 240 "$HOME/.pi-desktop/pi-host/.bootstrap/bootstrap.log" 2>/dev/null || true"#
+        #"tail -n 240 "$HOME/.pi-adaptor/.bootstrap/bootstrap.log" 2>/dev/null || true"#
 
     /// Enables lingering for the current Linux account. The sudo password is
     /// supplied only through SSH stdin and never appears in this command.

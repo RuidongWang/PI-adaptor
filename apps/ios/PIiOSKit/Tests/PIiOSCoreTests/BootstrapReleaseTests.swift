@@ -4,54 +4,58 @@ import XCTest
 
 final class BootstrapReleaseTests: XCTestCase {
     private let digest = String(repeating: "0123456789abcdef", count: 4)
-    private let artifactName = "pi-host-0.21.0+remove.1-linux-x64.tar.gz"
+    private let artifactName = "pi-adaptor-2.0.1-linux-x64.tar.gz"
 
     func testReleaseCoordinatesForBothPublishedLinuxTargets() throws {
         let x64 = try XCTUnwrap(
-            PiHostRelease(version: "0.21.0+remove.1", target: .linuxX64)
+            PiHostRelease(version: "2.0.1", target: .linuxX64)
         )
-        XCTAssertEqual(x64.repository, "vastsa/PI-Desktop")
-        XCTAssertEqual(x64.version, "0.21.0+remove.1")
-        XCTAssertEqual(x64.bundleDirectoryName, "pi-host-0.21.0+remove.1-linux-x64")
+        XCTAssertEqual(x64.repository, "RuidongWang/PI-adaptor")
+        XCTAssertEqual(x64.version, "2.0.1")
+        XCTAssertEqual(x64.releaseTag, "pi-adaptor-v2.0.1")
+        XCTAssertEqual(x64.bundleDirectoryName, "pi-adaptor-2.0.1-linux-x64")
         XCTAssertEqual(x64.artifactName, artifactName)
+        XCTAssertEqual(x64.serverName, "pi-adaptor")
+        XCTAssertEqual(x64.unitName, "pi-adaptor.service")
+        XCTAssertEqual(x64.minimumNodeVersion, "22.19.0")
         XCTAssertEqual(
             x64.artifactURL,
-            "https://github.com/vastsa/PI-Desktop/releases/download/v0.21.0+remove.1/\(artifactName)"
+            "https://github.com/RuidongWang/PI-adaptor/releases/download/pi-adaptor-v2.0.1/\(artifactName)"
         )
         XCTAssertEqual(
             x64.checksumURL,
-            "https://github.com/vastsa/PI-Desktop/releases/download/v0.21.0+remove.1/\(artifactName).sha256"
+            "https://github.com/RuidongWang/PI-adaptor/releases/download/pi-adaptor-v2.0.1/\(artifactName).sha256"
         )
 
         let arm64 = try XCTUnwrap(
-            PiHostRelease(version: "v0.21.0", target: .linuxArm64)
+            PiHostRelease(version: "v2.0.1", target: .linuxArm64)
         )
-        XCTAssertEqual(arm64.version, "0.21.0")
-        XCTAssertEqual(arm64.bundleDirectoryName, "pi-host-0.21.0-linux-arm64")
-        XCTAssertEqual(arm64.artifactName, "pi-host-0.21.0-linux-arm64.tar.gz")
+        XCTAssertEqual(arm64.version, "2.0.1")
+        XCTAssertEqual(arm64.bundleDirectoryName, "pi-adaptor-2.0.1-linux-arm64")
+        XCTAssertEqual(arm64.artifactName, "pi-adaptor-2.0.1-linux-arm64.tar.gz")
     }
 
     func testReleaseRejectsUnsafeVersionAndRepository() {
         XCTAssertNil(PiHostRelease(version: "", target: .linuxX64))
         XCTAssertNil(PiHostRelease(version: "v", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "0.21.0/other", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "0.21.0 beta", target: .linuxX64))
-        XCTAssertNil(PiHostRelease(version: "0.21.0", target: .linuxX64, repository: "vastsa"))
-        XCTAssertNil(PiHostRelease(version: "0.21.0", target: .linuxX64, repository: "a/b/c"))
-        XCTAssertNil(PiHostRelease(version: "0.21.0", target: .linuxX64, repository: "owner/repo?x=1"))
+        XCTAssertNil(PiHostRelease(version: "2.0.1/other", target: .linuxX64))
+        XCTAssertNil(PiHostRelease(version: "2.0.1 beta", target: .linuxX64))
+        XCTAssertNil(PiHostRelease(version: "2.0.1", target: .linuxX64, repository: "vastsa"))
+        XCTAssertNil(PiHostRelease(version: "2.0.1", target: .linuxX64, repository: "a/b/c"))
+        XCTAssertNil(PiHostRelease(version: "2.0.1", target: .linuxX64, repository: "owner/repo?x=1"))
     }
 
     func testSelfHostedPatchedReleasePinsBothArchitectureChecksums() throws {
         XCTAssertEqual(
             PiHostRelease.defaultPatchedBaseURL,
-            "https://github.com/RuidongWang/PI-IOS-host/releases/download/v0.21.0+remove.1"
+            "https://github.com/RuidongWang/PI-adaptor/releases/download/pi-adaptor-v2.0.1"
         )
         let arm64 = try XCTUnwrap(PiHostRelease.patched(target: .linuxArm64))
         XCTAssertEqual(arm64.version, PiHostRelease.patchedReleaseVersion)
         XCTAssertEqual(arm64.pinnedChecksum, PiHostRelease.patchedChecksums[.linuxArm64])
         XCTAssertEqual(
             arm64.artifactURL,
-            "\(PiHostRelease.defaultPatchedBaseURL)/pi-host-0.21.0+remove.1-linux-arm64.tar.gz"
+            "\(PiHostRelease.defaultPatchedBaseURL)/pi-adaptor-2.0.1-linux-arm64.tar.gz"
         )
         XCTAssertEqual(
             arm64.checksumURL,
@@ -129,9 +133,9 @@ final class BootstrapReleaseTests: XCTestCase {
         XCTAssertFalse(PiHostRelease.checksumMatches(tampered, digest))
         XCTAssertFalse(PiHostRelease.checksumMatches("", ""))
 
-        XCTAssertTrue(PiHostRelease.versionsMatch("v0.21.0", "0.21.0"))
-        XCTAssertTrue(PiHostRelease.versionsMatch(" 0.21.0 ", "v0.21.0"))
-        XCTAssertFalse(PiHostRelease.versionsMatch("0.20.0", "0.21.0"))
+        XCTAssertTrue(PiHostRelease.versionsMatch("v2.0.1", "2.0.1"))
+        XCTAssertTrue(PiHostRelease.versionsMatch(" 2.0.1 ", "v2.0.1"))
+        XCTAssertFalse(PiHostRelease.versionsMatch("2.0.0", "2.0.1"))
         XCTAssertFalse(PiHostRelease.versionsMatch("", ""))
         XCTAssertFalse(PiHostRelease.versionsMatch("v", ""))
     }
@@ -142,7 +146,7 @@ final class BootstrapReleaseTests: XCTestCase {
             "PI_HOST_BOOTSTRAP download",
             "PI_HOST_BOOTSTRAP   verify  ",
             #"PI_HOST_READY {"hostId":"host_x","host":"127.0.0.1","port":41234,"version":"0.21.0"}"#,
-            #"PI_HOST_PAIRING_TOKEN {"token":"ppt1.test-only","expiresAt":123}"#,
+            #"PI_HOST_PAIRING_TOKEN {"token":"ppt1.test-only","expiresAt":123,"host":"127.0.0.1","port":41234}"#,
             "PI_HOST_BOOTSTRAP ok",
         ].joined(separator: "\n")
 
@@ -196,13 +200,22 @@ final class BootstrapReleaseTests: XCTestCase {
         XCTAssertNil(PiHostBootstrapOutputParser.parse("PI_HOST_FAILED {not json").failure)
     }
 
-    func testPairingExpiryDefaultsToZeroAndMissingTokenIsRejected() {
-        XCTAssertEqual(
-            PiHostBootstrapOutputParser.parse(#"PI_HOST_PAIRING_TOKEN {"token":"ppt1.test-only"}"#).pairing,
-            PiHostPairingLine(token: "ppt1.test-only", expiresAt: 0)
+    func testPairingLineRequiresTokenNumericExpiryAndLoopbackEndpoint() {
+        XCTAssertNil(
+            PiHostBootstrapOutputParser.parse(
+                #"PI_HOST_PAIRING_TOKEN {"token":"ppt1.test-only","expiresAt":123}"#
+            ).pairing
         )
         XCTAssertNil(
-            PiHostBootstrapOutputParser.parse(#"PI_HOST_PAIRING_TOKEN {"expiresAt":123}"#).pairing
+            PiHostBootstrapOutputParser.parse(
+                #"PI_HOST_PAIRING_TOKEN {"token":"ppt1.test-only","host":"127.0.0.1","port":41234}"#
+            ).pairing
+        )
+        XCTAssertEqual(
+            PiHostBootstrapOutputParser.parse(
+                #"PI_HOST_PAIRING_TOKEN {"token":"ppt1.test-only","expiresAt":123,"host":"127.0.0.1","port":41234}"#
+            ).pairing,
+            PiHostPairingLine(token: "ppt1.test-only", expiresAt: 123)
         )
     }
 

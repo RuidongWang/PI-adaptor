@@ -155,10 +155,12 @@ public enum ProviderImportFailureCode: Equatable, Sendable {
     case adminBusy
     case timeout
     case importFailed
+    case conflict
     case unknown(String)
 
     public static let known: [ProviderImportFailureCode] = [
         .invalidRequest, .payloadTooLarge, .adminUnavailable, .adminBusy, .timeout, .importFailed,
+        .conflict,
     ]
 
     public init(raw: String) {
@@ -169,6 +171,7 @@ public enum ProviderImportFailureCode: Equatable, Sendable {
         case "ADMIN_BUSY": self = .adminBusy
         case "TIMEOUT": self = .timeout
         case "IMPORT_FAILED": self = .importFailed
+        case "CONFLICT": self = .conflict
         default: self = .unknown(raw)
         }
     }
@@ -181,6 +184,7 @@ public enum ProviderImportFailureCode: Equatable, Sendable {
         case .adminBusy: return "ADMIN_BUSY"
         case .timeout: return "TIMEOUT"
         case .importFailed: return "IMPORT_FAILED"
+        case .conflict: return "CONFLICT"
         case let .unknown(raw): return raw
         }
     }
@@ -189,17 +193,19 @@ public enum ProviderImportFailureCode: Equatable, Sendable {
     public var displayMessage: String {
         switch self {
         case .invalidRequest:
-            return "Host 认为载荷不合法（字段不符合 provider-import 契约），请检查模型 ID、思考档位与 Base URL"
+            return "Host 认为载荷不合法（字段不符合 RACP provider/create 契约），请检查模型 ID、思考档位与 Base URL"
         case .payloadTooLarge:
             return "载荷超过 1 MiB 上限，请减少 provider 或模型数量"
         case .adminUnavailable:
-            return "Host 未运行或 admin.sock 不可用，请先启动 pi-host 再重试"
+            return "PI-adaptor 未运行或 admin.sock 不可用，请先启动 pi-adaptor.service 再重试"
         case .adminBusy:
             return "Host 正忙，稍后重试"
         case .timeout:
             return "整次导入超过 30 秒截止时间"
         case .importFailed:
             return "Host 侧导入失败，请查看 Host 日志"
+        case .conflict:
+            return "远端已有同名 provider，无法安全证明其密钥和模型与本次输入一致；请编辑现有服务，或明确选择覆盖后重试"
         case let .unknown(raw):
             return "未识别的失败码：\(raw)"
         }

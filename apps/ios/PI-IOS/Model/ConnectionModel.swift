@@ -16,7 +16,7 @@ enum ConnectionPairingError: LocalizedError {
         case .missingCredential:
             return "本机没有这台服务器的凭证：请先在服务器页保存并测试连接"
         case .missingHostPort:
-            return "未填写 pi-host 端口，无法建立配对隧道"
+            return "未填写 PI-adaptor 端口，无法建立配对隧道"
         case .invalidToken:
             return "配对令牌格式不正确：应以 ppt1. 或 ppt2. 开头，且不能包含空白字符"
         case .keychainWriteFailed:
@@ -54,7 +54,7 @@ enum HostInstallError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidReleaseVersion:
-            return "内置的 pi-host Release 版本或仓库配置不合法"
+            return "内置的 PI-adaptor Release 版本、资产或仓库配置不合法"
         case .probeFailed(let detail):
             return detail.isEmpty ? "无法探测服务器平台" : detail
         case .malformedProbe:
@@ -62,7 +62,7 @@ enum HostInstallError: LocalizedError {
         case .emptySudoPassword:
             return "请输入 sudo 密码；空密码不会发送到服务器"
         case .sudoFailed(let detail):
-            return detail.isEmpty ? "sudo 授权失败，pi-host unit 未启动" : detail
+            return detail.isEmpty ? "sudo 授权失败，pi-adaptor unit 未启动" : detail
         }
     }
 }
@@ -89,16 +89,14 @@ final class ConnectionModel: ObservableObject {
     static let deviceRevokedMessage = "服务器已撤销该设备的访问权限"
 
     nonisolated static let defaultHostInstallReleaseVersion = PiHostRelease.patchedReleaseVersion
-    nonisolated static let defaultHostInstallReleaseBaseURL =
-        ProcessInfo.processInfo.environment["PI_IOS_HOST_RELEASE_BASE_URL"]
-            ?? PiHostRelease.defaultPatchedBaseURL
+    nonisolated static let defaultHostInstallReleaseBaseURL = PiHostRelease.defaultPatchedBaseURL
 
     @Published private(set) var state: RACPTunnelState = .offline(reason: nil)
     @Published private(set) var projects: [RACPProjectSummary] = []
     @Published private(set) var sessions: [RACPSessionSummary] = []
     @Published private(set) var info: RACPServerInfo?
     @Published private(set) var lastError: String?
-    /// Invoked when the loopback pi-host port is discovered over SSH so the owner
+    /// Invoked when the loopback PI-adaptor port is discovered over SSH so the owner
     /// (AppModel) can persist it onto the host record.
     var onResolvedHostPort: ((UUID, Int) -> Void)?
     @Published private(set) var hasLoadedCatalog = false
@@ -250,9 +248,9 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    // MARK: - pi-host 配对
+    // MARK: - PI-adaptor 配对
 
-    /// 使用服务器 `pi-host --pair` 输出的一次性令牌完成 RACP 配对。
+    /// 使用服务器 `pi-adaptor --pair` 输出的一次性令牌完成 RACP 配对。
     ///
     /// `pairOnce` 只交换设备凭证并立即断开；调用方随后必须用已保存的设备令牌重新建连。
     func pair(record: HostRecord, credential: SSHCredential, pairingToken: String) async throws {
@@ -301,7 +299,7 @@ final class ConnectionModel: ObservableObject {
         }
     }
 
-    // MARK: - pi-host 安装
+    // MARK: - PI-adaptor 安装
 
     /// Runs the real remote bootstrap state machine over one SSH transport.
     ///
@@ -312,13 +310,14 @@ final class ConnectionModel: ObservableObject {
         record: HostRecord,
         port: Int,
         releaseVersion: String = ConnectionModel.defaultHostInstallReleaseVersion,
-        /// 强制重装：忽略服务器上的 `.release.sha256` 复用判定，重新下载并激活。
+        /// 强制重装：忽略 PI-adaptor install receipt，重新下载、校验并激活。
         force: Bool = false,
         eventHandler: BootstrapRunner.EventHandler? = nil
     ) async throws -> HostInstallRunOutcome {
         guard (1...65_535).contains(port) else {
             throw BootstrapScriptError.invalidPort
         }
+        await recoverStagedPairings(record: record)
         let account = KeychainStore.account(
             username: record.username,
             host: record.host,
@@ -366,13 +365,12 @@ final class ConnectionModel: ObservableObject {
             }
             throw HostInstallError.malformedProbe
         }
-        let release = releaseVersion == PiHostRelease.patchedReleaseVersion
-            ? PiHostRelease.patched(
+        guard releaseVersion == PiHostRelease.patchedReleaseVersion,
+              let release = PiHostRelease.patched(
                 target: target,
                 baseURL: ConnectionModel.defaultHostInstallReleaseBaseURL
-            )
-            : PiHostRelease(version: releaseVersion, target: target)
-        guard let release else {
+              )
+        else {
             await transport.close()
             throw HostInstallError.invalidReleaseVersion
         }
@@ -385,15 +383,22 @@ final class ConnectionModel: ObservableObject {
             port: port,
             force: force
         )
-        let pairingAdapter = BootstrapInstallPairingAdapter(persist: { device in
-            guard KeychainStore.savePairing(
-                deviceId: device.deviceId,
-                deviceToken: device.deviceToken,
-                hostID: record.id
-            ) else {
-                throw BootstrapInstallAdapterError.persistenceFailed
+        // Keep the newly issued token in memory until runtime identity and
+        // version have been proven. A failed reinstall therefore cannot
+        // overwrite the previous Host's working token.
+        let pairingAdapter = BootstrapInstallPairingAdapter(
+            persist: { device in
+                guard KeychainStore.saveStagedPairing(
+                    deviceId: device.deviceId,
+                    deviceToken: device.deviceToken,
+                    hostID: record.id,
+                    attemptId: attemptId,
+                    targetPort: port
+                ) else {
+                    throw BootstrapInstallAdapterError.persistenceFailed
+                }
             }
-        })
+        )
         let verificationAdapter = BootstrapInstallVerificationAdapter()
         let runner = BootstrapRunner(
             transport: transport,
@@ -401,15 +406,143 @@ final class ConnectionModel: ObservableObject {
             verifier: verificationAdapter,
             eventHandler: eventHandler
         )
-        let result = try await runner.run(
-            configuration: scriptConfiguration,
-            deviceLabel: UIDevice.current.name
-        )
+        let result: BootstrapRunResult
+        do {
+            result = try await runner.run(
+                configuration: scriptConfiguration,
+                deviceLabel: UIDevice.current.name
+            )
+        } catch {
+            await revokeStagedPairingBestEffort(
+                record: record,
+                port: port,
+                attemptId: attemptId
+            )
+            KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+            throw error
+        }
+        if case .succeeded = result {
+            guard KeychainStore.promoteStagedPairing(
+                hostID: record.id,
+                attemptId: attemptId
+            ) else {
+                await revokeStagedPairingBestEffort(
+                    record: record,
+                    port: port,
+                    attemptId: attemptId
+                )
+                KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+                throw ConnectionPairingError.keychainWriteFailed
+            }
+        } else {
+            await revokeStagedPairingBestEffort(
+                record: record,
+                port: port,
+                attemptId: attemptId
+            )
+            KeychainStore.clearStagedPairing(hostID: record.id, attemptId: attemptId)
+        }
         return HostInstallRunOutcome(
             result: result,
             releaseVersion: release.version,
             attemptId: attemptId
         )
+    }
+
+    /// Best-effort cleanup for a failed install. The active Host token is never
+    /// touched; only the attempt-scoped token is used and then deleted locally.
+    private func revokeStagedPairingBestEffort(
+        record: HostRecord,
+        port: Int,
+        attemptId: String
+    ) async {
+        guard let staged = KeychainStore.loadStagedPairing(
+            hostID: record.id,
+            attemptId: attemptId
+        ) else { return }
+        await revokePairingBestEffort(
+            record: record,
+            port: port,
+            deviceId: staged.deviceId,
+            deviceToken: staged.deviceToken
+        )
+    }
+
+    /// Recover attempt credentials abandoned by a crash, force close, or prior
+    /// app launch. Promotion may have committed the primary token while staging
+    /// deletion failed, so recovery compares both exact values first. Matching
+    /// records are cleared without revoking the live token; a different staged
+    /// token gets bounded revocation. The primary record is never modified.
+    func recoverStagedPairings(record: HostRecord) async {
+        let active = KeychainStore.loadActivePairing(hostID: record.id)
+        _ = await BootstrapStagingRecoveryCoordinator.recover(
+            staging: KeychainStore.loadAllStagedPairings(hostID: record.id),
+            activeDeviceId: active?.deviceId,
+            activeDeviceToken: active?.deviceToken,
+            revoke: { [self] attempt in
+                await revokePairingBestEffort(
+                    record: record,
+                    port: attempt.targetPort,
+                    deviceId: attempt.deviceId,
+                    deviceToken: attempt.deviceToken
+                )
+            },
+            clear: { attempt in
+                KeychainStore.clearStagedPairing(attempt)
+            }
+        )
+    }
+
+    private func revokePairingBestEffort(
+        record: HostRecord,
+        port: Int,
+        deviceId: String,
+        deviceToken: String
+    ) async {
+        let account = KeychainStore.account(
+            username: record.username,
+            host: record.host,
+            port: record.port
+        )
+        guard let credential = KeychainStore.loadCredential(account: account) else { return }
+        let pinned = KeychainStore.loadHostKey(account: account)
+        let (operationID, promptBroker) = makeHostKeyBroker(
+            account: account,
+            address: record.address
+        )
+        defer { releaseHostKeyBroker(operationID) }
+
+        let client = RACPClient(
+            configuration: RACPConfiguration(
+                ssh: SSHConnectionRequest(
+                    host: record.host,
+                    port: record.port,
+                    username: record.username,
+                    credential: credential,
+                    pinnedHostKey: pinned
+                ),
+                hostPort: port,
+                deviceToken: deviceToken
+            ),
+            confirmer: promptBroker
+        )
+        // The operation may not cooperate with cancellation. The deadline wins
+        // independently, then stopBestEffort separately bounds client shutdown.
+        _ = await boundedAsyncValue(seconds: 8) {
+            let stream = await client.start()
+            for await update in stream {
+                switch update {
+                case .ready:
+                    return (try? await client.revokeDevice(deviceId: deviceId)) ?? false
+                case .error:
+                    return false
+                default:
+                    continue
+                }
+            }
+            return false
+        }
+        _ = await client.stopBestEffort(timeout: 1)
     }
 
     /// Reads the owner-only bootstrap log through a fresh SSH `exec`. The
@@ -540,34 +673,43 @@ final class ConnectionModel: ObservableObject {
         record: HostRecord,
         payload: Data
     ) async throws -> ProviderImportReceipt {
-        let deadline = Date().addingTimeInterval(RemoteProviderOperations.userVisibleTimeout)
-        let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
-        guard let credential = KeychainStore.loadCredential(account: account) else {
-            throw ConnectionPairingError.missingCredential
-        }
-        let connection = try await connectSSH(
-            record: record,
-            credential: credential,
-            account: account,
-            timeout: remainingProviderBudget(deadline)
+        guard cacheHostID == record.id,
+              state.isOnline,
+              let client
+        else { throw RACPV2Error.notConnected }
+        let payload = try ProviderImportEncoder.decode(payload)
+        return try await RemoteProviderOperations.importProviders(
+            client: client,
+            payload: payload,
+            timeout: RemoteProviderOperations.userVisibleTimeout
         )
-        let transport = connection.transport
-        defer { releaseHostKeyBroker(connection.operationID) }
-        do {
-            let receipt = try await RemoteProviderOperations.importProviders(
-                transport: transport,
-                payload: payload,
-                timeout: remainingProviderBudget(deadline)
-            )
-            await transport.close()
-            return receipt
-        } catch {
-            await transport.close()
-            throw error
-        }
     }
 
     func removeProvider(
+        record: HostRecord,
+        providerId: String
+    ) async throws -> ProviderRemoveReceipt {
+        if info?.serverName == PiHostRelease.runtimeServerName {
+            guard cacheHostID == record.id,
+                  state.isOnline,
+                  let client
+            else { throw RACPV2Error.notConnected }
+            return try await RemoteProviderOperations.removeProvider(
+                client: client,
+                providerId: providerId,
+                timeout: RemoteProviderOperations.userVisibleTimeout
+            )
+        }
+        guard info?.serverName == "pi-host" else {
+            throw RACPV2Error.notConnected
+        }
+        return try await legacyRemoveProvider(
+            record: record,
+            providerId: providerId
+        )
+    }
+
+    private func legacyRemoveProvider(
         record: HostRecord,
         providerId: String
     ) async throws -> ProviderRemoveReceipt {
@@ -588,7 +730,7 @@ final class ConnectionModel: ObservableObject {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
             let payload = try encoder.encode(ProviderRemovePayload(providerId: providerId))
-            let receipt = try await RemoteProviderOperations.removeProvider(
+            let receipt = try await LegacyRemoteProviderOperations.removeProvider(
                 transport: transport,
                 payload: payload,
                 timeout: remainingProviderBudget(deadline)
@@ -611,6 +753,30 @@ final class ConnectionModel: ObservableObject {
             }
             return .success(status)
         }
+        if info?.serverName == PiHostRelease.runtimeServerName {
+            guard cacheHostID == record.id,
+                  state.isOnline,
+                  let client
+            else { throw RACPV2Error.notConnected }
+            return try await RemoteProviderOperations.bindingStatus(
+                client: client,
+                sessionId: sessionId,
+                timeout: RemoteProviderOperations.userVisibleTimeout
+            )
+        }
+        guard info?.serverName == "pi-host" else {
+            throw RACPV2Error.notConnected
+        }
+        return try await legacyProviderBindingStatus(
+            record: record,
+            sessionId: sessionId
+        )
+    }
+
+    private func legacyProviderBindingStatus(
+        record: HostRecord,
+        sessionId: String
+    ) async throws -> ProviderBindingReceipt {
         let deadline = Date().addingTimeInterval(RemoteProviderOperations.userVisibleTimeout)
         let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
         guard let credential = KeychainStore.loadCredential(account: account) else {
@@ -625,7 +791,7 @@ final class ConnectionModel: ObservableObject {
         let transport = connection.transport
         defer { releaseHostKeyBroker(connection.operationID) }
         do {
-            let receipt = try await RemoteProviderOperations.bindingStatus(
+            let receipt = try await LegacyRemoteProviderOperations.bindingStatus(
                 transport: transport,
                 sessionId: sessionId,
                 timeout: remainingProviderBudget(deadline)
@@ -660,60 +826,25 @@ final class ConnectionModel: ObservableObject {
         var provider: RACPV2Provider
     }
 
-    private struct HostV2SessionGet: Decodable {
-        struct Session: Decodable {
-            var providerId: String?
-            var modelId: String?
-            var thinkingLevel: String?
-        }
-        var session: Session
-    }
-
     /// v2 equivalent of the legacy SSL `provider-binding-status` probe: read the
     /// session's pinned provider/model, then verify it against the Host store.
     func hostV2BindingStatus(sessionId: String) async throws -> ProviderBindingStatus {
         guard let client, state.isOnline else { throw RACPV2Error.notConnected }
-        let observedAt = ISO8601DateFormatter().string(from: Date())
-        func status(
-            providerId: String?,
-            modelId: String?,
-            available: Bool?,
-            reason: String?,
-            effective: Bool
-        ) -> ProviderBindingStatus {
-            ProviderBindingStatus(
-                sessionId: sessionId,
-                pinnedProviderId: providerId,
-                pinnedModelId: modelId,
-                pinnedThinkingLevel: nil,
-                effectiveProviderId: effective ? providerId : nil,
-                effectiveModelId: effective ? modelId : nil,
-                available: available,
-                unavailableReason: reason,
-                unknownInputs: [],
-                observedAt: observedAt
-            )
-        }
-        let result: HostV2SessionGet = try await client.v2Request(
-            method: RACPV2Method.sessionGet.rawValue,
-            params: .object(["sessionId": .string(sessionId)])
+        let receipt = try await RemoteProviderOperations.bindingStatus(
+            client: client,
+            sessionId: sessionId
         )
-        let providerId = result.session.providerId
-        let modelId = result.session.modelId
-        guard let providerId, !providerId.isEmpty, let modelId, !modelId.isEmpty else {
-            return status(providerId: providerId, modelId: modelId, available: false, reason: "no_candidate", effective: false)
+        switch receipt {
+        case .success(let status):
+            return status
+        case .failure(let failure):
+            throw RACPV2Error.server(
+                code: failure.rawValue,
+                message: failure.displayMessage
+            )
+        case .unparseable(let reason):
+            throw RACPV2Error.protocolViolation(reason)
         }
-        let providers = try await listHostProviders()
-        guard let provider = providers.first(where: { $0.id == providerId }) else {
-            return status(providerId: providerId, modelId: modelId, available: false, reason: "provider_missing", effective: false)
-        }
-        guard provider.models.contains(where: { $0.id == modelId }) else {
-            return status(providerId: providerId, modelId: modelId, available: false, reason: "model_removed", effective: false)
-        }
-        if provider.authKind != "none", !provider.hasApiKey {
-            return status(providerId: providerId, modelId: modelId, available: false, reason: "secret_missing", effective: false)
-        }
-        return status(providerId: providerId, modelId: modelId, available: true, reason: nil, effective: true)
     }
 
     func listHostSkills() async throws -> [RACPV2Skill] {
@@ -990,7 +1121,7 @@ final class ConnectionModel: ObservableObject {
         let result: SSHExecResult
         do {
             result = try await connection.transport.exec(
-                "systemctl --user show pi-host.service --property=LoadState,ActiveState,UnitFileState",
+                "systemctl --user show pi-adaptor.service --property=LoadState,ActiveState,UnitFileState",
                 timeout: 15
             )
         } catch {
@@ -1147,7 +1278,7 @@ final class ConnectionModel: ObservableObject {
             return
         }
         guard record.pairedAt != nil else {
-            state = .offline(reason: "本机记录尚未配对：请先完成 pi-host 配对")
+            state = .offline(reason: "本机记录尚未配对：请先完成 PI-adaptor 配对")
             return
         }
         let account = KeychainStore.account(username: record.username, host: record.host, port: record.port)
@@ -1166,7 +1297,7 @@ final class ConnectionModel: ObservableObject {
             account: account,
             pinned: pinned
         ) else {
-            state = .offline(reason: "无法确定 pi-host 端口：SSH 探测失败且未记录端口")
+            state = .offline(reason: "无法确定 PI-adaptor 端口：SSH 探测失败且未记录端口")
             return
         }
         // `resolveHostPort` 是一次跨 await 的端口探测：期间用户可能已切到另一台
@@ -1507,7 +1638,7 @@ final class ConnectionModel: ObservableObject {
 
     // MARK: - 撤销本机配对（AC-03.1）
 
-    /// 用 `connection/pair` 保存下来的 `deviceId` 调 `session/revoke`。
+    /// 用 `connection/pair` 保存下来的 `deviceId` 调 v2 `connection/revoke`。
     ///
     /// 只有服务器确认 `revoked == true` 才算撤销成功；离线、缺设备 ID、服务器拒绝都要如实报告，
     /// 不能因为「本机已删掉凭证」就当成服务器侧已撤销。
@@ -1515,7 +1646,6 @@ final class ConnectionModel: ObservableObject {
         guard cacheHostID == host.id else {
             return "目标服务器不是当前连接：未发送撤销请求"
         }
-        let account = KeychainStore.account(username: host.username, host: host.host, port: host.port)
         guard let deviceId = KeychainStore.loadDeviceId(hostID: host.id) else {
             return "本机没有保存的 deviceId：无法向服务器撤销，只清除了本地凭证"
         }
@@ -1523,7 +1653,11 @@ final class ConnectionModel: ObservableObject {
             return "隧道未连接：改动只在服务器确认后才生效，请先连接再撤销"
         }
         do {
-            let revoked = try await client.revokeDevice(deviceId: deviceId)
+            let revoked = if info?.serverName == "pi-host" {
+                try await client.revokeLegacyDevice(deviceId: deviceId)
+            } else {
+                try await client.revokeDevice(deviceId: deviceId)
+            }
             return revoked
                 ? Self.deviceRevokedMessage
                 : "服务器返回未撤销（设备可能早已被撤销）"
@@ -1914,9 +2048,7 @@ final class HostKeyPromptBroker: HostKeyConfirming, @unchecked Sendable {
     }
 
     func confirmHostKey(_ key: SSHHostKey, status: HostKeyTrustStatus) async -> HostKeyConfirmation {
-        lock.lock()
-        let isCancelled = cancelled
-        lock.unlock()
+        let isCancelled = lock.withLock { cancelled }
         if isCancelled { return .reject }
         if status == .matches {
             return .trust

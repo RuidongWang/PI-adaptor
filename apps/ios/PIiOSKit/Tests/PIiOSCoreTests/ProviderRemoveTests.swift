@@ -74,6 +74,12 @@ final class ProviderRemoveTests: XCTestCase {
         XCTAssertEqual(receipt, .failure(.unknown("SOMETHING_NEW")))
     }
 
+    func testUnsupportedOperationGuidanceUsesPIAdaptorName() {
+        let message = ProviderRemoveFailureCode.unsupportedOp.displayMessage
+        XCTAssertTrue(message.contains("PI-adaptor 2.0.1"))
+        XCTAssertFalse(message.contains("pi-host"))
+    }
+
     func testDefaultTransferOrderUnknownFourKeyForm() {
         let json = """
         {"ok":false,"code":"DEFAULT_TRANSFER_ORDER_UNKNOWN","removed":{"providerId":"\(providerID)","secretCleared":true},"defaultTransfer":{"state":"not_transferred","reason":"order_unknown","orderingBasis":"none"}}

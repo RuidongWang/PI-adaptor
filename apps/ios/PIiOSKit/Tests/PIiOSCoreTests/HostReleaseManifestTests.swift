@@ -26,11 +26,20 @@ final class HostReleaseManifestTests: XCTestCase {
         XCTAssertEqual(version, PiHostRelease.patchedReleaseVersion, "版本号必须在 host-release.json 与 PiHostRelease 之间一致")
         XCTAssertEqual(tag, PiHostRelease.patchedReleaseTag, "发布标签必须由版本派生，且与 manifest 一致")
         XCTAssertEqual(repository, PiHostRelease.patchedRepository, "发布仓库必须一致")
+        XCTAssertEqual(manifest["schemaVersion"] as? Int, 2)
+        XCTAssertEqual(manifest["protocolVersion"] as? String, "2.0.0")
         XCTAssertEqual(
             PiHostRelease.defaultPatchedBaseURL,
             "https://github.com/\(repository)/releases/download/\(tag)",
             "下载地址必须由仓库 + 标签派生"
         )
+
+        let install = try XCTUnwrap(manifest["install"] as? [String: Any])
+        XCTAssertEqual(install["unitName"] as? String, PiHostRelease.unitName)
+        XCTAssertEqual(install["entrypoint"] as? String, PiHostRelease.entrypoint)
+        XCTAssertEqual(install["minimumNodeVersion"] as? String, PiHostRelease.minimumNodeVersion)
+        let runtime = try XCTUnwrap(manifest["runtime"] as? [String: Any])
+        XCTAssertEqual(runtime["serverName"] as? String, PiHostRelease.runtimeServerName)
     }
 
     func testManifestArtifactsMatchPinnedChecksumsAndNames() throws {
@@ -56,14 +65,19 @@ final class HostReleaseManifestTests: XCTestCase {
         }
     }
 
-    func testManifestVersionHasNoStrayWhitespaceAndCarriesUpstreamBase() throws {
+    func testManifestVersionHasNoStrayWhitespaceAndPackageVersionMatches() throws {
         let manifest = try Self.manifest()
         let version = try XCTUnwrap(manifest["version"] as? String)
         XCTAssertEqual(version, version.trimmingCharacters(in: .whitespacesAndNewlines))
         XCTAssertNotNil(PiHostRelease.canonicalVersion(version), "版本必须能安全出现在资产名与 URL 里")
-        let upstream = try XCTUnwrap(manifest["upstreamVersion"] as? String)
-        let minHost = try XCTUnwrap(manifest["minHostVersion"] as? String)
-        XCTAssertTrue(version.hasPrefix(upstream), "增量包版本必须以官版为前缀（\(upstream)）")
-        XCTAssertEqual(minHost, upstream, "bootstrap 的 MIN_HOST_VERSION 必须与 upstreamVersion 一致")
+
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { url.deleteLastPathComponent() }
+        url.appendPathComponent("apps/host/package.json")
+        let package = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        XCTAssertEqual(version, package["version"] as? String)
+        XCTAssertEqual(package["name"] as? String, "@pi-ios/pi-adaptor")
     }
 }

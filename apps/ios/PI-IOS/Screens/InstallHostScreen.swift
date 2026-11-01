@@ -2,7 +2,7 @@ import SwiftUI
 import PIiOSCore
 import PIiOSNet
 
-/// S-06 安装 pi-host。
+/// S-06 安装 PI-adaptor。
 ///
 /// 页面只展示 runner 的真实状态文件与事件，不伪造进度。远端安装脚本在
 /// `setsid nohup` 子进程里继续运行；本页通过短 exec 轮询，因此锁屏或短暂
@@ -18,7 +18,7 @@ struct InstallHostScreen: View {
     @State private var didSeedPort = false
     @State private var showingLog = false
     @State private var sudoCredential = ""
-    /// 强制重装：忽略服务器上的 `.release.sha256` 复用判定（版本没变但字节变了时用）。
+    /// 强制重装：忽略已存在的 PI-adaptor install receipt，重新下载并执行验证。
     @State private var forceReinstall = false
     @FocusState private var portFocused: Bool
 
@@ -29,7 +29,7 @@ struct InstallHostScreen: View {
     private var portError: String? {
         let text = portText.piTrimmed
         if text.isEmpty {
-            return "安装必须填写 pi-host 常驻端口"
+            return "安装必须填写 PI-adaptor 常驻端口"
         }
         return HostValidator.hostPortError(text)
     }
@@ -61,7 +61,7 @@ struct InstallHostScreen: View {
             .padding(.bottom, PISpacing.s32)
         }
         .piPageBackground()
-        .piDetailNavBar("安装 pi-host")
+        .piDetailNavBar("安装 PI-adaptor")
         .onAppear(perform: seedPort)
         .sheet(item: $connection.hostKeyPrompt) { prompt in
             HostKeyConfirmSheet(prompt: prompt) { confirmation in
@@ -81,7 +81,7 @@ struct InstallHostScreen: View {
         case .running:
             PIStatusBanner(
                 kind: .info,
-                text: "正在安装 pi-host",
+                text: "正在安装 PI-adaptor",
                 detail: coordinator.activity
             )
         case .stalled:
@@ -110,7 +110,7 @@ struct InstallHostScreen: View {
             PIStatusBanner(
                 kind: .info,
                 text: "安装会先核对服务器指纹",
-                detail: "首次连接必须先确认 SSH SHA256 指纹。安装只写入该用户的 ~/.pi-desktop/pi-host 与 systemd user unit。"
+                detail: "首次连接必须先确认 SSH SHA256 指纹。安装写入该用户的 ~/.pi-adaptor/releases 与 pi-adaptor.service。"
             )
         }
     }
@@ -149,7 +149,7 @@ struct InstallHostScreen: View {
                 Text("v\(receipt.version) · 端口 \(receipt.hostPort)")
                     .font(PIFont.listTitle)
                     .foregroundStyle(PIColor.text)
-                Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))。再次安装时服务器会先核对 .release.sha256，命中则跳过下载、校验和解包。")
+                Text("完成于 \(receipt.completedAt.formatted(date: .abbreviated, time: .shortened))。再次安装时服务器会核对 PI-adaptor 的 install receipt、完整资产摘要和安装树。")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -160,11 +160,11 @@ struct InstallHostScreen: View {
     private var configurationCard: some View {
         PIGroup(
             "安装参数",
-            footer: "端口是服务器 127.0.0.1 上的 pi-host RACP 监听端口，不是 SSH 端口。安装成功后会自动写回本机服务器记录。"
+            footer: "端口是服务器 127.0.0.1 上的 PI-adaptor RACP 监听端口，不是 SSH 端口。安装成功后会自动写回本机服务器记录。"
         ) {
             VStack(alignment: .leading, spacing: PISpacing.s12) {
                 PIFormField(
-                    label: "pi-host 端口",
+                    label: "PI-adaptor 端口",
                     hint: "建议使用现有端口或 44271；不要填 0，随机端口无法常驻。",
                     error: portError
                 ) {
@@ -175,7 +175,7 @@ struct InstallHostScreen: View {
                         .focused($portFocused)
                         .accessibilityIdentifier("installHost.port")
                 }
-                Text("固定版本：v\(ConnectionModel.defaultHostInstallReleaseVersion) · 自动按 uname -m 选择 linux-x64 / linux-arm64")
+                Text("固定版本：PI-adaptor \(ConnectionModel.defaultHostInstallReleaseVersion) · 自动按 uname -m 选择 linux-x64 / linux-arm64")
                     .font(PIFont.caption)
                     .foregroundStyle(PIColor.text3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -190,7 +190,7 @@ struct InstallHostScreen: View {
             PISectionHeader(text: "安装进度")
             if let state = coordinator.state {
                 downloadCard(state)
-                PIGroup(footer: "步骤来自服务器 .bootstrap/state.json；连接中断后重新进入本页可再次安装，服务器回执会避免重复下载。") {
+                PIGroup(footer: "步骤来自 ~/.pi-adaptor/.bootstrap/state.json；连接中断后重新进入本页可恢复或重新安装。") {
                     ForEach(Array(InstallStepDescriptor.all.enumerated()), id: \.element.id) { index, step in
                         PIListRow(
                             title: step.title,
@@ -259,7 +259,7 @@ struct InstallHostScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if coordinator.failureCode == .pairFailed {
-                    Text("安装包已下载并切换完成，当前只差重新启动配对；重试不会重新下载或解包。")
+                    Text("安装器会在配对失败后恢复原 current 和服务状态；请重试以启动新的 PI-adaptor 配对进程。")
                         .font(PIFont.caption)
                         .foregroundStyle(PIColor.text2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -635,17 +635,25 @@ private final class InstallHostCoordinator: ObservableObject {
                 version: outcome.releaseVersion,
                 attemptId: outcome.attemptId
             )
-            phase = .success
-            if persisted {
-                activity = "systemd unit active，设备令牌重连与 ping 均成功；hostPort、pairedAt 与安装回执已写回本机。"
+            switch BootstrapInstallCompletionPolicy.disposition(
+                persisted: persisted,
+                saveError: model.saveError
+            ) {
+            case .succeeded:
+                let info = success.serverInfo
+                phase = .success
+                activity = "\(info.serverName) \(info.serverVersion) 正在运行；pi-adaptor.service active、设备令牌重连与 ping 均成功。"
                 postInstallWarning = nil
-            } else {
-                activity = "安装与设备验证已完成，但本机服务器记录写入失败：\(model.saveError ?? "未知错误")"
-                postInstallWarning = model.saveError
+                failureCode = nil
+                failureDetail = nil
+                failureCount = 0
+            case .failed(let reason):
+                phase = .failed
+                failureCode = .receiptFailed
+                failureDetail = "远端安装与运行验证已通过，但无法提交本机服务器记录：\(reason)"
+                postInstallWarning = reason
+                failureCount += 1
             }
-            failureCode = nil
-            failureDetail = nil
-            failureCount = 0
         case .failed(let failure):
             state = failure.state
             phase = .failed
@@ -665,10 +673,16 @@ private final class InstallHostCoordinator: ObservableObject {
         if failure.callbackFailure == .pairing {
             details.append("客户端配对回调失败；令牌已失效时请重试以重新启动 --pair。")
         } else if failure.callbackFailure == .verification {
-            details.append("客户端设备令牌验证失败；常驻服务已启动，但尚未达到可连接终态。")
+            details.append("运行身份或版本验证失败；安装器不会把旧 Host 或错误版本当作成功。")
+        }
+        if let detail = failure.detail, !detail.isEmpty {
+            details.append(detail)
         }
         if let raw = failure.state.failureCodeRaw, raw != failure.code.rawValue {
             details.append("服务器原始失败码：\(raw)")
+        }
+        if let structured = failure.state.failureDetails?.displayText, !structured.isEmpty {
+            details.append(structured)
         }
         if let artifact = failure.state.artifact?.name {
             details.append("产物：\(artifact)")
@@ -738,17 +752,17 @@ private struct InstallStepDescriptor: Identifiable {
 
     static let all: [InstallStepDescriptor] = [
         .init(step: .probe, title: "探测", detail: "读取 uname -s / uname -m 并选择架构"),
-        .init(step: .resolve, title: "解析 Release", detail: "下载并解析对应产物的 sha256"),
+        .init(step: .resolve, title: "解析 Release", detail: "下载并核对冻结 manifest 的完整 sha256"),
         .init(step: .download, title: "下载", detail: "断点续传到 owner-only .part 文件"),
         .init(step: .verify, title: "校验", detail: "sha256 不匹配则不切换 current"),
         .init(step: .extract, title: "解包", detail: "解包到隔离暂存目录并检查结构"),
-        .init(step: .activate, title: "激活版本", detail: "执行 bundle 自检后原子切换 current"),
-        .init(step: .writeUnit, title: "写入 unit", detail: "写入 systemd user unit 并 enable-linger"),
+        .init(step: .activate, title: "激活版本", detail: "校验 package 版本与 SHA256SUMS 后原子切换 current"),
+        .init(step: .writeUnit, title: "写入 unit", detail: "写入 pi-adaptor.service 并 enable-linger"),
         .init(step: .startPair, title: "启动配对进程", detail: "停止 unit，单独启动一次 --pair"),
         .init(step: .pair, title: "交换设备令牌", detail: "同一 SSH 连接完成 connection/pair"),
         .init(step: .stopManual, title: "停止手动进程", detail: "确认 --pair 进程已退出"),
-        .init(step: .startUnit, title: "启动常驻服务", detail: "启动不带 --pair 的 systemd unit"),
-        .init(step: .verifyDevice, title: "验证设备令牌", detail: "重新 initialize + ping"),
-        .init(step: .done, title: "完成", detail: "unit active 且设备令牌重连成功"),
+        .init(step: .startUnit, title: "启动常驻服务", detail: "启动 pi-adaptor.service"),
+        .init(step: .verifyDevice, title: "验证运行版本", detail: "检查 server.name、server.version 并重新 ping"),
+        .init(step: .done, title: "完成", detail: "PI-adaptor 身份、版本与服务状态均匹配"),
     ]
 }
