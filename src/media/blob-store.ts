@@ -27,6 +27,21 @@ const EMPTY: MediaIndex = { version: 1, attachments: [] };
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_STAGING_BYTES = 1024 * 1024 * 1024;
 
+// sha256 直接用作 blob 文件名，必须严格限定为 64 位小写十六进制，
+// 否则 `../../x` 之类的取值会让 rm/read 落到 blobs 目录之外。
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === "string" && SHA256_HEX.test(value);
+}
+
+function normalizeSha256(value: string): string {
+  if (!isSha256Hex(value)) {
+    throw new HostError("ATTACHMENT_INVALID", "sha256 must be 64 lowercase hex characters");
+  }
+  return value;
+}
+
 function validateMime(mime: string): asserts mime is AttachmentRecord["mimeType"] {
   if (!["image/jpeg", "image/png", "image/webp"].includes(mime)) {
     throw new HostError("ATTACHMENT_INVALID", "unsupported image type");
@@ -90,6 +105,7 @@ export class BlobStore {
       if (!Number.isInteger(input.byteLength) || input.byteLength < 1 || input.byteLength > MAX_IMAGE_BYTES) {
         throw new HostError("ATTACHMENT_INVALID", "image exceeds 20 MiB or is empty");
       }
+      const sha256 = normalizeSha256(input.sha256);
       const data = await this.load();
       const stagingBytes = data.attachments
         .filter((entry) => entry.state === "uploading" && entry.expiresAt && Date.parse(entry.expiresAt) > now.getTime())
@@ -104,7 +120,7 @@ export class BlobStore {
         fileName: input.fileName,
         mimeType: input.mimeType,
         byteLength: input.byteLength,
-        sha256: input.sha256,
+        sha256,
         state: "uploading",
         createdAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString()
@@ -142,7 +158,8 @@ export class BlobStore {
       if (!record) throw new HostError("ATTACHMENT_INCOMPLETE", "upload not found");
       const bytes = await readFile(this.partPath(id));
       const actual = createHash("sha256").update(bytes).digest("hex");
-      if (bytes.length !== record.byteLength || actual !== expectedSha256 || actual !== record.sha256) {
+      const expected = normalizeSha256(expectedSha256);
+      if (bytes.length !== record.byteLength || actual !== expected || actual !== record.sha256) {
         record.state = "failed";
         await this.save(index);
         await rm(this.partPath(id), { force: true });
@@ -169,6 +186,7 @@ export class BlobStore {
   }> {
     const record = (await this.load()).attachments.find((entry) => entry.id === id && entry.state === "ready");
     if (!record) throw new HostError("NOT_FOUND", "attachment not found");
+    if (!isSha256Hex(record.sha256)) throw new HostError("NOT_FOUND", "attachment not found");
     const bytes = await readFile(this.blobPath(record.sha256));
     const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + Math.max(1, length)));
     return { attachment: record, dataBase64: chunk.toString("base64"), eof: offset + chunk.length >= bytes.length };
@@ -237,6 +255,8 @@ export class BlobStore {
       }
       await this.save(data);
       for (const hash of hashes) {
+        // 历史索引里可能残留非法 sha256（早期版本未校验），绝不拿它拼路径删除。
+        if (!isSha256Hex(hash)) continue;
         const stillReferenced = data.attachments.some(
           (entry) => entry.sha256 === hash && entry.state === "ready"
         );
@@ -287,7 +307,7 @@ export class BlobStore {
         liveHashes.add(hash);
       }
       for (const record of index.attachments) {
-        if (record.state === "deleted" && !liveHashes.has(record.sha256)) {
+        if (record.state === "deleted" && !liveHashes.has(record.sha256) && isSha256Hex(record.sha256)) {
           await rm(this.blobPath(record.sha256), { force: true });
         }
       }

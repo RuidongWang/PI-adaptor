@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +61,84 @@ describe("blob store", () => {
     await expect(store.complete(created.id, "f".repeat(64))).rejects.toMatchObject({
       code: "ATTACHMENT_INVALID"
     });
+  });
+
+  it("rejects sha256 values that are not 64 lowercase hex characters", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-"));
+    const store = new BlobStore(root);
+    await store.init();
+    for (const sha256 of ["../escape", "/etc/passwd", "A".repeat(64), "0".repeat(63), ""]) {
+      await expect(
+        store.create({ sessionId: "s1", fileName: "a.png", mimeType: "image/png", byteLength: 1, sha256 })
+      ).rejects.toMatchObject({ code: "ATTACHMENT_INVALID" });
+    }
+    const bytes = Buffer.from("abc");
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const created = await store.create({
+      sessionId: "s1",
+      fileName: "a.png",
+      mimeType: "image/png",
+      byteLength: bytes.length,
+      sha256: hash
+    });
+    await store.appendChunk(created.id, 0, bytes.toString("base64"));
+    await expect(store.complete(created.id, "../index.json")).rejects.toMatchObject({
+      code: "ATTACHMENT_INVALID"
+    });
+  });
+
+  it("never deletes outside the blob directory from a poisoned legacy index", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-"));
+    const store = new BlobStore(root);
+    await store.init();
+    const sentinel = join(root, "media", "sentinel.txt");
+    await writeFile(sentinel, "keep me");
+    await writeFile(
+      join(root, "media", "index.json"),
+      JSON.stringify({
+        version: 1,
+        attachments: [
+          {
+            id: "legacy",
+            sessionId: "s1",
+            kind: "input",
+            fileName: "a.png",
+            mimeType: "image/png",
+            byteLength: 1,
+            sha256: "../sentinel.txt",
+            state: "uploading",
+            createdAt: new Date().toISOString()
+          }
+        ]
+      })
+    );
+
+    expect(await store.deleteSession("s1")).toBe(1);
+    expect(await readFile(sentinel, "utf8")).toBe("keep me");
+
+    const other = join(root, "media", "other.txt");
+    await writeFile(other, "keep me too");
+    await writeFile(
+      join(root, "media", "index.json"),
+      JSON.stringify({
+        version: 1,
+        attachments: [
+          {
+            id: "legacy-deleted",
+            sessionId: "s1",
+            kind: "input",
+            fileName: "a.png",
+            mimeType: "image/png",
+            byteLength: 1,
+            sha256: "other.txt",
+            state: "deleted",
+            createdAt: new Date().toISOString()
+          }
+        ]
+      })
+    );
+    await store.gc(new Set(), new Date(Date.now() + 25 * 60 * 60 * 1000));
+    expect(await readFile(other, "utf8")).toBe("keep me too");
   });
 
   it("imports output images and preserves blobs shared by another session", async () => {

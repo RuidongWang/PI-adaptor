@@ -67,6 +67,7 @@ make_production_tree() {
       --ignore-scripts \
       --force \
       --config.node-linker=hoisted \
+      --config.strict-dep-builds=false \
       --cpu="$cpu" \
       --os=linux \
       --libc=glibc

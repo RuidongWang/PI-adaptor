@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BOOTSTRAP_HOST, pairingTokenLine, readyLine } from "../src/bootstrap-output.js";
+import { HOST_VERSION } from "../src/config.js";
 
 function readLines(stream: NodeJS.ReadableStream): {
   lines: string[];
@@ -51,14 +52,14 @@ describe("bootstrap stdout", () => {
 
     const ready = JSON.parse(
       readyLine({
-        version: "2.0.1",
+        version: HOST_VERSION,
         hostId: "host-id",
         port: 43871,
         fingerprint: "abc123"
       }).trim().slice("PI_HOST_READY ".length)
     );
     expect(ready).toEqual({
-      version: "2.0.1",
+      version: HOST_VERSION,
       hostId: "host-id",
       host: BOOTSTRAP_HOST,
       port: 43871,
@@ -109,7 +110,7 @@ describe("bootstrap stdout", () => {
       expect(pairing.expiresAt).toBeGreaterThan(Date.now());
       expect(Number.isSafeInteger(pairing.expiresAt)).toBe(true);
       expect(ready).toMatchObject({
-        version: "2.0.1",
+        version: HOST_VERSION,
         host: BOOTSTRAP_HOST,
         port: pairing.port
       });

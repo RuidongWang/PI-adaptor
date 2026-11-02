@@ -1,0 +1,4 @@
+# pnpm 10+ fails installs when dependency build scripts are ignored.
+# Release installs already pass --ignore-scripts; keep local installs consistent
+# without an interactive `pnpm approve-builds` step.
+strictDepBuilds: false
