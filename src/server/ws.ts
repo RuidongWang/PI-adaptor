@@ -109,13 +109,21 @@ async function handleMessage(
     }
     const result = await service.handle(frame.method, frame.params, auth,
       frame.method === "connection/pair" && token?.startsWith("ppt2.") ? token : undefined);
+    // A successful revoke tears down every socket of the target device — including,
+    // when a device revokes itself, the socket that is waiting for this response.
+    // Closing first would make the acknowledgement unsendable, so the client would
+    // see a bare socket close and report an offline failure even though the device
+    // is revoked. Defer the close until the response frame has been handed to ws.
+    let closeRevokedSockets: (() => void) | undefined;
     if (frame.method === "connection/revoke" && result && typeof result === "object") {
       const revoked = (result as { revoked?: boolean }).revoked;
       const targetDevice = (frame.params as { deviceId?: string } | undefined)?.deviceId;
       if (revoked && targetDevice) {
-        for (const candidate of sockets) {
-          if (socketDevices.get(candidate) === targetDevice) candidate.close(1008, "device revoked");
-        }
+        closeRevokedSockets = () => {
+          for (const candidate of sockets) {
+            if (socketDevices.get(candidate) === targetDevice) candidate.close(1008, "device revoked");
+          }
+        };
       }
     }
     if (frame.method === "events/subscribe" && result && typeof result === "object") {
@@ -137,7 +145,16 @@ async function handleMessage(
       const id = (frame.params as { subscriptionId?: unknown } | undefined)?.subscriptionId;
       if (typeof id === "string") subscriptions.delete(id);
     }
-    send(socket, { jsonrpc: "2.0", id: frame.id, result });
+    const response = { jsonrpc: "2.0", id: frame.id, result };
+    if (closeRevokedSockets) {
+      if (socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify(response), () => closeRevokedSockets?.());
+      } else {
+        closeRevokedSockets();
+      }
+    } else {
+      send(socket, response);
+    }
   } catch (error) {
     const hostError = asHostError(error);
     send(socket, hostError.toJSONRPC(frame.id ?? null));

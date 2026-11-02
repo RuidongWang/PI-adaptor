@@ -193,4 +193,82 @@ describe("RACP v2 websocket", () => {
     socket.close();
     await server.close();
   });
+
+  it("acknowledges a device's self-revoke before closing its socket", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-revoke-"));
+    const config = parseHostConfig(
+      ["--data-dir", join(root, "data"), "--agent-dir", join(root, "agent"), "--port", "0"],
+      {},
+      root
+    );
+    await ensureHostDirectories(config);
+    const service = new HostService(config, new DeterministicAgentDriver());
+    await service.init();
+    const pairing = await service.createPairingToken();
+    const server = await startWebSocketServer(service, 0);
+    const url = `ws://127.0.0.1:${server.port}/v1/racp/ws`;
+
+    const pairingSocket = await connect(url, pairing.token);
+    const paired = await rpc(pairingSocket, 1, "connection/pair", { deviceLabel: "self-revoke" });
+    pairingSocket.close();
+
+    // The owner revokes itself. The acknowledgement must arrive before the host
+    // tears the device's socket down; otherwise the client sees only a close and
+    // reports an offline failure for a revoke that already took effect.
+    const socket = await connect(url, paired.result.deviceToken);
+    const closed = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)));
+    const response = await rpc(socket, 2, "connection/revoke", {
+      deviceId: paired.result.deviceId,
+      context: { requestId: "revoke", idempotencyKey: "revoke" }
+    });
+    expect(response.result.revoked).toBe(true);
+    expect(await closed).toBe(1008);
+
+    // AC-03.1: the device token is unusable afterwards (initialize stays anonymous,
+    // so probe an owner-only read instead).
+    const rejected = await connect(url, paired.result.deviceToken);
+    const unauthorized = await rpc(rejected, 3, "project/list");
+    expect(unauthorized.error.data.code).toBe("UNAUTHORIZED");
+    rejected.close();
+    await server.close();
+  });
+
+  it("answers a repeated revoke with revoked=false without dropping the caller", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-revoke-repeat-"));
+    const config = parseHostConfig(
+      ["--data-dir", join(root, "data"), "--agent-dir", join(root, "agent"), "--port", "0"],
+      {},
+      root
+    );
+    await ensureHostDirectories(config);
+    const service = new HostService(config, new DeterministicAgentDriver());
+    await service.init();
+    const first = await service.createPairingToken();
+    const second = await service.createPairingToken();
+    const server = await startWebSocketServer(service, 0);
+    const url = `ws://127.0.0.1:${server.port}/v1/racp/ws`;
+
+    const ownerPairing = await connect(url, first.token);
+    const ownerPaired = await rpc(ownerPairing, 1, "connection/pair", { deviceLabel: "owner" });
+    ownerPairing.close();
+    const targetPairing = await connect(url, second.token);
+    const target = await rpc(targetPairing, 2, "connection/pair", { deviceLabel: "target" });
+    targetPairing.close();
+
+    // Revoke the target from an owner socket, then repeat with a fresh key.
+    // The owner must stay connected and receive `revoked=false` (contract §2.4).
+    const owner = await connect(url, ownerPaired.result.deviceToken);
+    const firstRevoke = await rpc(owner, 3, "connection/revoke", {
+      deviceId: target.result.deviceId,
+      context: { requestId: "revoke-1", idempotencyKey: "revoke-1" }
+    });
+    expect(firstRevoke.result.revoked).toBe(true);
+    const secondRevoke = await rpc(owner, 4, "connection/revoke", {
+      deviceId: target.result.deviceId,
+      context: { requestId: "revoke-2", idempotencyKey: "revoke-2" }
+    });
+    expect(secondRevoke.result.revoked).toBe(false);
+    owner.close();
+    await server.close();
+  });
 });
