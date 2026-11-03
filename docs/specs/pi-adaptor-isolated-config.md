@@ -119,7 +119,7 @@ ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js
   "sessionDir": "/home/pi/.pi-adaptor/data/sessions",
   "port": 19445,
   "hostId": "pi-adaptor-aarch64",
-  "hostVersion": "2.0.0",
+  "hostVersion": "0.0.1",
   "piVersion": "1.3.0"
 }
 ```
@@ -127,7 +127,7 @@ ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js
 ### 5.3 接入步骤（不触碰原 host）
 
 1. 构建：` pnpm install && pnpm build`。
-2. 在**独立目录**部署产物，例如 `~/.pi-adaptor/version-2.0.0/`，并原子切换 `~/.pi-adaptor/current`（只动 v2 自己的 `current`）。
+2. 在**独立目录**部署产物，例如 `~/.pi-adaptor/version-0.0.1/`，并原子切换 `~/.pi-adaptor/current`（只动 v2 自己的 `current`）。
 3. 写入 `~/.pi-adaptor/config.json`（示例 B）或选择用 env（示例 A）。
 4. 安装 **user unit**（新 unit 名 `pi-adaptor.service`，不改动任何原 host unit）：
    `cp deploy/pi-adaptor.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now pi-adaptor.service`

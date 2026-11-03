@@ -6,7 +6,7 @@
 
 - `host-release.json` 仍描述 `pi-host 0.21.0+remove.1`。
 - iOS bootstrap 仍写入 `~/.pi-desktop/pi-host`，安装 `pi-host.js`，启动 `pi-host.service`。
-- PI-adaptor 的当前包版本是 `2.0.1`，安装根为 `~/.pi-adaptor`，服务为 `pi-adaptor.service`。
+- PI-adaptor 的当前包版本是 `0.0.1`，安装根为 `~/.pi-adaptor`，服务为 `pi-adaptor.service`。
 - 端口探测和界面错误文案仍把 legacy `pi-host` 当作主要安装目标。
 
 因此，即使下载、校验或激活步骤显示成功，结果也可能只是复用旧目录、旧 unit 或旧进程。
@@ -23,7 +23,7 @@
 
 - AC-1 Given App 内置或读取了当前 PI-adaptor release 配置，When 用户打开安装或强制重装页面，Then 页面展示的版本、iOS 生成的下载 URL、checksum URL、资产名、解包目录和服务版本均来自该配置，且均为当前 PI-adaptor 版本；验证方式：自动化测试。
 - AC-1.1 Given `host-release.json`、PI-adaptor `package.json` 与 iOS 内置 release 常量任一发生版本或发布坐标漂移，When 运行发布一致性测试，Then 测试失败并明确指出漂移字段；验证方式：自动化测试。
-- AC-1.2 Given 当前配置指定 `2.0.1`，When 生成安装脚本，Then 不得出现 `pi-host 0.21.0+remove.1` 的下载地址、资产名、解包目录或作为安装目标的 `pi-host.js`；验证方式：自动化测试。
+- AC-1.2 Given 当前配置指定 `0.0.1`，When 生成安装脚本，Then 不得出现 `pi-host 0.21.0+remove.1` 的下载地址、资产名、解包目录或作为安装目标的 `pi-host.js`；验证方式：自动化测试。
 
 ### 重装与复用
 
@@ -46,7 +46,7 @@
 
 ### 回归保护
 
-- AC-5 Given 当前版本是 `2.0.1`，When 运行 Host 与 iOS 的测试套件，Then 不得有测试继续断言旧 `pi-host 0.21.0+remove.1` 是本 App 的默认安装目标；legacy 兼容测试若保留，必须明确标注 legacy 且不能进入默认安装路径；验证方式：自动化测试。
+- AC-5 Given 当前版本是 `0.0.1`，When 运行 Host 与 iOS 的测试套件，Then 不得有测试继续断言旧 `pi-host 0.21.0+remove.1` 是本 App 的默认安装目标；legacy 兼容测试若保留，必须明确标注 legacy 且不能进入默认安装路径；验证方式：自动化测试。
 - AC-5.1 Given 安装被中断或旧服务仍在运行，When 重新进入安装页，Then 状态机可依据最终激活资产和运行时 server info 恢复或重新安装，并以实际目标版本为准；验证方式：脚本集成测试。
 
 ## 非目标

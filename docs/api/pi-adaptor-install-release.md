@@ -31,8 +31,8 @@
 {
   "schemaVersion": 2,
   "repository": "Owner/Repo",
-  "version": "2.0.1",
-  "releaseTag": "pi-adaptor-v2.0.1",
+  "version": "0.0.1",
+  "releaseTag": "pi-adaptor-v0.0.1",
   "protocolVersion": "2.0.0",
   "runtime": {
     "serverName": "pi-adaptor"
@@ -49,13 +49,13 @@
   },
   "artifacts": {
     "linux-x64": {
-      "bundleDirectory": "pi-adaptor-2.0.1-linux-x64",
-      "file": "pi-adaptor-2.0.1-linux-x64.tar.gz",
+      "bundleDirectory": "pi-adaptor-0.0.1-linux-x64",
+      "file": "pi-adaptor-0.0.1-linux-x64.tar.gz",
       "sha256": "__64_LOWERCASE_HEX__"
     },
     "linux-arm64": {
-      "bundleDirectory": "pi-adaptor-2.0.1-linux-arm64",
-      "file": "pi-adaptor-2.0.1-linux-arm64.tar.gz",
+      "bundleDirectory": "pi-adaptor-0.0.1-linux-arm64",
+      "file": "pi-adaptor-0.0.1-linux-arm64.tar.gz",
       "sha256": "__64_LOWERCASE_HEX__"
     }
   }
@@ -66,7 +66,7 @@
 
 - `schemaVersion` 必须为 `2`。
 - `version` 必须与 `package.json.version` 完全相同。
-- `releaseTag` 必须为 `pi-adaptor-v<version>`。现有 `pi-adaptor-v2.0.1` Release 保持该命名。
+- `releaseTag` 必须为 `pi-adaptor-v<version>`。现有 `pi-adaptor-v0.0.1` Release 保持该命名。
 - `repository` 必须是 `<owner>/<repo>`，默认 `RuidongWang/PI-adaptor`。
 - `protocolVersion` 必须是 Host 实际支持的 RACP 协议版本。
 - `runtime.serverName` 必须为 `pi-adaptor`；安装器用它校验 RACP `server.name`。
@@ -111,7 +111,7 @@ adjacent `.sha256` 只用于发现远端摘要。客户端必须再与 manifest 
 每个平台 tarball 顶层恰好是一个 `bundleDirectory`：
 
 ```text
-pi-adaptor-2.0.1-linux-arm64/
+pi-adaptor-0.0.1-linux-arm64/
   package.json
   dist/main.js
   node_modules/
@@ -185,12 +185,12 @@ receipt JSON：
 ```json
 {
   "schemaVersion": 1,
-  "version": "2.0.1",
+  "version": "0.0.1",
   "target": "linux-arm64",
   "assetSha256": "__64_LOWERCASE_HEX__",
   "installedManifestSha256": "__64_LOWERCASE_HEX__",
-  "bundleDirectory": "pi-adaptor-2.0.1-linux-arm64",
-  "installDirectory": "~/.pi-adaptor/releases/2.0.1-<asset-sha256>",
+  "bundleDirectory": "pi-adaptor-0.0.1-linux-arm64",
+  "installDirectory": "~/.pi-adaptor/releases/0.0.1-<asset-sha256>",
   "entrypoint": "dist/main.js",
   "unitName": "pi-adaptor.service",
   "activatedAt": "2026-11-01T00:00:00Z"
@@ -236,7 +236,7 @@ scripts/install.sh --install \
 - 成功时 stdout 只输出单行 JSON：
 
 ```json
-{"installDirectory":"/abs/.pi-adaptor/releases/2.0.1-<sha>","previousCurrentTarget":null,"currentTarget":"releases/2.0.1-<sha>"}
+{"installDirectory":"/abs/.pi-adaptor/releases/0.0.1-<sha>","previousCurrentTarget":null,"currentTarget":"releases/0.0.1-<sha>"}
 ```
 
 #### `--verify`
@@ -261,7 +261,7 @@ scripts/install.sh --verify \
 成功时不修改文件，stdout 输出：
 
 ```json
-{"verified":true,"version":"2.0.1","target":"linux-arm64","installDirectory":"/abs/path"}
+{"verified":true,"version":"0.0.1","target":"linux-arm64","installDirectory":"/abs/path"}
 ```
 
 #### `--rollback`
@@ -281,7 +281,7 @@ scripts/install.sh --rollback \
 - 成功时 stdout 输出：
 
 ```json
-{"rolledBack":true,"currentTarget":"releases/2.0.1-<sha-or-null>"}
+{"rolledBack":true,"currentTarget":"releases/0.0.1-<sha-or-null>"}
 ```
 
 文件回滚与 service、未来 pairing/runtime 验证的完整补偿由 §8 编排；`install.sh --rollback` 不读取或修改 Keychain、配对令牌和 legacy 数据。
@@ -401,7 +401,7 @@ WantedBy=default.target
     "reason": "runtime-identity-mismatch",
     "expectedName": "pi-adaptor",
     "actualName": "pi-host",
-    "expectedVersion": "2.0.1",
+    "expectedVersion": "0.0.1",
     "actualVersion": "0.21.0",
     "unitName": "pi-adaptor.service",
     "port": 19445

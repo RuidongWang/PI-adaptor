@@ -89,7 +89,7 @@
   "protocolVersion": "2.0.0",
   "server": {
     "name": "pi-adaptor",
-    "version": "0.1.0",
+    "version": "0.0.1",
     "hostId": "uuid",
     "piVersion": "1.3.0"
   },
