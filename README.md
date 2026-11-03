@@ -65,6 +65,11 @@ scripts/install.sh --install \
 defined in `docs/api/pi-adaptor-install-release.md`. The generated bootstrap
 uses the architecture-specific tarball selected from the server's `uname -m`.
 
+The iOS app installs the latest stable `pi-adaptor-v<version>` release by
+default, skipping drafts and prereleases. If that release cannot be resolved,
+it falls back to the compiled `0.0.1` manifest and pins that manifest's
+SHA-256. Both paths verify the digest on the server before switching `current`.
+
 Verify the active installation on the Linux server:
 
 ```sh

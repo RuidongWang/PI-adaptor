@@ -1,7 +1,7 @@
 # PI-adaptor 安装与发布契约
 
-- 状态：**FROZEN**（2026-11-01；已吸收 advisor 契约评审）
-- 契约版本：`1.0.0`
+- 状态：**FROZEN**（2026-11-03；新增自动匹配最新稳定发布）
+- 契约版本：`1.1.0`
 - 适用范围：PI-IOS iOS 客户端、远端 bootstrap、`host-release.json`、PI-adaptor release 资产
 - 需求来源：`docs/specs/pi-adaptor-reinstall-version.md`
 - 兼容基线：既有 bootstrap 状态推进与 `PI_HOST_BOOTSTRAP*` / `PI_HOST_READY` / `PI_HOST_PAIRING_TOKEN` / `PI_HOST_FAILED` 标记
@@ -12,10 +12,10 @@
 
 必须成立：
 
-1. 版本、Release tag、平台资产、安装根、入口和 unit 都由同一个 release manifest 决定。
+1. 版本、Release tag、平台资产、安装根、入口和 unit 都由同一个 release manifest 决定。默认安装时该 manifest 是安装当时解析出的最新稳定发布；解析失败时回退到仓库根 `host-release.json` 所描述的固定版本。
 2. 默认安装目标只能是 PI-adaptor；legacy `pi-host` 不能作为 receipt 命中、运行中二进制的替代或成功证明。
 3. 安装目录不可变。同一版本但资产摘要变化时，必须形成新的安装目录并原子切换 `current`。
-4. 安装成功的最终证据必须来自本次新配对后的 RACP 连接：`server.name == "pi-adaptor"` 且 `server.version == manifest.version`。
+4. 安装成功的最终证据必须来自本次新配对后的 RACP 连接：`server.name == "pi-adaptor"` 且 `server.version` 等于本次解析出的 manifest 版本。
 5. 旧 `pi-host` 的用户数据目录不得被读取、删除或迁移到 PI-adaptor 数据根。
 6. 安装失败不得报告成功；若已经切换 `current`，必须按 §8 恢复安装前状态。
 
@@ -23,7 +23,9 @@
 
 ### 2.1 权威文件与 schema
 
-仓库根 `host-release.json` 是唯一权威源，iOS 内置常量、Host 包版本、发布脚本和一致性测试必须从中派生或与它比对。
+仓库根 `host-release.json` 是**回退 manifest** 与发布门禁的权威输入：iOS 内置常量、Host 包版本、发布脚本和一致性测试必须从中派生或与它比对。
+
+默认安装不直接使用该固定版本，而是解析仓库的最新稳定发布（见 §2.2）。该发布一旦被选中，就取代回退 manifest 成为本次安装的权威源；回退 manifest 的版本与摘要必须始终可安装。
 
 `schemaVersion` 升级为 `2`。必需字段如下：
 
@@ -89,9 +91,29 @@ https://github.com/<repository>/releases/download/<releaseTag>/<file>
 https://github.com/<repository>/releases/download/<releaseTag>/<file>.sha256
 ```
 
-adjacent `.sha256` 只用于发现远端摘要。客户端必须再与 manifest 中固定摘要比对；二者不一致时在下载后、解包前失败。
+adjacent `.sha256` 只用于发现远端摘要，不能反过来决定固定摘要。manifest 模式下固定摘要来自 `host-release.json`；latest 模式下优先使用 GitHub API 资产条目的 `digest` 字段，只有该字段缺失或格式非法时才读取 adjacent `.sha256`。两种来源得到的摘要不一致时，必须在下载后、解包前失败。
 
-生产安装不得通过环境变量、用户输入或远端配置覆盖 manifest 的 `version`、artifact、固定 SHA-256 或 runtime name。测试可注入 base URL 和本地 fixture，但 fixture 必须同时显式提供期望 SHA-256 并经过同一校验；缺少 checksum、checksum 非法或不匹配都必须失败。测试不得把 checksum 校验改成可选路径。
+### 2.2.1 latest 模式（默认）
+
+`<repository>` 可能同时发布 iOS App，因此不能直接使用 GitHub 的 `/releases/latest`。客户端必须请求发布列表并按以下顺序筛选：
+
+1. 跳过 `draft` 与 `prerelease`；
+2. 标签必须形如 `pi-adaptor-v<数字点分版本>`（例如 `pi-adaptor-v1.4.2`）；
+3. 必须同时存在目标架构的 `<file>` 与 `<file>.sha256`；
+4. 选择第一个满足条件的发布（GitHub 返回顺序即从新到旧）。
+
+选中发布后：
+
+- `version` 来自标签，`releaseTag` 等于该标签，资产名与 URL 按本节公式生成；
+- 本次安装的固定摘要按以下优先级确定，安装脚本下载后必须与它比对：
+  1. GitHub 发布列表里目标资产条目的 `digest`（形如 `sha256:<64 位十六进制>`），规范化成裸小写摘要；
+  2. `digest` 缺失或不是合法 SHA-256 时，读取 adjacent `<file>.sha256` 中的 64 位 SHA-256；
+- 使用 API `digest` 时不得再请求 `github.com` 的 `.sha256`，避免多一次下载依赖；
+- 安装完成后的 RACP 身份与版本校验必须使用该发布的版本。
+
+任何一步失败（网络、超时、限流、响应超限或格式错误、没有合格发布、资产缺失、摘要非法）都必须回退到回退 manifest 的版本，并在安装界面说明原因。不得因为解析失败而阻止安装，也不得回退到用户或环境变量指定的任意版本。
+
+生产安装不得通过环境变量、用户输入或远端配置覆盖已选 manifest 的 `version`、artifact、固定 SHA-256 或 runtime name。唯一允许的版本选择只有「自动选择最新稳定发布」与「解析失败回退内置版本」。测试可注入 base URL 和本地 fixture，但 fixture 必须同时显式提供期望 SHA-256 并经过同一校验；缺少 checksum、checksum 非法或不匹配都必须失败。测试不得把 checksum 校验改成可选路径。
 
 ### 2.3 发布门禁
 
@@ -102,7 +124,8 @@ adjacent `.sha256` 只用于发现远端摘要。客户端必须再与 manifest 
 3. iOS release 常量与 manifest 的 repository、version、tag、target、file、bundleDirectory、sha256 全部一致。
 4. 本地 x64/arm64 产物的实际 SHA-256 与 manifest 一致。
 5. GitHub Release 两个资产和 adjacent checksum 均存在，下载后的摘要与 manifest 一致。
-6. 两个 Linux 资产分别执行 `install.sh --verify` 和 Host smoke test。
+6. 最新稳定发布也必须满足 latest 模式的标签、资产与摘要规则，且回退 manifest 的版本继续可安装。
+7. 两个 Linux 资产分别执行 `install.sh --verify` 和 Host smoke test。
 
 任一失败时不得发布，也不得让 iOS 安装入口继续展示“可安装”。
 
