@@ -1,0 +1,2351 @@
+{
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/initialize",
+      "params": {
+        "client": {
+          "name": "x",
+          "version": "x",
+          "capabilities": {}
+        },
+        "protocolVersion": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/ping",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/pair",
+      "params": {
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/revoke",
+      "params": {
+        "deviceId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/rotate-token",
+      "params": {
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/confirm-rotation",
+      "params": {
+        "rotationId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "device/list",
+      "params": {
+        "context": {
+          "requestId": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "device/pairing-token",
+      "params": {
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "project/list",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "project/browse",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "project/register",
+      "params": {
+        "path": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "project/update",
+      "params": {
+        "projectId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "project/delete",
+      "params": {
+        "projectId": "x",
+        "confirmProjectId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/list",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/search",
+      "params": {
+        "query": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/get",
+      "params": {
+        "sessionId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/create",
+      "params": {
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/attach",
+      "params": {
+        "sessionId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/history",
+      "params": {
+        "sessionId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/configure",
+      "params": {
+        "sessionId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/rename",
+      "params": {
+        "sessionId": "x",
+        "title": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/archive",
+      "params": {
+        "sessionId": "x",
+        "archived": false,
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/branch",
+      "params": {
+        "sessionId": "x",
+        "fromItemId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "session/delete",
+      "params": {
+        "sessionId": "x",
+        "confirmSessionId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "events/subscribe",
+      "params": {
+        "scope": "host"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "events/unsubscribe",
+      "params": {
+        "subscriptionId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "events/ack",
+      "params": {
+        "subscriptionId": "x",
+        "sequence": 0
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "turn/start",
+      "params": {
+        "sessionId": "x",
+        "input": {
+          "text": "x"
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "turn/get",
+      "params": {
+        "turnId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "turn/interrupt",
+      "params": {
+        "turnId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "turn/cancel",
+      "params": {
+        "turnId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "approval/respond",
+      "params": {
+        "approvalId": "x",
+        "decision": "allow-once",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x",
+          "expectedRevision": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "input/respond",
+      "params": {
+        "inputId": "x",
+        "answers": [
+          [
+            "x"
+          ]
+        ],
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x",
+          "expectedRevision": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/list",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/create",
+      "params": {
+        "provider": {
+          "name": "x",
+          "vendorKey": "x",
+          "type": "x",
+          "protocol": "x",
+          "baseUrl": "https://example.com/v1",
+          "authKind": "api_key",
+          "models": [
+            {
+              "id": "x",
+              "displayName": "x",
+              "contextWindow": 1,
+              "maxTokens": 1,
+              "thinkingLevels": [
+                "off"
+              ],
+              "defaultThinkingLevel": "off",
+              "supportsImages": false
+            }
+          ],
+          "apiKey": "x"
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/update",
+      "params": {
+        "providerId": "x",
+        "provider": {
+          "name": "x",
+          "vendorKey": "x",
+          "type": "x",
+          "protocol": "x",
+          "baseUrl": "https://example.com/v1",
+          "authKind": "api_key",
+          "models": [
+            {
+              "id": "x",
+              "displayName": "x",
+              "contextWindow": 1,
+              "maxTokens": 1,
+              "thinkingLevels": [
+                "off"
+              ],
+              "defaultThinkingLevel": "off",
+              "supportsImages": false
+            }
+          ]
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/delete",
+      "params": {
+        "providerId": "x",
+        "confirmProviderId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/test",
+      "params": {
+        "providerId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "providerId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "skill/list",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "skill/get",
+      "params": {
+        "skillId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "skill/install",
+      "params": {
+        "source": {
+          "type": "git",
+          "url": "https://example.com/v1"
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "skill/update",
+      "params": {
+        "skillId": "x",
+        "source": {
+          "type": "git",
+          "url": "https://example.com/v1"
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "skill/delete",
+      "params": {
+        "skillId": "x",
+        "confirmSkillId": "x",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "attachment/create",
+      "params": {
+        "sessionId": "x",
+        "fileName": "x",
+        "mimeType": "image/jpeg",
+        "byteLength": 1,
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "attachment/chunk",
+      "params": {
+        "attachmentId": "x",
+        "offset": 0,
+        "dataBase64": "AA==",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "attachment/complete",
+      "params": {
+        "attachmentId": "x",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "attachment/read",
+      "params": {
+        "attachmentId": "x",
+        "offset": 0,
+        "length": 1
+      }
+    }
+  ],
+  "responses": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2.0.0",
+        "server": {
+          "name": "x",
+          "version": "x",
+          "hostId": "x",
+          "piVersion": "1.3.0"
+        },
+        "connectionId": "x",
+        "roles": [
+          "x"
+        ],
+        "policy": {
+          "defaultPermissionMode": "ask",
+          "allowedPermissionModes": [
+            "ask"
+          ],
+          "maxImageBytes": 1,
+          "maxImagesPerMessage": 1,
+          "approvalDisconnectSeconds": 1
+        },
+        "capabilities": {
+          "attachments": false,
+          "imageOutput": false,
+          "skills": false,
+          "providers": false,
+          "sessionBranches": false,
+          "sessionDelete": false,
+          "nativePiSessions": false
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "pong": true
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "deviceId": "x",
+        "deviceToken": "x",
+        "hostId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "revoked": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "rotationId": "x",
+        "deviceId": "x",
+        "deviceToken": "x",
+        "previousTokenValidUntil": "2026-10-30T08:00:00Z"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "confirmed": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "devices": [
+          {
+            "deviceId": "x",
+            "label": "x",
+            "role": "x",
+            "createdAt": "2026-10-30T08:00:00Z",
+            "lastUsedAt": "2026-10-30T08:00:00Z",
+            "revokedAt": "2026-10-30T08:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "token": "x",
+        "expiresAt": "2026-10-30T08:00:00Z"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "projects": [
+          {
+            "id": "x",
+            "label": "x",
+            "path": "x",
+            "archived": false,
+            "sessionCount": 0
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "path": "x",
+        "entries": [
+          {
+            "name": "x",
+            "path": "x",
+            "kind": "directory",
+            "readable": false
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "project": {
+          "id": "x",
+          "label": "x",
+          "path": "x",
+          "archived": false,
+          "sessionCount": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "project": {
+          "id": "x",
+          "label": "x",
+          "path": "x",
+          "archived": false,
+          "sessionCount": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "deleted": false,
+        "projectId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "sessions": [
+          {
+            "id": "x",
+            "title": "x",
+            "projectId": "x",
+            "projectPath": "x",
+            "mode": "agent",
+            "permissionMode": "ask",
+            "providerId": "x",
+            "modelId": "x",
+            "thinkingLevel": "off",
+            "revision": 0,
+            "activeTurnId": "x",
+            "archived": false,
+            "readOnlyReason": "x",
+            "messageCount": 0,
+            "source": "native-pi",
+            "createdAt": "2026-10-30T08:00:00Z",
+            "updatedAt": "2026-10-30T08:00:00Z"
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "sessions": [
+          {
+            "id": "x",
+            "title": "x",
+            "projectId": "x",
+            "projectPath": "x",
+            "mode": "agent",
+            "permissionMode": "ask",
+            "providerId": "x",
+            "modelId": "x",
+            "thinkingLevel": "off",
+            "revision": 0,
+            "activeTurnId": "x",
+            "archived": false,
+            "readOnlyReason": "x",
+            "messageCount": 0,
+            "source": "native-pi",
+            "createdAt": "2026-10-30T08:00:00Z",
+            "updatedAt": "2026-10-30T08:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        },
+        "snapshot": {
+          "session": {
+            "id": "x",
+            "title": "x",
+            "projectId": "x",
+            "projectPath": "x",
+            "mode": "agent",
+            "permissionMode": "ask",
+            "providerId": "x",
+            "modelId": "x",
+            "thinkingLevel": "off",
+            "revision": 0,
+            "activeTurnId": "x",
+            "archived": false,
+            "readOnlyReason": "x",
+            "messageCount": 0,
+            "source": "native-pi",
+            "createdAt": "2026-10-30T08:00:00Z",
+            "updatedAt": "2026-10-30T08:00:00Z"
+          },
+          "revision": 0,
+          "cursor": {
+            "epoch": "x",
+            "sequence": 0
+          },
+          "items": [
+            {
+              "id": "x",
+              "itemType": "x",
+              "kind": "x",
+              "role": "x",
+              "text": "x",
+              "status": "x",
+              "turnId": "x",
+              "toolName": "x",
+              "attachments": [
+                {
+                  "id": "x",
+                  "sessionId": "x",
+                  "kind": "input",
+                  "fileName": "x",
+                  "mimeType": "image/jpeg",
+                  "byteLength": 1,
+                  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "state": "uploading",
+                  "createdAt": "2026-10-30T08:00:00Z"
+                }
+              ],
+              "content": {}
+            }
+          ],
+          "activeItems": [
+            {
+              "id": "x",
+              "itemType": "x",
+              "kind": "x",
+              "role": "x",
+              "text": "x",
+              "status": "x",
+              "turnId": "x",
+              "toolName": "x",
+              "attachments": [
+                {
+                  "id": "x",
+                  "sessionId": "x",
+                  "kind": "input",
+                  "fileName": "x",
+                  "mimeType": "image/jpeg",
+                  "byteLength": 1,
+                  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "state": "uploading",
+                  "createdAt": "2026-10-30T08:00:00Z"
+                }
+              ],
+              "content": {}
+            }
+          ],
+          "activeTurn": {
+            "id": "x",
+            "sessionId": "x",
+            "status": "queued",
+            "createdAt": "2026-10-30T08:00:00Z",
+            "settledAt": "2026-10-30T08:00:00Z",
+            "settledReason": "x"
+          },
+          "queuedTurns": [
+            {
+              "id": "x",
+              "sessionId": "x",
+              "status": "queued",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "settledAt": "2026-10-30T08:00:00Z",
+              "settledReason": "x"
+            }
+          ],
+          "pendingApprovals": [
+            {
+              "id": "x",
+              "revision": 0,
+              "kind": "tool",
+              "title": "x"
+            }
+          ],
+          "pendingInputs": [
+            {
+              "id": "x",
+              "revision": 0,
+              "questions": [
+                {
+                  "prompt": "x",
+                  "options": [
+                    "x"
+                  ]
+                }
+              ]
+            }
+          ],
+          "hasMoreHistory": false,
+          "replayComplete": false
+        },
+        "replayComplete": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "items": [
+          {
+            "id": "x",
+            "itemType": "x",
+            "kind": "x",
+            "role": "x",
+            "text": "x",
+            "status": "x",
+            "turnId": "x",
+            "toolName": "x",
+            "attachments": [
+              {
+                "id": "x",
+                "sessionId": "x",
+                "kind": "input",
+                "fileName": "x",
+                "mimeType": "image/jpeg",
+                "byteLength": 1,
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "state": "uploading",
+                "createdAt": "2026-10-30T08:00:00Z"
+              }
+            ],
+            "content": {}
+          }
+        ],
+        "hasMore": false,
+        "revision": 0
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "session": {
+          "id": "x",
+          "title": "x",
+          "projectId": "x",
+          "projectPath": "x",
+          "mode": "agent",
+          "permissionMode": "ask",
+          "providerId": "x",
+          "modelId": "x",
+          "thinkingLevel": "off",
+          "revision": 0,
+          "activeTurnId": "x",
+          "archived": false,
+          "readOnlyReason": "x",
+          "messageCount": 0,
+          "source": "native-pi",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "deleted": false,
+        "sessionId": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "subscriptionId": "x",
+        "starting": {
+          "epoch": "x",
+          "sequence": 0
+        },
+        "replayComplete": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "unsubscribed": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "acknowledged": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "turn": {
+          "id": "x",
+          "sessionId": "x",
+          "status": "queued",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "settledAt": "2026-10-30T08:00:00Z",
+          "settledReason": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "turn": {
+          "id": "x",
+          "sessionId": "x",
+          "status": "queued",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "settledAt": "2026-10-30T08:00:00Z",
+          "settledReason": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "turn": {
+          "id": "x",
+          "sessionId": "x",
+          "status": "queued",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "settledAt": "2026-10-30T08:00:00Z",
+          "settledReason": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "turn": {
+          "id": "x",
+          "sessionId": "x",
+          "status": "queued",
+          "createdAt": "2026-10-30T08:00:00Z",
+          "settledAt": "2026-10-30T08:00:00Z",
+          "settledReason": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resolved": false,
+        "alreadyResolved": false,
+        "effectivePermissionMode": "ask"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resolved": false,
+        "alreadyResolved": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "providers": [
+          {
+            "id": "x",
+            "name": "x",
+            "vendorKey": "x",
+            "type": "x",
+            "protocol": "x",
+            "baseUrl": "https://example.com/v1",
+            "authKind": "api_key",
+            "hasApiKey": false,
+            "apiKeyMask": "x",
+            "isDefault": false,
+            "models": [
+              {
+                "id": "x",
+                "displayName": "x",
+                "contextWindow": 1,
+                "maxTokens": 1,
+                "thinkingLevels": [
+                  "off"
+                ],
+                "defaultThinkingLevel": "off",
+                "supportsImages": false
+              }
+            ],
+            "createdAt": "2026-10-30T08:00:00Z",
+            "updatedAt": "2026-10-30T08:00:00Z"
+          }
+        ],
+        "revision": 0
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "provider": {
+          "id": "x",
+          "name": "x",
+          "vendorKey": "x",
+          "type": "x",
+          "protocol": "x",
+          "baseUrl": "https://example.com/v1",
+          "authKind": "api_key",
+          "hasApiKey": false,
+          "apiKeyMask": "x",
+          "isDefault": false,
+          "models": [
+            {
+              "id": "x",
+              "displayName": "x",
+              "contextWindow": 1,
+              "maxTokens": 1,
+              "thinkingLevels": [
+                "off"
+              ],
+              "defaultThinkingLevel": "off",
+              "supportsImages": false
+            }
+          ],
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "provider": {
+          "id": "x",
+          "name": "x",
+          "vendorKey": "x",
+          "type": "x",
+          "protocol": "x",
+          "baseUrl": "https://example.com/v1",
+          "authKind": "api_key",
+          "hasApiKey": false,
+          "apiKeyMask": "x",
+          "isDefault": false,
+          "models": [
+            {
+              "id": "x",
+              "displayName": "x",
+              "contextWindow": 1,
+              "maxTokens": 1,
+              "thinkingLevels": [
+                "off"
+              ],
+              "defaultThinkingLevel": "off",
+              "supportsImages": false
+            }
+          ],
+          "createdAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "deleted": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "ok": false,
+        "checkedAt": "2026-10-30T08:00:00Z"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "models": [
+          {
+            "id": "x",
+            "displayName": "x",
+            "contextWindow": 1,
+            "maxTokens": 1,
+            "thinkingLevels": [
+              "off"
+            ],
+            "defaultThinkingLevel": "off",
+            "supportsImages": false
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "skills": [
+          {
+            "id": "x",
+            "name": "x",
+            "description": "x",
+            "source": {
+              "type": "git",
+              "url": "https://example.com/v1"
+            },
+            "installedAt": "2026-10-30T08:00:00Z",
+            "updatedAt": "2026-10-30T08:00:00Z",
+            "status": "ready",
+            "path": "x"
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "skill": {
+          "id": "x",
+          "name": "x",
+          "description": "x",
+          "source": {
+            "type": "git",
+            "url": "https://example.com/v1"
+          },
+          "installedAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z",
+          "status": "ready",
+          "path": "x"
+        },
+        "instructions": "x"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "skill": {
+          "id": "x",
+          "name": "x",
+          "description": "x",
+          "source": {
+            "type": "git",
+            "url": "https://example.com/v1"
+          },
+          "installedAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z",
+          "status": "ready",
+          "path": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "skill": {
+          "id": "x",
+          "name": "x",
+          "description": "x",
+          "source": {
+            "type": "git",
+            "url": "https://example.com/v1"
+          },
+          "installedAt": "2026-10-30T08:00:00Z",
+          "updatedAt": "2026-10-30T08:00:00Z",
+          "status": "ready",
+          "path": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "deleted": false
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "attachmentId": "x",
+        "chunkSize": 1,
+        "expiresAt": "2026-10-30T08:00:00Z"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "receivedBytes": 0
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "attachment": {
+          "id": "x",
+          "sessionId": "x",
+          "kind": "input",
+          "fileName": "x",
+          "mimeType": "image/jpeg",
+          "byteLength": 1,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "state": "uploading",
+          "createdAt": "2026-10-30T08:00:00Z"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "attachment": {
+          "id": "x",
+          "sessionId": "x",
+          "kind": "input",
+          "fileName": "x",
+          "mimeType": "image/jpeg",
+          "byteLength": 1,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "state": "uploading",
+          "createdAt": "2026-10-30T08:00:00Z"
+        },
+        "offset": 0,
+        "dataBase64": "AA==",
+        "eof": false
+      }
+    }
+  ],
+  "notifications": [
+    {
+      "jsonrpc": "2.0",
+      "method": "notifications/initialized",
+      "params": {}
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/closed",
+      "params": {
+        "subscriptionId": "sub",
+        "code": "UNAUTHORIZED"
+      }
+    }
+  ],
+  "errors": [
+    {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32700,
+        "message": "parse error"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32000,
+        "message": "INTERNAL",
+        "data": {
+          "code": "INTERNAL",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32001,
+        "message": "UNAUTHORIZED",
+        "data": {
+          "code": "UNAUTHORIZED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32002,
+        "message": "FORBIDDEN",
+        "data": {
+          "code": "FORBIDDEN",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32003,
+        "message": "PROTOCOL_MISMATCH",
+        "data": {
+          "code": "PROTOCOL_MISMATCH",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32004,
+        "message": "INVALID_ARGUMENT",
+        "data": {
+          "code": "INVALID_ARGUMENT",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32005,
+        "message": "NOT_FOUND",
+        "data": {
+          "code": "NOT_FOUND",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32006,
+        "message": "CONFLICT",
+        "data": {
+          "code": "CONFLICT",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32007,
+        "message": "IDEMPOTENCY_CONFLICT",
+        "data": {
+          "code": "IDEMPOTENCY_CONFLICT",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32008,
+        "message": "CURSOR_EXPIRED",
+        "data": {
+          "code": "CURSOR_EXPIRED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32009,
+        "message": "CLIENT_TOO_SLOW",
+        "data": {
+          "code": "CLIENT_TOO_SLOW",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32010,
+        "message": "PAYLOAD_TOO_LARGE",
+        "data": {
+          "code": "PAYLOAD_TOO_LARGE",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32011,
+        "message": "APPROVAL_EXPIRED",
+        "data": {
+          "code": "APPROVAL_EXPIRED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32012,
+        "message": "APPROVAL_STALE",
+        "data": {
+          "code": "APPROVAL_STALE",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32013,
+        "message": "SESSION_BUSY",
+        "data": {
+          "code": "SESSION_BUSY",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32014,
+        "message": "SESSION_READ_ONLY",
+        "data": {
+          "code": "SESSION_READ_ONLY",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32015,
+        "message": "PROVIDER_NOT_CONFIGURED",
+        "data": {
+          "code": "PROVIDER_NOT_CONFIGURED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32016,
+        "message": "PROVIDER_SECRET_MISSING",
+        "data": {
+          "code": "PROVIDER_SECRET_MISSING",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32017,
+        "message": "PROVIDER_IN_USE",
+        "data": {
+          "code": "PROVIDER_IN_USE",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32018,
+        "message": "SKILL_SOURCE_UNAVAILABLE",
+        "data": {
+          "code": "SKILL_SOURCE_UNAVAILABLE",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32019,
+        "message": "SKILL_CONFLICT",
+        "data": {
+          "code": "SKILL_CONFLICT",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32020,
+        "message": "ATTACHMENT_INVALID",
+        "data": {
+          "code": "ATTACHMENT_INVALID",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32021,
+        "message": "ATTACHMENT_INCOMPLETE",
+        "data": {
+          "code": "ATTACHMENT_INCOMPLETE",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "AGENT_RESTARTED",
+        "data": {
+          "code": "AGENT_RESTARTED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32023,
+        "message": "DEVICE_NOT_FOUND",
+        "data": {
+          "code": "DEVICE_NOT_FOUND",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32024,
+        "message": "RATE_LIMITED",
+        "data": {
+          "code": "RATE_LIMITED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32025,
+        "message": "PAIRING_FAILED",
+        "data": {
+          "code": "PAIRING_FAILED",
+          "requestId": "req"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32026,
+        "message": "PAIRING_TOKEN_EXPIRED",
+        "data": {
+          "code": "PAIRING_TOKEN_EXPIRED",
+          "requestId": "req"
+        }
+      }
+    }
+  ],
+  "events": [
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "turn.started",
+          "payload": {
+            "turn": {
+              "id": "x",
+              "sessionId": "x",
+              "status": "queued",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "settledAt": "2026-10-30T08:00:00Z",
+              "settledReason": "x"
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "item.delta",
+          "payload": {
+            "itemId": "x",
+            "itemType": "x",
+            "delta": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "item.completed",
+          "payload": {
+            "item": {
+              "id": "x",
+              "itemType": "x",
+              "kind": "x",
+              "role": "x",
+              "text": "x",
+              "status": "x",
+              "turnId": "x",
+              "toolName": "x",
+              "attachments": [
+                {
+                  "id": "x",
+                  "sessionId": "x",
+                  "kind": "input",
+                  "fileName": "x",
+                  "mimeType": "image/jpeg",
+                  "byteLength": 1,
+                  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                  "state": "uploading",
+                  "createdAt": "2026-10-30T08:00:00Z"
+                }
+              ],
+              "content": {}
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "tool.started",
+          "payload": {
+            "itemId": "x",
+            "toolName": "x",
+            "input": {}
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "tool.updated",
+          "payload": {
+            "itemId": "x",
+            "delta": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "tool.completed",
+          "payload": {
+            "itemId": "x",
+            "status": "x",
+            "result": {}
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "approval.requested",
+          "payload": {
+            "approval": {
+              "id": "x",
+              "revision": 0,
+              "kind": "tool",
+              "title": "x"
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "approval.resolved",
+          "payload": {
+            "approvalId": "x",
+            "status": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "input.requested",
+          "payload": {
+            "input": {
+              "id": "x",
+              "revision": 0,
+              "questions": [
+                {
+                  "prompt": "x",
+                  "options": [
+                    "x"
+                  ]
+                }
+              ]
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "input.resolved",
+          "payload": {
+            "inputId": "x",
+            "status": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "turn.completed",
+          "payload": {
+            "turn": {
+              "id": "x",
+              "sessionId": "x",
+              "status": "queued",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "settledAt": "2026-10-30T08:00:00Z",
+              "settledReason": "x"
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "turn.interrupted",
+          "payload": {
+            "turn": {
+              "id": "x",
+              "sessionId": "x",
+              "status": "queued",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "settledAt": "2026-10-30T08:00:00Z",
+              "settledReason": "x"
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "turn.failed",
+          "payload": {
+            "turn": {
+              "id": "x",
+              "sessionId": "x",
+              "status": "queued",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "settledAt": "2026-10-30T08:00:00Z",
+              "settledReason": "x"
+            },
+            "error": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "host",
+          "kind": "session.changed",
+          "payload": {
+            "session": {
+              "id": "x",
+              "title": "x",
+              "projectId": "x",
+              "projectPath": "x",
+              "mode": "agent",
+              "permissionMode": "ask",
+              "providerId": "x",
+              "modelId": "x",
+              "thinkingLevel": "off",
+              "revision": 0,
+              "activeTurnId": "x",
+              "archived": false,
+              "readOnlyReason": "x",
+              "messageCount": 0,
+              "source": "native-pi",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "updatedAt": "2026-10-30T08:00:00Z"
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "host",
+          "kind": "session.created",
+          "payload": {
+            "session": {
+              "id": "x",
+              "title": "x",
+              "projectId": "x",
+              "projectPath": "x",
+              "mode": "agent",
+              "permissionMode": "ask",
+              "providerId": "x",
+              "modelId": "x",
+              "thinkingLevel": "off",
+              "revision": 0,
+              "activeTurnId": "x",
+              "archived": false,
+              "readOnlyReason": "x",
+              "messageCount": 0,
+              "source": "native-pi",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "updatedAt": "2026-10-30T08:00:00Z"
+            }
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "host",
+          "kind": "session.deleted",
+          "payload": {
+            "sessionId": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "host",
+          "kind": "host.changed",
+          "payload": {
+            "revision": 0,
+            "entities": [
+              "x"
+            ]
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "host",
+          "kind": "resync.required",
+          "payload": {
+            "reason": "x"
+          },
+          "epoch": "x",
+          "sequence": 0
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "connection/rotate-token",
+      "params": {
+        "context": {
+          "requestId": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "events/event",
+      "params": {
+        "event": {
+          "scope": "session",
+          "kind": "turn.started",
+          "payload": {
+            "turn": {
+              "id": "x",
+              "sessionId": "x",
+              "status": "queued",
+              "createdAt": "2026-10-30T08:00:00Z",
+              "settledAt": "2026-10-30T08:00:00Z",
+              "settledReason": "x"
+            }
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/create",
+      "params": {
+        "provider": {
+          "name": "x",
+          "vendorKey": "x",
+          "type": "x",
+          "protocol": "x",
+          "baseUrl": "https://example.com/v1",
+          "authKind": "api_key",
+          "models": [
+            {
+              "id": "x",
+              "displayName": "x",
+              "contextWindow": 1,
+              "maxTokens": 1,
+              "thinkingLevels": [
+                "off"
+              ],
+              "defaultThinkingLevel": "off",
+              "supportsImages": false
+            }
+          ]
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/create",
+      "params": {
+        "provider": {
+          "name": "x",
+          "vendorKey": "x",
+          "type": "x",
+          "protocol": "x",
+          "baseUrl": "https://example.com/v1",
+          "authKind": "none",
+          "models": [
+            {
+              "id": "x",
+              "displayName": "x",
+              "contextWindow": 1,
+              "maxTokens": 1,
+              "thinkingLevels": [
+                "off"
+              ],
+              "defaultThinkingLevel": "off",
+              "supportsImages": false
+            }
+          ],
+          "apiKey": "x"
+        },
+        "context": {
+          "requestId": "x",
+          "idempotencyKey": "x"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32005,
+        "message": "missing business code",
+        "data": {}
+      }
+    }
+  ]
+}

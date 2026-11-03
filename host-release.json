@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "repository": "RuidongWang/PI-adaptor",
+  "version": "2.0.2",
+  "releaseTag": "pi-adaptor-v2.0.2",
+  "protocolVersion": "2.0.0",
+  "runtime": {
+    "serverName": "pi-adaptor"
+  },
+  "install": {
+    "home": "~/.pi-adaptor",
+    "versionsDirectory": "~/.pi-adaptor/releases",
+    "currentLink": "~/.pi-adaptor/current",
+    "unitName": "pi-adaptor.service",
+    "entrypoint": "dist/main.js",
+    "installer": "scripts/install.sh",
+    "packageManifest": "package.json",
+    "minimumNodeVersion": "22.19.0"
+  },
+  "artifacts": {
+    "linux-x64": {
+      "bundleDirectory": "pi-adaptor-2.0.2-linux-x64",
+      "file": "pi-adaptor-2.0.2-linux-x64.tar.gz",
+      "sha256": "10b4da51c8fd67f3e7e8b85c58f1c6671954d79bea661ef9bb36c0f184e1fa9e"
+    },
+    "linux-arm64": {
+      "bundleDirectory": "pi-adaptor-2.0.2-linux-arm64",
+      "file": "pi-adaptor-2.0.2-linux-arm64.tar.gz",
+      "sha256": "5ca90a4952fb3de565040de23b1b7c6873f5417964bb4e5dd81de55e54a1dd81"
+    }
+  }
+}

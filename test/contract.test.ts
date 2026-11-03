@@ -12,8 +12,8 @@ type FixtureGroups = {
   invalid: unknown[];
 };
 
-const schemaURL = new URL("../../../docs/api/pi-adaptor.schema.json", import.meta.url);
-const goldenURL = new URL("../../../docs/api/pi-adaptor.golden.json", import.meta.url);
+const schemaURL = new URL("../docs/api/pi-adaptor.schema.json", import.meta.url);
+const goldenURL = new URL("../docs/api/pi-adaptor.golden.json", import.meta.url);
 const require = createRequire(import.meta.url);
 const Ajv2020 = require("ajv/dist/2020") as new (options?: object) => {
   compile(schema: object): ((value: unknown) => boolean) & { errors?: unknown[] };

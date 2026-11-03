@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-MANIFEST="$ROOT/../../host-release.json"
+MANIFEST="$ROOT/host-release.json"
 PKG_VERSION=$(node -p "require('$ROOT/package.json').version")
 VERSION="${1:-$PKG_VERSION}"
 TARGET_ARG="${2:-all}"

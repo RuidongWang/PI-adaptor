@@ -1,0 +1,5922 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-ios.local/contracts/pi-adaptor.schema.json",
+  "title": "PI-adaptor JSON-RPC contract",
+  "description": "Generated from the pi-adaptor operation inventory. Normative prose: pi-adaptor.md.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/successResponse"
+    },
+    {
+      "$ref": "#/$defs/errorResponse"
+    },
+    {
+      "$ref": "#/$defs/eventNotification"
+    },
+    {
+      "$ref": "#/$defs/closedNotification"
+    },
+    {
+      "$ref": "#/$defs/initializedNotification"
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "jsonRpc": {
+      "const": "2.0"
+    },
+    "requestId": {
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      ]
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "traceparent": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "requestId"
+      ],
+      "additionalProperties": false
+    },
+    "writeContext": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "traceparent": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "requestId",
+        "idempotencyKey"
+      ],
+      "additionalProperties": false
+    },
+    "revisionContext": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "traceparent": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "requestId",
+        "idempotencyKey",
+        "expectedRevision"
+      ],
+      "additionalProperties": false
+    },
+    "empty": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "cursor": {
+      "type": "object",
+      "properties": {
+        "epoch": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "epoch",
+        "sequence"
+      ],
+      "additionalProperties": false
+    },
+    "permissionMode": {
+      "enum": [
+        "ask",
+        "auto"
+      ]
+    },
+    "sessionMode": {
+      "enum": [
+        "agent",
+        "plan"
+      ]
+    },
+    "thinkingLevel": {
+      "enum": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "base64": {
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "unknownObject": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "providerModel": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "contextWindow": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxTokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "thinkingLevels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/thinkingLevel"
+          },
+          "uniqueItems": true
+        },
+        "defaultThinkingLevel": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/thinkingLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supportsImages": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "displayName",
+        "contextWindow",
+        "maxTokens",
+        "thinkingLevels",
+        "defaultThinkingLevel",
+        "supportsImages"
+      ],
+      "additionalProperties": false
+    },
+    "providerCreateInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "vendorKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "protocol": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "baseUrl": {
+              "type": "string",
+              "format": "uri"
+            },
+            "authKind": {
+              "const": "api_key"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/providerModel"
+              },
+              "maxItems": 512
+            },
+            "apiKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            }
+          },
+          "required": [
+            "name",
+            "vendorKey",
+            "type",
+            "protocol",
+            "baseUrl",
+            "authKind",
+            "models",
+            "apiKey"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "vendorKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "protocol": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "baseUrl": {
+              "type": "string",
+              "format": "uri"
+            },
+            "authKind": {
+              "const": "none"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/providerModel"
+              },
+              "maxItems": 512
+            }
+          },
+          "required": [
+            "name",
+            "vendorKey",
+            "type",
+            "protocol",
+            "baseUrl",
+            "authKind",
+            "models"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "providerUpdateInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "vendorKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "protocol": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "baseUrl": {
+              "type": "string",
+              "format": "uri"
+            },
+            "authKind": {
+              "const": "api_key"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/providerModel"
+              },
+              "maxItems": 512
+            },
+            "apiKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384
+            }
+          },
+          "required": [
+            "name",
+            "vendorKey",
+            "type",
+            "protocol",
+            "baseUrl",
+            "authKind",
+            "models"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "vendorKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "protocol": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "baseUrl": {
+              "type": "string",
+              "format": "uri"
+            },
+            "authKind": {
+              "const": "none"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/providerModel"
+              },
+              "maxItems": 512
+            }
+          },
+          "required": [
+            "name",
+            "vendorKey",
+            "type",
+            "protocol",
+            "baseUrl",
+            "authKind",
+            "models"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "providerWrite": {
+      "$ref": "#/$defs/providerCreateInput"
+    },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "vendorKey": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "baseUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "authKind": {
+          "enum": [
+            "api_key",
+            "none",
+            "oauth"
+          ]
+        },
+        "hasApiKey": {
+          "type": "boolean"
+        },
+        "apiKeyMask": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/providerModel"
+          }
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "vendorKey",
+        "type",
+        "protocol",
+        "baseUrl",
+        "authKind",
+        "hasApiKey",
+        "apiKeyMask",
+        "isDefault",
+        "models",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "sessionCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "path",
+        "archived",
+        "sessionCount"
+      ],
+      "additionalProperties": false
+    },
+    "sessionSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectPath": {
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/sessionMode"
+        },
+        "permissionMode": {
+          "$ref": "#/$defs/permissionMode"
+        },
+        "providerId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thinkingLevel": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/thinkingLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "activeTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "readOnlyReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messageCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "enum": [
+            "native-pi",
+            "host-created"
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "projectId",
+        "projectPath",
+        "mode",
+        "permissionMode",
+        "providerId",
+        "modelId",
+        "thinkingLevel",
+        "revision",
+        "activeTurnId",
+        "archived",
+        "readOnlyReason",
+        "messageCount",
+        "source",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    },
+    "turn": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "waiting_approval",
+            "waiting_input",
+            "completed",
+            "interrupted",
+            "uncertain",
+            "failed",
+            "canceled"
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "settledAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "settledReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "sessionId",
+        "status",
+        "createdAt",
+        "settledAt",
+        "settledReason"
+      ],
+      "additionalProperties": false
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "input",
+            "output"
+          ]
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "mimeType": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ]
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20971520
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "state": {
+          "enum": [
+            "uploading",
+            "ready",
+            "failed",
+            "deleted"
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "sessionId",
+        "kind",
+        "fileName",
+        "mimeType",
+        "byteLength",
+        "sha256",
+        "state",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "item": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "itemType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attachment"
+          },
+          "maxItems": 10
+        },
+        "content": {
+          "$ref": "#/$defs/unknownObject"
+        }
+      },
+      "required": [
+        "id",
+        "itemType",
+        "kind",
+        "role",
+        "text",
+        "status",
+        "turnId",
+        "toolName",
+        "attachments",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "approvalRequest": {
+      "type": "object",
+      "required": [
+        "id",
+        "revision",
+        "kind",
+        "title"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "enum": [
+            "tool",
+            "plan",
+            "goal"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    },
+    "inputRequest": {
+      "type": "object",
+      "required": [
+        "id",
+        "revision",
+        "questions"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "prompt",
+              "options"
+            ],
+            "properties": {
+              "prompt": {
+                "type": "string"
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cursor": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "activeItems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "activeTurn": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/turn"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queuedTurns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/turn"
+          }
+        },
+        "pendingApprovals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/approvalRequest"
+          }
+        },
+        "pendingInputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/inputRequest"
+          }
+        },
+        "hasMoreHistory": {
+          "type": "boolean"
+        },
+        "replayComplete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session",
+        "revision",
+        "cursor",
+        "items",
+        "activeItems",
+        "activeTurn",
+        "queuedTurns",
+        "pendingApprovals",
+        "pendingInputs",
+        "hasMoreHistory",
+        "replayComplete"
+      ],
+      "additionalProperties": false
+    },
+    "skillSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "git"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "subdir": {
+              "type": "string"
+            },
+            "ref": {
+              "type": "string"
+            },
+            "refType": {
+              "enum": [
+                "branch",
+                "tag",
+                "commit"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "directory"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "skill": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/skillSource"
+        },
+        "installedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "updating",
+            "failed"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "source",
+        "installedAt",
+        "updatedAt",
+        "status",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "turn.started"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "$ref": "#/$defs/turn"
+                }
+              },
+              "required": [
+                "turn"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "item.delta"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "itemId": {
+                  "$ref": "#/$defs/id"
+                },
+                "itemType": {
+                  "type": "string"
+                },
+                "delta": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "itemId",
+                "itemType",
+                "delta"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "item.completed"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "item": {
+                  "$ref": "#/$defs/item"
+                }
+              },
+              "required": [
+                "item"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "tool.started"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "itemId": {
+                  "$ref": "#/$defs/id"
+                },
+                "toolName": {
+                  "type": "string"
+                },
+                "input": {
+                  "$ref": "#/$defs/unknownObject"
+                }
+              },
+              "required": [
+                "itemId",
+                "toolName",
+                "input"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "tool.updated"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "itemId": {
+                  "$ref": "#/$defs/id"
+                },
+                "delta": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "itemId",
+                "delta"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "tool.completed"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "itemId": {
+                  "$ref": "#/$defs/id"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "result": {
+                  "$ref": "#/$defs/unknownObject"
+                }
+              },
+              "required": [
+                "itemId",
+                "status",
+                "result"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "approval.requested"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "approval": {
+                  "$ref": "#/$defs/approvalRequest"
+                }
+              },
+              "required": [
+                "approval"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "approval.resolved"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "approvalId": {
+                  "$ref": "#/$defs/id"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "approvalId",
+                "status"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "input.requested"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "$ref": "#/$defs/inputRequest"
+                }
+              },
+              "required": [
+                "input"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "input.resolved"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "inputId": {
+                  "$ref": "#/$defs/id"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inputId",
+                "status"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "turn.completed"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "$ref": "#/$defs/turn"
+                }
+              },
+              "required": [
+                "turn"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "turn.interrupted"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "$ref": "#/$defs/turn"
+                }
+              },
+              "required": [
+                "turn"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "session"
+            },
+            "kind": {
+              "const": "turn.failed"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turn": {
+                  "$ref": "#/$defs/turn"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "turn",
+                "error"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "host"
+            },
+            "kind": {
+              "const": "session.changed"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "$ref": "#/$defs/sessionSummary"
+                }
+              },
+              "required": [
+                "session"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "host"
+            },
+            "kind": {
+              "const": "session.created"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "session": {
+                  "$ref": "#/$defs/sessionSummary"
+                }
+              },
+              "required": [
+                "session"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "host"
+            },
+            "kind": {
+              "const": "session.deleted"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "sessionId": {
+                  "$ref": "#/$defs/id"
+                }
+              },
+              "required": [
+                "sessionId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "host"
+            },
+            "kind": {
+              "const": "host.changed"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "revision": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "entities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "revision",
+                "entities"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "const": "host"
+            },
+            "kind": {
+              "const": "resync.required"
+            },
+            "sessionId": {
+              "type": "string"
+            },
+            "epoch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "afterSequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnId": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "scope",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "epoch",
+                "sequence"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "errorCode": {
+      "enum": [
+        "UNAUTHORIZED",
+        "FORBIDDEN",
+        "PROTOCOL_MISMATCH",
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "METHOD_NOT_FOUND",
+        "CONFLICT",
+        "IDEMPOTENCY_CONFLICT",
+        "CURSOR_EXPIRED",
+        "CLIENT_TOO_SLOW",
+        "PAYLOAD_TOO_LARGE",
+        "APPROVAL_EXPIRED",
+        "APPROVAL_STALE",
+        "SESSION_BUSY",
+        "SESSION_READ_ONLY",
+        "PROVIDER_NOT_CONFIGURED",
+        "PROVIDER_SECRET_MISSING",
+        "PROVIDER_IN_USE",
+        "SKILL_SOURCE_UNAVAILABLE",
+        "SKILL_CONFLICT",
+        "ATTACHMENT_INVALID",
+        "ATTACHMENT_INCOMPLETE",
+        "AGENT_RESTARTED",
+        "DEVICE_NOT_FOUND",
+        "RATE_LIMITED",
+        "INTERNAL",
+        "PAIRING_FAILED",
+        "PAIRING_TOKEN_EXPIRED"
+      ]
+    },
+    "params_initialize": {
+      "type": "object",
+      "properties": {
+        "client": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "capabilities": {
+              "$ref": "#/$defs/unknownObject"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "capabilities"
+          ],
+          "additionalProperties": false
+        },
+        "protocolVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "client",
+        "protocolVersion"
+      ],
+      "additionalProperties": false
+    },
+    "result_initialize": {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "const": "2.0.0"
+        },
+        "server": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "hostId": {
+              "$ref": "#/$defs/id"
+            },
+            "piVersion": {
+              "const": "1.3.0"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "hostId",
+            "piVersion"
+          ],
+          "additionalProperties": false
+        },
+        "connectionId": {
+          "$ref": "#/$defs/id"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "defaultPermissionMode": {
+              "$ref": "#/$defs/permissionMode"
+            },
+            "allowedPermissionModes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/permissionMode"
+              }
+            },
+            "maxImageBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxImagesPerMessage": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "approvalDisconnectSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "defaultPermissionMode",
+            "allowedPermissionModes",
+            "maxImageBytes",
+            "maxImagesPerMessage",
+            "approvalDisconnectSeconds"
+          ],
+          "additionalProperties": true
+        },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "attachments": {
+              "type": "boolean"
+            },
+            "imageOutput": {
+              "type": "boolean"
+            },
+            "skills": {
+              "type": "boolean"
+            },
+            "providers": {
+              "type": "boolean"
+            },
+            "sessionBranches": {
+              "type": "boolean"
+            },
+            "sessionDelete": {
+              "type": "boolean"
+            },
+            "nativePiSessions": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "attachments",
+            "imageOutput",
+            "skills",
+            "providers",
+            "sessionBranches",
+            "sessionDelete",
+            "nativePiSessions"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "server",
+        "connectionId",
+        "roles",
+        "policy",
+        "capabilities"
+      ],
+      "additionalProperties": false
+    },
+    "params_ping": {
+      "$ref": "#/$defs/empty"
+    },
+    "result_ping": {
+      "type": "object",
+      "properties": {
+        "pong": {
+          "const": true
+        }
+      },
+      "required": [
+        "pong"
+      ],
+      "additionalProperties": false
+    },
+    "params_pair": {
+      "type": "object",
+      "properties": {
+        "deviceLabel": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_pair": {
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "$ref": "#/$defs/id"
+        },
+        "deviceToken": {
+          "type": "string"
+        },
+        "hostId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "deviceId",
+        "deviceToken",
+        "hostId"
+      ],
+      "additionalProperties": false
+    },
+    "params_revoke": {
+      "type": "object",
+      "properties": {
+        "deviceId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "deviceId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_revoke": {
+      "type": "object",
+      "properties": {
+        "revoked": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "revoked"
+      ],
+      "additionalProperties": false
+    },
+    "params_rotateToken": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_rotateToken": {
+      "type": "object",
+      "properties": {
+        "rotationId": {
+          "$ref": "#/$defs/id"
+        },
+        "deviceId": {
+          "$ref": "#/$defs/id"
+        },
+        "deviceToken": {
+          "type": "string"
+        },
+        "previousTokenValidUntil": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "rotationId",
+        "deviceId",
+        "deviceToken",
+        "previousTokenValidUntil"
+      ],
+      "additionalProperties": false
+    },
+    "params_confirmRotation": {
+      "type": "object",
+      "properties": {
+        "rotationId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "rotationId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_confirmRotation": {
+      "type": "object",
+      "properties": {
+        "confirmed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "confirmed"
+      ],
+      "additionalProperties": false
+    },
+    "params_deviceList": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/context"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_deviceList": {
+      "type": "object",
+      "properties": {
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "deviceId": {
+                "$ref": "#/$defs/id"
+              },
+              "label": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string"
+              },
+              "createdAt": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "lastUsedAt": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "revokedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "deviceId",
+              "label",
+              "role",
+              "createdAt",
+              "lastUsedAt",
+              "revokedAt"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "devices"
+      ],
+      "additionalProperties": false
+    },
+    "params_pairingToken": {
+      "type": "object",
+      "properties": {
+        "ttlSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_pairingToken": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "token",
+        "expiresAt"
+      ],
+      "additionalProperties": false
+    },
+    "params_projectList": {
+      "$ref": "#/$defs/empty"
+    },
+    "result_projectList": {
+      "type": "object",
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/project"
+          }
+        }
+      },
+      "required": [
+        "projects"
+      ],
+      "additionalProperties": false
+    },
+    "params_projectBrowse": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "result_projectBrowse": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "directory",
+                  "file"
+                ]
+              },
+              "readable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "path",
+              "kind",
+              "readable"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "path",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "params_projectRegister": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "path",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_projectRegister": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/$defs/project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "additionalProperties": false
+    },
+    "params_projectUpdate": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "projectId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_projectUpdate": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/$defs/project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "additionalProperties": false
+    },
+    "params_projectDelete": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "$ref": "#/$defs/id"
+        },
+        "confirmProjectId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "projectId",
+        "confirmProjectId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_projectDelete": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "projectId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "deleted",
+        "projectId"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionList": {
+      "type": "object",
+      "properties": {
+        "includeArchived": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "result_sessionList": {
+      "type": "object",
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sessionSummary"
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sessions",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionSearch": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionSearch": {
+      "type": "object",
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sessionSummary"
+          }
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionGet": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionGet": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionCreate": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "projectId": {
+          "$ref": "#/$defs/id"
+        },
+        "mode": {
+          "$ref": "#/$defs/sessionMode"
+        },
+        "permissionMode": {
+          "$ref": "#/$defs/permissionMode"
+        },
+        "providerId": {
+          "$ref": "#/$defs/id"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "thinkingLevel": {
+          "$ref": "#/$defs/thinkingLevel"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionCreate": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionAttach": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionAttach": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "replayComplete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session",
+        "snapshot",
+        "replayComplete"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionHistory": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "beforeItemId": {
+          "$ref": "#/$defs/id"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionHistory": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "items",
+        "hasMore",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionConfigure": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "mode": {
+          "$ref": "#/$defs/sessionMode"
+        },
+        "permissionMode": {
+          "$ref": "#/$defs/permissionMode"
+        },
+        "providerId": {
+          "$ref": "#/$defs/id"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "thinkingLevel": {
+          "$ref": "#/$defs/thinkingLevel"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionConfigure": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionRename": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "title",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionRename": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionArchive": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "archived",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionArchive": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionBranch": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "fromItemId": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "fromItemId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionBranch": {
+      "type": "object",
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/sessionSummary"
+        }
+      },
+      "required": [
+        "session"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionDelete": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "confirmSessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "confirmSessionId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionDelete": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "deleted",
+        "sessionId"
+      ],
+      "additionalProperties": false
+    },
+    "params_eventsSubscribe": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "enum": [
+            "host",
+            "session"
+          ]
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "after": {
+          "$ref": "#/$defs/cursor"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "additionalProperties": false
+    },
+    "result_eventsSubscribe": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/id"
+        },
+        "starting": {
+          "$ref": "#/$defs/cursor"
+        },
+        "replayComplete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "starting",
+        "replayComplete"
+      ],
+      "additionalProperties": false
+    },
+    "params_eventsUnsubscribe": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "subscriptionId"
+      ],
+      "additionalProperties": false
+    },
+    "result_eventsUnsubscribe": {
+      "type": "object",
+      "properties": {
+        "unsubscribed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "unsubscribed"
+      ],
+      "additionalProperties": false
+    },
+    "params_eventsAck": {
+      "type": "object",
+      "properties": {
+        "subscriptionId": {
+          "$ref": "#/$defs/id"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "subscriptionId",
+        "sequence"
+      ],
+      "additionalProperties": false
+    },
+    "result_eventsAck": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "acknowledged"
+      ],
+      "additionalProperties": false
+    },
+    "params_turnStart": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "admission": {
+          "enum": [
+            "reject_if_busy",
+            "queue"
+          ]
+        },
+        "input": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/id"
+              },
+              "maxItems": 10
+            },
+            "messageId": {
+              "$ref": "#/$defs/id"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "input",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_turnStart": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "$ref": "#/$defs/turn"
+        }
+      },
+      "required": [
+        "turn"
+      ],
+      "additionalProperties": false
+    },
+    "params_turnGet": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "turnId"
+      ],
+      "additionalProperties": false
+    },
+    "result_turnGet": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "$ref": "#/$defs/turn"
+        }
+      },
+      "required": [
+        "turn"
+      ],
+      "additionalProperties": false
+    },
+    "params_turnInterrupt": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "turnId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_turnInterrupt": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "$ref": "#/$defs/turn"
+        }
+      },
+      "required": [
+        "turn"
+      ],
+      "additionalProperties": false
+    },
+    "params_turnCancel": {
+      "type": "object",
+      "properties": {
+        "turnId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "turnId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_turnCancel": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "$ref": "#/$defs/turn"
+        }
+      },
+      "required": [
+        "turn"
+      ],
+      "additionalProperties": false
+    },
+    "params_approvalRespond": {
+      "type": "object",
+      "properties": {
+        "approvalId": {
+          "$ref": "#/$defs/id"
+        },
+        "decision": {
+          "enum": [
+            "allow-once",
+            "allow-session",
+            "deny",
+            "approve",
+            "reject"
+          ]
+        },
+        "permissionMode": {
+          "$ref": "#/$defs/permissionMode"
+        },
+        "context": {
+          "$ref": "#/$defs/revisionContext"
+        }
+      },
+      "required": [
+        "approvalId",
+        "decision",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_approvalRespond": {
+      "type": "object",
+      "properties": {
+        "resolved": {
+          "type": "boolean"
+        },
+        "alreadyResolved": {
+          "type": "boolean"
+        },
+        "effectivePermissionMode": {
+          "$ref": "#/$defs/permissionMode"
+        }
+      },
+      "required": [
+        "resolved",
+        "alreadyResolved",
+        "effectivePermissionMode"
+      ],
+      "additionalProperties": false
+    },
+    "params_inputRespond": {
+      "type": "object",
+      "properties": {
+        "inputId": {
+          "$ref": "#/$defs/id"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "context": {
+          "$ref": "#/$defs/revisionContext"
+        }
+      },
+      "required": [
+        "inputId",
+        "answers",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_inputRespond": {
+      "type": "object",
+      "properties": {
+        "resolved": {
+          "type": "boolean"
+        },
+        "alreadyResolved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "resolved",
+        "alreadyResolved"
+      ],
+      "additionalProperties": false
+    },
+    "params_providerList": {
+      "$ref": "#/$defs/empty"
+    },
+    "result_providerList": {
+      "type": "object",
+      "properties": {
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider"
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "providers",
+        "revision"
+      ],
+      "additionalProperties": false
+    },
+    "params_providerCreate": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/providerCreateInput"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "provider",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_providerCreate": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/provider"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "additionalProperties": false
+    },
+    "params_providerUpdate": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/id"
+        },
+        "provider": {
+          "$ref": "#/$defs/providerUpdateInput"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "providerId",
+        "provider",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_providerUpdate": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/provider"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "additionalProperties": false
+    },
+    "params_providerDelete": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/id"
+        },
+        "confirmProviderId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "providerId",
+        "confirmProviderId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_providerDelete": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "additionalProperties": false
+    },
+    "params_providerTest": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "providerId"
+      ],
+      "additionalProperties": false
+    },
+    "result_providerTest": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "checkedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "ok",
+        "checkedAt"
+      ],
+      "additionalProperties": false
+    },
+    "params_providerDiscover": {
+      "type": "object",
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "providerId"
+      ],
+      "additionalProperties": false
+    },
+    "result_providerDiscover": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/providerModel"
+          }
+        }
+      },
+      "required": [
+        "models"
+      ],
+      "additionalProperties": false
+    },
+    "params_skillList": {
+      "$ref": "#/$defs/empty"
+    },
+    "result_skillList": {
+      "type": "object",
+      "properties": {
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/skill"
+          }
+        }
+      },
+      "required": [
+        "skills"
+      ],
+      "additionalProperties": false
+    },
+    "params_skillGet": {
+      "type": "object",
+      "properties": {
+        "skillId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "skillId"
+      ],
+      "additionalProperties": false
+    },
+    "result_skillGet": {
+      "type": "object",
+      "properties": {
+        "skill": {
+          "$ref": "#/$defs/skill"
+        },
+        "instructions": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill",
+        "instructions"
+      ],
+      "additionalProperties": false
+    },
+    "params_skillInstall": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/skillSource"
+        },
+        "replace": {
+          "type": "boolean"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "source",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_skillInstall": {
+      "type": "object",
+      "properties": {
+        "skill": {
+          "$ref": "#/$defs/skill"
+        }
+      },
+      "required": [
+        "skill"
+      ],
+      "additionalProperties": false
+    },
+    "params_skillUpdate": {
+      "type": "object",
+      "properties": {
+        "skillId": {
+          "$ref": "#/$defs/id"
+        },
+        "source": {
+          "$ref": "#/$defs/skillSource"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "skillId",
+        "source",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_skillUpdate": {
+      "type": "object",
+      "properties": {
+        "skill": {
+          "$ref": "#/$defs/skill"
+        }
+      },
+      "required": [
+        "skill"
+      ],
+      "additionalProperties": false
+    },
+    "params_skillDelete": {
+      "type": "object",
+      "properties": {
+        "skillId": {
+          "$ref": "#/$defs/id"
+        },
+        "confirmSkillId": {
+          "$ref": "#/$defs/id"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "skillId",
+        "confirmSkillId",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_skillDelete": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "additionalProperties": false
+    },
+    "params_attachmentCreate": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "mimeType": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ]
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "sessionId",
+        "fileName",
+        "mimeType",
+        "byteLength",
+        "sha256",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_attachmentCreate": {
+      "type": "object",
+      "properties": {
+        "attachmentId": {
+          "$ref": "#/$defs/id"
+        },
+        "chunkSize": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "attachmentId",
+        "chunkSize",
+        "expiresAt"
+      ],
+      "additionalProperties": false
+    },
+    "params_attachmentChunk": {
+      "type": "object",
+      "properties": {
+        "attachmentId": {
+          "$ref": "#/$defs/id"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataBase64": {
+          "$ref": "#/$defs/base64"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "attachmentId",
+        "offset",
+        "dataBase64",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_attachmentChunk": {
+      "type": "object",
+      "properties": {
+        "receivedBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "receivedBytes"
+      ],
+      "additionalProperties": false
+    },
+    "params_attachmentComplete": {
+      "type": "object",
+      "properties": {
+        "attachmentId": {
+          "$ref": "#/$defs/id"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "context": {
+          "$ref": "#/$defs/writeContext"
+        }
+      },
+      "required": [
+        "attachmentId",
+        "sha256",
+        "context"
+      ],
+      "additionalProperties": false
+    },
+    "result_attachmentComplete": {
+      "type": "object",
+      "properties": {
+        "attachment": {
+          "$ref": "#/$defs/attachment"
+        }
+      },
+      "required": [
+        "attachment"
+      ],
+      "additionalProperties": false
+    },
+    "params_attachmentRead": {
+      "type": "object",
+      "properties": {
+        "attachmentId": {
+          "$ref": "#/$defs/id"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "attachmentId",
+        "offset",
+        "length"
+      ],
+      "additionalProperties": false
+    },
+    "result_attachmentRead": {
+      "type": "object",
+      "properties": {
+        "attachment": {
+          "$ref": "#/$defs/attachment"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dataBase64": {
+          "$ref": "#/$defs/base64"
+        },
+        "eof": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "attachment",
+        "offset",
+        "dataBase64",
+        "eof"
+      ],
+      "additionalProperties": false
+    },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "connection/initialize"
+            },
+            "params": {
+              "$ref": "#/$defs/params_initialize"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "connection/ping"
+            },
+            "params": {
+              "$ref": "#/$defs/params_ping"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "connection/pair"
+            },
+            "params": {
+              "$ref": "#/$defs/params_pair"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "connection/revoke"
+            },
+            "params": {
+              "$ref": "#/$defs/params_revoke"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "connection/rotate-token"
+            },
+            "params": {
+              "$ref": "#/$defs/params_rotateToken"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "connection/confirm-rotation"
+            },
+            "params": {
+              "$ref": "#/$defs/params_confirmRotation"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "device/list"
+            },
+            "params": {
+              "$ref": "#/$defs/params_deviceList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "device/pairing-token"
+            },
+            "params": {
+              "$ref": "#/$defs/params_pairingToken"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "project/list"
+            },
+            "params": {
+              "$ref": "#/$defs/params_projectList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "project/browse"
+            },
+            "params": {
+              "$ref": "#/$defs/params_projectBrowse"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "project/register"
+            },
+            "params": {
+              "$ref": "#/$defs/params_projectRegister"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "project/update"
+            },
+            "params": {
+              "$ref": "#/$defs/params_projectUpdate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "project/delete"
+            },
+            "params": {
+              "$ref": "#/$defs/params_projectDelete"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/list"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/search"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionSearch"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/get"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionGet"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/create"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionCreate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/attach"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionAttach"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/history"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionHistory"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/configure"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionConfigure"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/rename"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionRename"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/archive"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionArchive"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/branch"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionBranch"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/delete"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionDelete"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "events/subscribe"
+            },
+            "params": {
+              "$ref": "#/$defs/params_eventsSubscribe"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "events/unsubscribe"
+            },
+            "params": {
+              "$ref": "#/$defs/params_eventsUnsubscribe"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "events/ack"
+            },
+            "params": {
+              "$ref": "#/$defs/params_eventsAck"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "turn/start"
+            },
+            "params": {
+              "$ref": "#/$defs/params_turnStart"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "turn/get"
+            },
+            "params": {
+              "$ref": "#/$defs/params_turnGet"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "turn/interrupt"
+            },
+            "params": {
+              "$ref": "#/$defs/params_turnInterrupt"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "turn/cancel"
+            },
+            "params": {
+              "$ref": "#/$defs/params_turnCancel"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "approval/respond"
+            },
+            "params": {
+              "$ref": "#/$defs/params_approvalRespond"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "input/respond"
+            },
+            "params": {
+              "$ref": "#/$defs/params_inputRespond"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "provider/list"
+            },
+            "params": {
+              "$ref": "#/$defs/params_providerList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "provider/create"
+            },
+            "params": {
+              "$ref": "#/$defs/params_providerCreate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "provider/update"
+            },
+            "params": {
+              "$ref": "#/$defs/params_providerUpdate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "provider/delete"
+            },
+            "params": {
+              "$ref": "#/$defs/params_providerDelete"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "provider/test"
+            },
+            "params": {
+              "$ref": "#/$defs/params_providerTest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "provider/discover"
+            },
+            "params": {
+              "$ref": "#/$defs/params_providerDiscover"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "skill/list"
+            },
+            "params": {
+              "$ref": "#/$defs/params_skillList"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "skill/get"
+            },
+            "params": {
+              "$ref": "#/$defs/params_skillGet"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "skill/install"
+            },
+            "params": {
+              "$ref": "#/$defs/params_skillInstall"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "skill/update"
+            },
+            "params": {
+              "$ref": "#/$defs/params_skillUpdate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "skill/delete"
+            },
+            "params": {
+              "$ref": "#/$defs/params_skillDelete"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "attachment/create"
+            },
+            "params": {
+              "$ref": "#/$defs/params_attachmentCreate"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "attachment/chunk"
+            },
+            "params": {
+              "$ref": "#/$defs/params_attachmentChunk"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "attachment/complete"
+            },
+            "params": {
+              "$ref": "#/$defs/params_attachmentComplete"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "attachment/read"
+            },
+            "params": {
+              "$ref": "#/$defs/params_attachmentRead"
+            }
+          }
+        }
+      ]
+    },
+    "successResponse": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "id",
+        "result"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/$defs/jsonRpc"
+        },
+        "id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/result_initialize"
+            },
+            {
+              "$ref": "#/$defs/result_ping"
+            },
+            {
+              "$ref": "#/$defs/result_pair"
+            },
+            {
+              "$ref": "#/$defs/result_revoke"
+            },
+            {
+              "$ref": "#/$defs/result_rotateToken"
+            },
+            {
+              "$ref": "#/$defs/result_confirmRotation"
+            },
+            {
+              "$ref": "#/$defs/result_deviceList"
+            },
+            {
+              "$ref": "#/$defs/result_pairingToken"
+            },
+            {
+              "$ref": "#/$defs/result_projectList"
+            },
+            {
+              "$ref": "#/$defs/result_projectBrowse"
+            },
+            {
+              "$ref": "#/$defs/result_projectRegister"
+            },
+            {
+              "$ref": "#/$defs/result_projectUpdate"
+            },
+            {
+              "$ref": "#/$defs/result_projectDelete"
+            },
+            {
+              "$ref": "#/$defs/result_sessionList"
+            },
+            {
+              "$ref": "#/$defs/result_sessionSearch"
+            },
+            {
+              "$ref": "#/$defs/result_sessionGet"
+            },
+            {
+              "$ref": "#/$defs/result_sessionCreate"
+            },
+            {
+              "$ref": "#/$defs/result_sessionAttach"
+            },
+            {
+              "$ref": "#/$defs/result_sessionHistory"
+            },
+            {
+              "$ref": "#/$defs/result_sessionConfigure"
+            },
+            {
+              "$ref": "#/$defs/result_sessionRename"
+            },
+            {
+              "$ref": "#/$defs/result_sessionArchive"
+            },
+            {
+              "$ref": "#/$defs/result_sessionBranch"
+            },
+            {
+              "$ref": "#/$defs/result_sessionDelete"
+            },
+            {
+              "$ref": "#/$defs/result_eventsSubscribe"
+            },
+            {
+              "$ref": "#/$defs/result_eventsUnsubscribe"
+            },
+            {
+              "$ref": "#/$defs/result_eventsAck"
+            },
+            {
+              "$ref": "#/$defs/result_turnStart"
+            },
+            {
+              "$ref": "#/$defs/result_turnGet"
+            },
+            {
+              "$ref": "#/$defs/result_turnInterrupt"
+            },
+            {
+              "$ref": "#/$defs/result_turnCancel"
+            },
+            {
+              "$ref": "#/$defs/result_approvalRespond"
+            },
+            {
+              "$ref": "#/$defs/result_inputRespond"
+            },
+            {
+              "$ref": "#/$defs/result_providerList"
+            },
+            {
+              "$ref": "#/$defs/result_providerCreate"
+            },
+            {
+              "$ref": "#/$defs/result_providerUpdate"
+            },
+            {
+              "$ref": "#/$defs/result_providerDelete"
+            },
+            {
+              "$ref": "#/$defs/result_providerTest"
+            },
+            {
+              "$ref": "#/$defs/result_providerDiscover"
+            },
+            {
+              "$ref": "#/$defs/result_skillList"
+            },
+            {
+              "$ref": "#/$defs/result_skillGet"
+            },
+            {
+              "$ref": "#/$defs/result_skillInstall"
+            },
+            {
+              "$ref": "#/$defs/result_skillUpdate"
+            },
+            {
+              "$ref": "#/$defs/result_skillDelete"
+            },
+            {
+              "$ref": "#/$defs/result_attachmentCreate"
+            },
+            {
+              "$ref": "#/$defs/result_attachmentChunk"
+            },
+            {
+              "$ref": "#/$defs/result_attachmentComplete"
+            },
+            {
+              "$ref": "#/$defs/result_attachmentRead"
+            }
+          ]
+        }
+      }
+    },
+    "errorResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "error"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/requestId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "enum": [
+                    -32700,
+                    -32600,
+                    -32025,
+                    -32026
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "jsonrpc",
+            "id",
+            "error"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "error": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "enum": [
+                    -32601,
+                    -32602,
+                    -32603,
+                    -32000,
+                    -32001,
+                    -32002,
+                    -32003,
+                    -32004,
+                    -32005,
+                    -32006,
+                    -32007,
+                    -32008,
+                    -32009,
+                    -32010,
+                    -32011,
+                    -32012,
+                    -32013,
+                    -32014,
+                    -32015,
+                    -32016,
+                    -32017,
+                    -32018,
+                    -32019,
+                    -32020,
+                    -32021,
+                    -32022,
+                    -32023,
+                    -32024,
+                    -32025,
+                    -32026
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                },
+                "data": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "$ref": "#/$defs/errorCode"
+                    },
+                    "requestId": {
+                      "type": "string"
+                    },
+                    "field": {
+                      "type": "string"
+                    },
+                    "currentRevision": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "retryAfterMs": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "code"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "code",
+                "data"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    },
+    "eventNotification": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/$defs/jsonRpc"
+        },
+        "method": {
+          "const": "events/event"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/event"
+            }
+          },
+          "required": [
+            "event"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "closedNotification": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/$defs/jsonRpc"
+        },
+        "method": {
+          "const": "events/closed"
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "subscriptionId": {
+              "$ref": "#/$defs/id"
+            },
+            "code": {
+              "$ref": "#/$defs/errorCode"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subscriptionId",
+            "code"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "initializedNotification": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jsonrpc": {
+          "$ref": "#/$defs/jsonRpc"
+        },
+        "method": {
+          "const": "notifications/initialized"
+        },
+        "params": {
+          "$ref": "#/$defs/empty"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Release bundles are published as GitHub release assets, not committed.
+release/
+*.tar.gz
+
+# Provider seed files contain plaintext API keys — never commit them.
+providers.seed.json
+*.seed.json
+
+node_modules/
+dist/
+coverage/
+
+# Local credentials / editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+*.swp
+*.swo
