@@ -46,21 +46,21 @@ tunnel; do not expose the port publicly.
 # Version comes from package.json (single source); the script refuses to build
 # bytes whose runtime version differs from host-release.json.
 scripts/build-release.sh
-# -> release/pi-adaptor-2.0.2-linux-x64.tar.gz(+.sha256)
-# -> release/pi-adaptor-2.0.2-linux-arm64.tar.gz(+.sha256)
+# -> release/pi-adaptor-2.0.3-linux-x64.tar.gz(+.sha256)
+# -> release/pi-adaptor-2.0.3-linux-arm64.tar.gz(+.sha256)
 
 # The immutable release directory includes the full asset SHA-256.
 scripts/install.sh --install \
-  --bundle /absolute/path/pi-adaptor-2.0.2-linux-arm64 \
+  --bundle /absolute/path/pi-adaptor-2.0.3-linux-arm64 \
   --home "$HOME/.pi-adaptor" \
-  --version 2.0.2 \
+  --version 2.0.3 \
   --target linux-arm64 \
   --asset-sha256 <64-lowercase-hex> \
   --manifest-sha256 <64-lowercase-hex>
 ```
 
 `install.sh` publishes into
-`~/.pi-adaptor/releases/2.0.2-<full asset sha256>` and atomically replaces
+`~/.pi-adaptor/releases/2.0.3-<full asset sha256>` and atomically replaces
 `~/.pi-adaptor/current`. It also implements `--verify` and `--rollback` as
 defined in `docs/api/pi-adaptor-install-release.md`. The generated bootstrap
 uses the architecture-specific tarball selected from the server's `uname -m`.
@@ -77,11 +77,11 @@ jq '{step,status,error}' "$HOME/.pi-adaptor/.bootstrap/state.json"
 ```
 
 The expected active directory ends in
-`releases/2.0.2-<full asset sha256>`, the package is
-`@pi-ios/pi-adaptor 2.0.2`, the unit is active, and `ExecStart` contains
+`releases/2.0.3-<full asset sha256>`, the package is
+`@pi-ios/pi-adaptor 2.0.3`, the unit is active, and `ExecStart` contains
 `~/.pi-adaptor/current/dist/main.js`. A successful bootstrap state also has
 `status=ok` and an `error=null`; the app should report RACP
-`server.name=pi-adaptor` and `server.version=2.0.2`.
+`server.name=pi-adaptor` and `server.version=2.0.3`.
 
 ### Publishing
 
