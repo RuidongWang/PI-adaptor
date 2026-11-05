@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentDriver, AgentTurnHandle, AgentTurnRequest } from "../src/agent/driver.js";
 import { DeterministicAgentDriver } from "../src/agent/driver.js";
 import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
@@ -14,19 +14,30 @@ import type { AuthContext } from "../src/server/host-service.js";
 class ControlledDriver implements AgentDriver {
   readonly appendsPrompt = true;
   aborted = new Set<string>();
+  private readonly pending = new Map<string, {
+    request: AgentTurnRequest;
+    resolveWait: () => void;
+  }>();
+
   start(request: AgentTurnRequest): AgentTurnHandle {
     let resolveWait!: () => void;
     const wait = new Promise<void>((resolve) => {
       resolveWait = resolve;
     });
+    this.pending.set(request.turnId, { request, resolveWait });
     queueMicrotask(() => request.onEvent({ kind: "turn.started", payload: { turnId: request.turnId } }));
     return {
       turnId: request.turnId,
-      async abort() {
-        resolveWait();
-      },
+      abort: async () => resolveWait(),
       wait: () => wait
     };
+  }
+
+  finishWithoutTerminalEvent(turnId: string): void {
+    const pending = this.pending.get(turnId);
+    if (!pending) throw new Error(`turn ${turnId} is not running`);
+    this.pending.delete(turnId);
+    pending.resolveWait();
   }
 }
 
@@ -133,6 +144,87 @@ describe("session single-writer admission", () => {
       auth
     )) as { turn: { status: string } };
     expect(queued.turn.status).toBe("queued");
+  });
+});
+
+describe("turn terminal notifications", () => {
+  it("emits completion and clears the snapshot when a driver exits without a terminal event", async () => {
+    class WaitOnlyDriver implements AgentDriver {
+      readonly appendsPrompt = true;
+      start(request: AgentTurnRequest): AgentTurnHandle {
+        let resolveWait!: () => void;
+        const wait = new Promise<void>((resolve) => { resolveWait = resolve; });
+        queueMicrotask(() => {
+          request.onEvent({ kind: "turn.started", payload: { turnId: request.turnId } });
+          resolveWait();
+        });
+        return { turnId: request.turnId, abort: async () => resolveWait(), wait: () => wait };
+      }
+    }
+    const { service, auth, sessionId } = await setup(new WaitOnlyDriver());
+    const subscription = (await service.handle("events/subscribe", {
+      scope: "session",
+      sessionId
+    }, auth)) as { subscriptionId: string };
+    const events: { kind: string; payload: { turn?: { id: string; status: string } } }[] = [];
+    service.setSubscriptionSink(subscription.subscriptionId, (event) => events.push(event as never));
+
+    const started = (await service.handle("turn/start", {
+      sessionId,
+      input: { text: "finish without a terminal event" }
+    }, auth)) as { turn: { id: string; status: string } };
+    expect(started.turn.status, "启动响应必须反映已经完成的轮次").toBe("completed");
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.kind === "turn.completed")).toBe(true);
+    });
+
+    const completed = events.filter((event) => event.kind === "turn.completed");
+    expect(completed).toHaveLength(1);
+    expect(completed[0]?.payload.turn).toMatchObject({ id: started.turn.id, status: "completed" });
+    const attached = (await service.handle("session/attach", { sessionId }, auth)) as {
+      snapshot: { activeTurn: unknown; activeItems: unknown[] };
+    };
+    expect(attached.snapshot.activeTurn).toBeNull();
+    expect(attached.snapshot.activeItems).toEqual([]);
+  });
+
+  it("notifies completion once and starts the queued turn when wait resolves without a terminal event", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver);
+    const subscription = (await service.handle("events/subscribe", {
+      scope: "session",
+      sessionId
+    }, auth)) as { subscriptionId: string };
+    const events: { kind: string; turnId?: string; payload: { turn?: { status: string } } }[] = [];
+    service.setSubscriptionSink(subscription.subscriptionId, (event) => events.push(event as never));
+
+    const running = (await service.handle("turn/start", {
+      sessionId,
+      input: { text: "first" }
+    }, auth)) as { turn: { id: string; status: string } };
+    expect(running.turn.status).toBe("running");
+    const queued = (await service.handle("turn/start", {
+      sessionId,
+      admission: "queue",
+      input: { text: "second" }
+    }, auth)) as { turn: { id: string; status: string } };
+    expect(queued.turn.status).toBe("queued");
+
+    driver.finishWithoutTerminalEvent(running.turn.id);
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.kind === "turn.started" && event.turnId === queued.turn.id)).toBe(true);
+    });
+
+    const firstCompleted = events.filter((event) =>
+      event.kind === "turn.completed" && event.turnId === running.turn.id
+    );
+    expect(firstCompleted).toHaveLength(1);
+    expect(firstCompleted[0]?.payload.turn?.status).toBe("completed");
+    const attached = (await service.handle("session/attach", { sessionId }, auth)) as {
+      snapshot: { activeTurn: { id: string } | null; queuedTurns: unknown[] };
+    };
+    expect(attached.snapshot.activeTurn?.id).toBe(queued.turn.id);
+    expect(attached.snapshot.queuedTurns).toEqual([]);
   });
 });
 

@@ -702,20 +702,20 @@ export class HostService {
   }
 
   private async attachSession(sessionId: string) {
+    return this.sessionLocks.run(sessionId, () => this.attachSessionSnapshot(sessionId));
+  }
+
+  private async attachSessionSnapshot(sessionId: string) {
     const session = await this.requireSession(sessionId);
-    // Capture the cursor *before* reading history and hold the session lock
-    // across both. Any event emitted after the cursor is therefore replayable,
-    // so a message that lands mid-snapshot can never be silently lost
-    // (contract §3.8 / AC-25). A message read into the snapshot whose event also
-    // replays is deduplicated by the client on item id.
-    const { cursor, items } = await this.sessionLocks.run(sessionId, async () => {
-      const seq = this.journal.currentCursor();
-      const history = session.nativePath ? await this.catalog.history(session.nativePath) : [];
-      const projected = (
-        await Promise.all(history.map((entry) => itemFromEntry(entry, session.id, this.blobs)))
-      ).filter((item): item is Record<string, unknown> => item !== null);
-      return { cursor: seq, items: projected };
-    });
+    // Capture history, the cursor, and live turn projections under one session
+    // lock. A terminal event can therefore never be included in the cursor while
+    // its already-settled turn is still reported as active in this snapshot.
+    const seq = this.journal.currentCursor();
+    const history = session.nativePath ? await this.catalog.history(session.nativePath) : [];
+    const items = (
+      await Promise.all(history.map((entry) => itemFromEntry(entry, session.id, this.blobs)))
+    ).filter((item): item is Record<string, unknown> => item !== null);
+    const cursor = seq;
     // A pending tool approval is not part of the native JSONL history, so it has
     // to be replayed from the live turn state. Without this, a client that
     // reattaches while a tool call is waiting for approval sees no card and the
@@ -1067,18 +1067,31 @@ export class HostService {
       handle
     };
     this.turns.set(handle.turnId, turn);
+    // Persist before observing completion, so terminal storage remains ordered
+    // after the initial running record even for a synchronously finishing driver.
     await this.turnStore.upsert(this.toRecord(turn));
-    void handle.wait().then(async () => {
+    const settled = handle.wait().then(async () => {
       await (this.turnEventChains.get(turn.id) ?? Promise.resolve());
       this.turnEventChains.delete(turn.id);
       const current = this.turns.get(turn.id);
-      // A stop request drives the terminal state itself; only an unrequested end
-      // is treated as a normal completion.
+      // A stop request drives the terminal state itself. Otherwise a resolved
+      // wait is authoritative even when the driver omitted its terminal event:
+      // publish the same completion as handleAgentEvent so subscribers leave
+      // the running state and the queued turn can start.
       if (current && ACTIVE_TURN_STATUSES.has(current.status) && !current.stopRequested) {
-        await this.settleTurn(turn.id, "completed");
+        await this.handleAgentEvent(session.id, turn.id, {
+          kind: "turn.completed",
+          payload: { turnId: turn.id }
+        });
       }
     });
-    return turn;
+    // A short turn may finish before the RPC response is sent. Join only work
+    // that is already queued; a turn still running settles later, not inline.
+    await Promise.race([
+      settled,
+      this.sessionLocks.run(session.id, async () => undefined)
+    ]);
+    return this.turns.get(handle.turnId) ?? turn;
   }
 
   private toRecord(turn: TurnState): TurnRecord {
@@ -1100,13 +1113,17 @@ export class HostService {
   private async settleTurn(turnId: string, status: string, settledReason?: string): Promise<void> {
     const turn = this.turns.get(turnId);
     if (!turn) return;
-    if (!ACTIVE_TURN_STATUSES.has(turn.status)) return;
-    turn.status = status;
-    turn.settledAt = new Date().toISOString();
-    if (settledReason) turn.settledReason = settledReason;
-    this.liveItems.delete(turnId);
-    this.settleApprovalsForTurn(turnId);
-    await this.turnStore.upsert(this.toRecord(turn));
+    await this.sessionLocks.run(turn.sessionId, async () => {
+      const turn = this.turns.get(turnId);
+      if (!turn) return;
+      if (!ACTIVE_TURN_STATUSES.has(turn.status)) return;
+      turn.status = status;
+      turn.settledAt = new Date().toISOString();
+      if (settledReason) turn.settledReason = settledReason;
+      this.liveItems.delete(turnId);
+      this.settleApprovalsForTurn(turnId);
+      await this.turnStore.upsert(this.toRecord(turn));
+    });
   }
 
   /** Contract-shaped turn view without the in-process handle. */
