@@ -75,6 +75,24 @@ async function setup(driver: AgentDriver) {
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Wait for a real terminal state instead of sleeping a guessed number of milliseconds. */
+async function waitForTurnStatus(
+  service: HostService,
+  auth: AuthContext,
+  turnId: string,
+  status: string
+): Promise<void> {
+  await vi.waitFor(
+    async () => {
+      const fetched = (await service.handle("turn/get", { turnId }, auth)) as {
+        turn: { status: string };
+      };
+      expect(fetched.turn.status).toBe(status);
+    },
+    { timeout: 5_000 }
+  );
+}
+
 describe("event journal retention", () => {
   it("reports CURSOR_EXPIRED when the cursor is below the retention watermark", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-journal-"));
@@ -275,7 +293,7 @@ describe("turn terminal idempotency", () => {
       { sessionId, input: { text: "one" } },
       auth
     )) as { turn: { id: string } };
-    await tick(50);
+    await waitForTurnStatus(service, auth, started.turn.id, "completed");
     const result = (await service.handle("turn/interrupt", { turnId: started.turn.id }, auth)) as {
       turn: { status: string };
     };
@@ -544,17 +562,22 @@ describe("approval revision enforcement", () => {
 });
 
 describe("session history pagination", () => {
-  it("respects beforeItemId and limit pagination parameters", async () => {
+  it("returns exactly the items before the cursor instead of any shorter page", async () => {
     const { service, auth, sessionId } = await setup(new DeterministicAgentDriver());
     for (let i = 1; i <= 5; i++) {
-      await service.handle("turn/start", { sessionId, input: { text: `msg-${i}` } }, auth);
-      await tick(30);
+      const started = (await service.handle(
+        "turn/start",
+        { sessionId, input: { text: `msg-${i}` } },
+        auth
+      )) as { turn: { id: string } };
+      // Sleep-free: wait for the turn to settle so the next one is not queued.
+      await waitForTurnStatus(service, auth, started.turn.id, "completed");
     }
     const full = (await service.handle("session/history", { sessionId }, auth)) as {
       items: Array<{ id: string; text?: string }>;
       hasMore: boolean;
     };
-    expect(full.items.length).toBeGreaterThanOrEqual(5);
+    expect(full.items.length).toBeGreaterThanOrEqual(4);
 
     const targetItem = full.items[3];
     expect(targetItem).toBeDefined();
@@ -565,10 +588,33 @@ describe("session history pagination", () => {
       auth
     )) as { items: Array<{ id: string }>; hasMore: boolean };
 
-    expect(paginated.items.length).toBeLessThanOrEqual(2);
-    // None of the returned items can be targetItem or after targetItem
-    for (const itm of paginated.items) {
-      expect(itm.id).not.toBe(targetItem.id);
-    }
+    // An empty page or any two items after the cursor used to pass; the exact slice must not.
+    const expectedPage = full.items.slice(1, 3).map((item) => item.id);
+    expect(expectedPage).toHaveLength(2);
+    expect(paginated.items.map((item) => item.id)).toEqual(expectedPage);
+    expect(paginated.hasMore).toBe(true);
+
+    // The first page is the newest slice, not the oldest one.
+    const firstPage = (await service.handle(
+      "session/history",
+      { sessionId, limit: 2 },
+      auth
+    )) as { items: Array<{ id: string }>; hasMore: boolean };
+    expect(firstPage.items.map((item) => item.id)).toEqual(
+      full.items.slice(-2).map((item) => item.id)
+    );
+    expect(firstPage.hasMore).toBe(true);
+
+    // Before the oldest item there is no earlier history and nothing more to fetch.
+    const firstItem = full.items[0];
+    expect(firstItem).toBeDefined();
+    if (!firstItem) throw new Error("first item missing");
+    const atStart = (await service.handle(
+      "session/history",
+      { sessionId, beforeItemId: firstItem.id, limit: 2 },
+      auth
+    )) as { items: Array<{ id: string }>; hasMore: boolean };
+    expect(atStart.items).toEqual([]);
+    expect(atStart.hasMore).toBe(false);
   });
 });

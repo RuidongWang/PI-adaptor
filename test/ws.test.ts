@@ -1,11 +1,13 @@
 import { mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DeterministicAgentDriver } from "../src/agent/driver.js";
 import type { AgentDriver, AgentTurnHandle, AgentTurnRequest } from "../src/agent/driver.js";
 import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
+import type { ProviderDiscoveryRequest, ProviderDiscoveryTestOnly } from "../src/providers/discovery.js";
 import { HostService } from "../src/server/host-service.js";
 import { startWebSocketServer } from "../src/server/ws.js";
 
@@ -58,6 +60,7 @@ describe("RACP v2 websocket", () => {
       protocolVersion: "2.0.0"
     });
     expect(initialized.result.protocolVersion).toBe("2.0.0");
+    expect(initialized.result.capabilities).toMatchObject({ directTransport: true, providerDiscovery: true });
     const legacy = await rpc(anonymous, 10, "connection/initialize", {
       client: { name: "legacy", version: "1", capabilities: {} },
       protocolVersion: "1.0"
@@ -77,6 +80,24 @@ describe("RACP v2 websocket", () => {
     });
     expect(paired.result.deviceToken).toMatch(/^pdt2\./);
     pairingSocket.close();
+
+    const v1Pairing = await service.createPairingToken();
+    const v1PairingSocket = await connect(url, v1Pairing.token);
+    const v1Initialized = await rpc(v1PairingSocket, 12, "connection/initialize", {
+      client: { name: "bootstrap", version: "0.0.2", capabilities: {} },
+      protocolVersion: "1.0"
+    });
+    expect(v1Initialized.result.protocolVersion).toBe("1.0");
+    v1PairingSocket.send(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+      params: {}
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(v1PairingSocket.readyState).toBe(WebSocket.OPEN);
+    const v1Paired = await rpc(v1PairingSocket, 13, "connection/pair", { deviceLabel: "bootstrap-device" });
+    expect(v1Paired.result.deviceToken).toMatch(/^pdt2\./);
+    v1PairingSocket.close();
 
     const socket = await connect(url, paired.result.deviceToken);
     const projectResult = await rpc(socket, 3, "project/register", {
@@ -109,8 +130,13 @@ describe("RACP v2 websocket", () => {
       context: { requestId: "turn", idempotencyKey: "turn" }
     });
     expect(turn.result.turn.id).toBeTruthy();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(events.some((frame) => frame.params.event.kind === "turn.completed")).toBe(true);
+    // Poll for the terminal event instead of assuming 30 ms is always enough under load.
+    await vi.waitFor(
+      () => {
+        expect(events.some((frame) => frame.params.event.kind === "turn.completed")).toBe(true);
+      },
+      { timeout: 2_000 }
+    );
 
     const history = await rpc(socket, 6, "session/attach", { sessionId });
     expect(history.result.snapshot.items.some((item: any) => item.text === "hello")).toBe(true);
@@ -118,8 +144,12 @@ describe("RACP v2 websocket", () => {
     const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
     socket.close();
     await closed;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect((service as any).subscriptions.size).toBe(0);
+    await vi.waitFor(
+      () => {
+        expect((service as any).subscriptions.size).toBe(0);
+      },
+      { timeout: 2_000 }
+    );
     await server.close();
   });
 
@@ -269,6 +299,108 @@ describe("RACP v2 websocket", () => {
     });
     expect(secondRevoke.result.revoked).toBe(false);
     owner.close();
+    await server.close();
+  });
+
+  it("rejects a wrong loopback path before entering RACP", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-loopback-path-"));
+    const config = parseHostConfig([
+      "--data-dir", join(root, "data"),
+      "--agent-dir", join(root, "agent")
+    ], {}, root);
+    await ensureHostDirectories(config);
+    const service = new HostService(config, new DeterministicAgentDriver());
+    await service.init();
+    const server = await startWebSocketServer(service, 0);
+    const wrongPath = new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${server.port}/v1/racp/ws/`);
+      socket.once("open", () => resolve(socket));
+      socket.once("error", reject);
+    });
+    await expect(wrongPath).rejects.toThrow(/404/);
+    await server.close();
+  });
+
+  it("carries provider discovery success and stable errors over authenticated RACP", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-discovery-ws-"));
+    const config = parseHostConfig([
+      "--data-dir", join(root, "data"),
+      "--agent-dir", join(root, "agent"),
+      "--port", "0"
+    ], {}, root);
+    await ensureHostDirectories(config);
+    const requests: ProviderDiscoveryRequest[] = [];
+    let statusCode = 200;
+    const testOnly: ProviderDiscoveryTestOnly = {
+      lookup: async () => [{ address: "8.8.8.8" }],
+      connect: async (options, validateRemoteAddress) => {
+        validateRemoteAddress("8.8.8.8");
+        return {
+          remoteAddress: "8.8.8.8",
+          request: async (request) => {
+            requests.push(request);
+            return {
+              statusCode,
+              headers: {},
+              body: Readable.from([JSON.stringify({ data: [{ id: "model-a" }] })]),
+              close: vi.fn()
+            };
+          },
+          close: vi.fn()
+        };
+      }
+    };
+    const service = new HostService(config, new DeterministicAgentDriver(), { testOnly });
+    await service.init();
+    const pairing = await service.createPairingToken();
+    const paired = await service.tokens.pair(pairing.token, "discovery-ws");
+    const server = await startWebSocketServer(service, 0);
+    const url = `ws://127.0.0.1:${server.port}/v1/racp/ws`;
+    const socket = await connect(url, paired.deviceToken);
+    const initialized = await rpc(socket, 1, "connection/initialize", { protocolVersion: "2.0.0" });
+    expect(initialized.result.capabilities).toMatchObject({ directTransport: true, providerDiscovery: true });
+    const temporaryKey = "temporary-ws-discovery-key";
+    const discovered = await rpc(socket, 2, "provider/discover", {
+      baseUrl: "https://provider.unit/v1",
+      apiKey: temporaryKey,
+      context: { requestId: "req_ws_discovery" }
+    });
+    expect(discovered.result.models.map((model: any) => model.id)).toEqual(["model-a"]);
+    expect(JSON.stringify(discovered)).not.toContain(temporaryKey);
+
+    statusCode = 503;
+    const unavailable = await rpc(socket, 3, "provider/discover", {
+      baseUrl: "https://provider.unit/v1",
+      apiKey: temporaryKey,
+      context: { requestId: "req_ws_unavailable" }
+    });
+    expect(unavailable.error).toMatchObject({
+      code: -32029,
+      data: {
+        code: "UPSTREAM_UNAVAILABLE",
+        reason: "upstream_http",
+        upstreamStatus: 503,
+        requestId: "req_ws_unavailable"
+      }
+    });
+    expect(JSON.stringify(unavailable)).not.toContain(temporaryKey);
+    const invalid = await rpc(socket, 4, "provider/discover", {
+      baseUrl: "https://provider.unit/v1",
+      context: { requestId: "req_ws_invalid" }
+    });
+    expect(invalid.error).toMatchObject({ code: -32004, data: { code: "INVALID_ARGUMENT" } });
+
+    await service.tokens.revoke(paired.deviceId);
+    const rejected = await connect(url, paired.deviceToken);
+    const countBefore = requests.length;
+    const revoked = await rpc(rejected, 5, "provider/discover", {
+      baseUrl: "https://provider.unit/v1",
+      apiKey: temporaryKey
+    });
+    expect(revoked.error).toMatchObject({ code: -32001, data: { code: "UNAUTHORIZED" } });
+    expect(requests).toHaveLength(countBefore);
+    rejected.close();
+    socket.close();
     await server.close();
   });
 });
