@@ -142,4 +142,21 @@ export class ProviderStore {
   async secret(id: string): Promise<string | null> {
     return readSecret(join(this.secretsDir, id));
   }
+
+  /** Atomic endpoint/auth snapshot for provider/discover, serialized with update/delete. */
+  async discoveryInput(id: string): Promise<{ baseUrl: string; apiKey?: string }> {
+    return this.serialized(async () => {
+      const data = await this.load();
+      const provider = data.providers.find((entry) => entry.id === id);
+      if (!provider) {
+        throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
+      }
+      if (provider.authKind === "none") return { baseUrl: provider.baseUrl };
+      const apiKey = await readSecret(join(this.secretsDir, id));
+      if (apiKey === null) {
+        throw new HostError("PROVIDER_SECRET_MISSING", "provider secret is missing", { field: "providerId" });
+      }
+      return { baseUrl: provider.baseUrl, apiKey };
+    });
+  }
 }

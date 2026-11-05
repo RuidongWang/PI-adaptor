@@ -1,15 +1,39 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { ensureHostDirectories, loadHostConfig } from "./config.js";
 import { DeterministicAgentDriver, PiAgentDriver } from "./agent/driver.js";
 import { applyProviderSeed, loadProviderSeed } from "./providers/seed.js";
-import { pairingTokenLine, readyLine } from "./bootstrap-output.js";
+import { directTrustLine, invalidateDirectTrustFile, pairingTokenLine, readyLine, removeDirectTrustFile, removeStaleDirectTrustFile, writeDirectTrustFile, type DirectTrustOutput } from "./bootstrap-output.js";
+import { DirectTlsError } from "./security/direct-tls.js";
 import { HostService } from "./server/host-service.js";
-import { startWebSocketServer } from "./server/ws.js";
+import { SocketDeviceRegistry, startDirectWebSocketServer, startWebSocketServer, type RunningDirectServer } from "./server/ws.js";
+
+async function currentBootstrapAttempt(home: string): Promise<string | null> {
+  try {
+    const state = JSON.parse(await readFile(join(home, ".bootstrap", "state.json"), "utf8")) as {
+      attemptId?: unknown;
+      status?: unknown;
+    };
+    return state.status === "running" && typeof state.attemptId === "string" && state.attemptId.length > 0
+      ? state.attemptId
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 const config = loadHostConfig(process.argv.slice(2));
 await ensureHostDirectories(config);
+const bootstrapAttemptId = await currentBootstrapAttempt(config.home);
+if (bootstrapAttemptId) {
+  await removeStaleDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
+  // A new process never inherits stdout trust from its previous run, even when
+  // the attemptId is unchanged. Fresh metadata is rebuilt only after direct starts.
+  await removeDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
+} else {
+  await invalidateDirectTrustFile(config.home).catch(() => undefined);
+}
 // Record the running pid under the isolated run dir so a systemd unit or an
 // operator can find this instance without touching any other host's state.
 await writeFile(join(config.runDir, "host.pid"), `${process.pid}\n`, { mode: 0o600 }).catch(() => undefined);
@@ -29,7 +53,36 @@ if (config.providerSeedFile) {
 }
 // Reclaim expired uploads and unreferenced blobs on startup and hourly.
 service.startMaintenance();
-const server = await startWebSocketServer(service, config.port);
+const registry = new SocketDeviceRegistry(service);
+const server = await startWebSocketServer(service, config.port, registry);
+let directServer: RunningDirectServer | undefined;
+if (config.direct.enabled) {
+  try {
+    directServer = await startDirectWebSocketServer(service, config.direct, registry);
+  } catch (error) {
+    if (bootstrapAttemptId) await removeDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
+    else await invalidateDirectTrustFile(config.home).catch(() => undefined);
+    const reason = error instanceof DirectTlsError ? "certificate_invalid" : "listener_unavailable";
+    process.stderr.write(`PI_HOST_DIRECT_ERROR ${JSON.stringify({ code: "DIRECT_UNAVAILABLE", reason })}\n`);
+  }
+}
+if (directServer) {
+  if (bootstrapAttemptId) {
+    const trust: DirectTrustOutput = {
+      schemaVersion: 1,
+      attemptId: bootstrapAttemptId,
+      hostId: service.hostId,
+      ...directServer.trust
+    };
+    try {
+      await writeDirectTrustFile(config.home, trust);
+      process.stdout.write(directTrustLine(trust));
+    } catch {
+      await removeDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
+      process.stderr.write(`PI_HOST_DIRECT_ERROR ${JSON.stringify({ code: "DIRECT_UNAVAILABLE", reason: "trust_output_failed" })}\n`);
+    }
+  }
+}
 if (config.pair) {
   const pairing = await service.createPairingToken(600);
   process.stdout.write(pairingTokenLine({
@@ -48,7 +101,9 @@ process.stdout.write(readyLine({
 
 async function shutdown(): Promise<void> {
   service.stopMaintenance();
-  await server.close();
+  if (bootstrapAttemptId) await removeDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
+  else await invalidateDirectTrustFile(config.home).catch(() => undefined);
+  await Promise.all([server.close(), directServer?.close()]);
   process.exit(0);
 }
 process.once("SIGINT", () => void shutdown());

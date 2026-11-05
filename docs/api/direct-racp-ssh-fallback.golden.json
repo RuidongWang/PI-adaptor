@@ -1,0 +1,564 @@
+{
+  "configs": [
+    {
+      "direct": {
+        "enabled": true,
+        "host": "0.0.0.0",
+        "port": 9443,
+        "certificateFile": "/home/user/.pi-adaptor/tls/direct-cert.pem",
+        "privateKeyFile": "/home/user/.pi-adaptor/tls/direct-key.pem",
+        "maxConnections": 64,
+        "messageRateCount": 60,
+        "messageRateWindowMs": 10000,
+        "unauthenticatedTimeoutMs": 10000
+      }
+    },
+    {
+      "direct": {
+        "enabled": false
+      }
+    },
+    {
+      "direct": {}
+    }
+  ],
+  "bootstrapTrust": [
+    {
+      "schemaVersion": 1,
+      "attemptId": "boot_20261105T000000Z_a1b2",
+      "hostId": "host_uuid",
+      "certificateSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notBefore": "2026-11-05T00:00:00Z",
+      "notAfter": "2028-02-08T00:00:00Z"
+    }
+  ],
+  "requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "providerId": "provider_saved",
+        "context": {
+          "requestId": "req_saved"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "discover-ad-hoc",
+      "method": "provider/discover",
+      "params": {
+        "baseUrl": "https://api.example.com/v1",
+        "apiKey": "example-only-temporary-key",
+        "context": {
+          "requestId": "req_ad_hoc"
+        }
+      }
+    }
+  ],
+  "responses": [
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "ok": true,
+        "serverTime": "2026-11-05T00:00:00.000Z",
+        "pong": true,
+        "hostId": "host_uuid"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "discover-ad-hoc",
+      "result": {
+        "models": [
+          {
+            "id": "alpha-model",
+            "displayName": "Alpha Model",
+            "contextWindow": 128000,
+            "maxTokens": 8192,
+            "thinkingLevels": [],
+            "defaultThinkingLevel": null,
+            "supportsImages": false
+          },
+          {
+            "id": "zeta-model",
+            "displayName": "Zeta Model",
+            "contextWindow": 200000,
+            "maxTokens": 16384,
+            "thinkingLevels": [
+              "off",
+              "medium"
+            ],
+            "defaultThinkingLevel": "medium",
+            "supportsImages": false
+          }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32000,
+        "message": "internal host error",
+        "data": {
+          "code": "INTERNAL",
+          "requestId": "req_internal"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32001,
+        "message": "unauthorized",
+        "data": {
+          "code": "UNAUTHORIZED",
+          "requestId": "req_unauthorized"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32002,
+        "message": "forbidden",
+        "data": {
+          "code": "FORBIDDEN",
+          "requestId": "req_forbidden"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32003,
+        "message": "protocol mismatch",
+        "data": {
+          "code": "PROTOCOL_MISMATCH",
+          "requestId": "req_protocol"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32004,
+        "message": "invalid provider discovery request",
+        "data": {
+          "code": "INVALID_ARGUMENT",
+          "requestId": "req_1",
+          "field": "baseUrl",
+          "reason": "query_forbidden"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32005,
+        "message": "provider not found",
+        "data": {
+          "code": "NOT_FOUND",
+          "requestId": "req_not_found",
+          "field": "providerId"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32006,
+        "message": "request conflict",
+        "data": {
+          "code": "CONFLICT",
+          "requestId": "req_conflict",
+          "reason": "idempotency_key_expired"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32007,
+        "message": "idempotency conflict",
+        "data": {
+          "code": "IDEMPOTENCY_CONFLICT",
+          "requestId": "req_idempotency"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32010,
+        "message": "upstream response too large",
+        "data": {
+          "code": "PAYLOAD_TOO_LARGE",
+          "requestId": "req_too_large",
+          "maxBytes": 2097152
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32016,
+        "message": "provider secret missing",
+        "data": {
+          "code": "PROVIDER_SECRET_MISSING",
+          "requestId": "req_secret_missing",
+          "field": "providerId"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32024,
+        "message": "rate limited",
+        "data": {
+          "code": "RATE_LIMITED",
+          "requestId": "req_rate_limited",
+          "retryAfterMs": 1000
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32027,
+        "message": "provider endpoint rejected",
+        "data": {
+          "code": "ENDPOINT_REJECTED",
+          "requestId": "req_endpoint_rejected",
+          "field": "baseUrl",
+          "reason": "private_address"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32028,
+        "message": "provider discovery timed out",
+        "data": {
+          "code": "UPSTREAM_TIMEOUT",
+          "requestId": "req_upstream_timeout"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32029,
+        "message": "provider upstream unavailable",
+        "data": {
+          "code": "UPSTREAM_UNAVAILABLE",
+          "requestId": "req_upstream_unavailable",
+          "reason": "upstream_http",
+          "upstreamStatus": 401
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32030,
+        "message": "invalid provider upstream response",
+        "data": {
+          "code": "UPSTREAM_RESPONSE_INVALID",
+          "requestId": "req_upstream_invalid",
+          "reason": "empty_list"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32031,
+        "message": "provider redirect forbidden",
+        "data": {
+          "code": "REDIRECT_FORBIDDEN",
+          "requestId": "req_redirect_forbidden"
+        }
+      }
+    }
+  ],
+  "httpErrors": [
+    {
+      "code": "NOT_FOUND",
+      "requestId": "req_http_not_found"
+    },
+    {
+      "code": "UPGRADE_REQUIRED",
+      "requestId": "req_upgrade_required"
+    },
+    {
+      "code": "PROTOCOL_MISMATCH",
+      "requestId": "req_http_protocol"
+    },
+    {
+      "code": "UNAUTHORIZED",
+      "requestId": "req_http_unauthorized"
+    },
+    {
+      "code": "RATE_LIMITED",
+      "requestId": "req_or_server_generated_id",
+      "retryAfterMs": 1000,
+      "reason": "connection_limit"
+    },
+    {
+      "code": "RATE_LIMITED",
+      "requestId": "req_auth_timeout",
+      "retryAfterMs": 1000,
+      "reason": "authentication_timeout"
+    },
+    {
+      "code": "INTERNAL",
+      "requestId": "req_http_internal"
+    },
+    {
+      "code": "REDIRECT_FORBIDDEN",
+      "requestId": "req_http_redirect"
+    }
+  ],
+  "invalid": [
+    {
+      "direct": {
+        "enabled": true,
+        "port": 9443
+      }
+    },
+    {
+      "direct": {
+        "enabled": false,
+        "port": 0
+      }
+    },
+    {
+      "direct": {
+        "enabled": false,
+        "maxConnections": 1025
+      }
+    },
+    {
+      "direct": {
+        "directName": "host.example"
+      }
+    },
+    {
+      "direct": {
+        "enabled": false,
+        "directRateCount": 60
+      }
+    },
+    {
+      "direct": {
+        "enabled": true,
+        "host": "127.0.0.1",
+        "certificateFile": "relative/direct-cert.pem",
+        "privateKeyFile": "/home/user/.pi-adaptor/tls/direct-key.pem"
+      }
+    },
+    {
+      "schemaVersion": 1,
+      "hostId": "host_uuid",
+      "certificateSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notBefore": "2026-11-05T00:00:00Z",
+      "notAfter": "2028-02-08T00:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "attemptId": "boot_20261105T000000Z_a1b2",
+      "hostId": "host_uuid",
+      "certificateSha256": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+      "notBefore": "2026-11-05T00:00:00Z",
+      "notAfter": "2028-02-08T00:00:00Z"
+    },
+    {
+      "schemaVersion": 1,
+      "attemptId": "boot_20261105T000000Z_a1b2",
+      "hostId": "host_uuid",
+      "certificateSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notBefore": "2026-11-05T00:00:00Z",
+      "notAfter": "2028-02-08T00:00:00Z",
+      "endpoint": "wss://host.example:9443/v1/racp/ws"
+    },
+    {
+      "schemaVersion": 2,
+      "attemptId": "boot_20261105T000000Z_a1b2",
+      "hostId": "host_uuid",
+      "certificateSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "notBefore": "2026-11-05T00:00:00Z",
+      "notAfter": "2028-02-08T00:00:00Z"
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "ok": true,
+        "serverTime": "2026-11-05T00:00:00.000Z",
+        "pong": true
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "ok": true,
+        "serverTime": "2026-11-05T00:00:00.000Z",
+        "pong": false,
+        "hostId": "host_uuid"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "providerId": "provider_saved",
+        "baseUrl": "https://api.example.com/v1",
+        "apiKey": "example-only-temporary-key"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "providerId": "provider_saved",
+        "context": {
+          "requestId": "req_saved",
+          "idempotencyKey": "forbidden-for-discovery"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "providerId": ""
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "provider/discover",
+      "params": {
+        "baseUrl": "https://api.example.com/v1",
+        "apiKey": "example-only-temporary-key",
+        "persist": true
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "discover-empty",
+      "result": {
+        "models": []
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "discover-incomplete-model",
+      "result": {
+        "models": [
+          {
+            "id": "model-id",
+            "displayName": "Model",
+            "contextWindow": 128000,
+            "maxTokens": 8192,
+            "thinkingLevels": [],
+            "defaultThinkingLevel": null
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32005,
+        "message": "missing business code",
+        "data": {}
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32005,
+        "message": "mismatched numeric and business codes",
+        "data": {
+          "code": "UNAUTHORIZED",
+          "requestId": "req_mismatch"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32004,
+        "message": "secret diagnostics are forbidden",
+        "data": {
+          "code": "INVALID_ARGUMENT",
+          "requestId": "req_secret",
+          "apiKey": "must-not-appear"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32029,
+        "message": "upstream body is forbidden",
+        "data": {
+          "code": "UPSTREAM_UNAVAILABLE",
+          "requestId": "req_body",
+          "upstreamStatus": 500,
+          "upstreamBody": "must-not-appear"
+        }
+      }
+    },
+    {
+      "code": "UNAUTHORIZED",
+      "requestId": "req_http_secret",
+      "token": "must-not-appear"
+    },
+    {
+      "code": "RATE_LIMITED",
+      "retryAfterMs": 1000,
+      "reason": "message_rate"
+    }
+  ]
+}

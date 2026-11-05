@@ -7,7 +7,8 @@ import {
   ensureHostDirectories,
   loadHostConfig,
   parseHostConfig,
-  readHostConfigFile
+  readHostConfigFile,
+  type HostConfigFile
 } from "../src/config.js";
 
 describe("host config", () => {
@@ -135,5 +136,158 @@ describe("release version", () => {
     // advertising anything else would ship under the wrong version.
     expect(HOST_VERSION).toBe(manifest.version);
     expect(parseHostConfig([], {}, "/home/tester").hostVersion).toBe(manifest.version);
+  });
+});
+
+describe("direct listener config", () => {
+  const completeFile = {
+    direct: {
+      enabled: true,
+      host: "127.0.0.1",
+      port: 9444,
+      certificateFile: "/tmp/file-cert.pem",
+      privateKeyFile: "/tmp/file-key.pem",
+      maxConnections: 10,
+      messageRateCount: 20,
+      messageRateWindowMs: 2_000,
+      unauthenticatedTimeoutMs: 3_000
+    }
+  };
+
+  it("keeps legacy loopback defaults and exposes every direct default", () => {
+    const config = parseHostConfig([], {}, "/home/tester");
+    expect(config.port).toBe(0);
+    expect(config.direct).toEqual({
+      enabled: false,
+      host: "",
+      port: 9443,
+      certificateFile: null,
+      privateKeyFile: null,
+      maxConnections: 64,
+      messageRateCount: 60,
+      messageRateWindowMs: 10_000,
+      unauthenticatedTimeoutMs: 10_000
+    });
+  });
+
+  it("binds the complete config/env/CLI set in precedence order", () => {
+    const fromFile = parseHostConfig([], {}, "/home/tester", completeFile);
+    expect(fromFile.direct).toEqual({
+      enabled: true,
+      host: "127.0.0.1",
+      port: 9444,
+      certificateFile: "/tmp/file-cert.pem",
+      privateKeyFile: "/tmp/file-key.pem",
+      maxConnections: 10,
+      messageRateCount: 20,
+      messageRateWindowMs: 2_000,
+      unauthenticatedTimeoutMs: 3_000
+    });
+
+    const env = {
+      PI_ADAPTOR_DIRECT_ENABLED: "1",
+      PI_ADAPTOR_DIRECT_HOST: "0.0.0.0",
+      PI_ADAPTOR_DIRECT_PORT: "9445",
+      PI_ADAPTOR_DIRECT_CERTIFICATE_FILE: "/tmp/env-cert.pem",
+      PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE: "/tmp/env-key.pem",
+      PI_ADAPTOR_DIRECT_MAX_CONNECTIONS: "11",
+      PI_ADAPTOR_DIRECT_MESSAGE_RATE_COUNT: "21",
+      PI_ADAPTOR_DIRECT_MESSAGE_RATE_WINDOW_MS: "2001",
+      PI_ADAPTOR_DIRECT_UNAUTHENTICATED_TIMEOUT_MS: "3001"
+    };
+    expect(parseHostConfig([], env, "/home/tester", completeFile).direct).toEqual({
+      enabled: true,
+      host: "0.0.0.0",
+      port: 9445,
+      certificateFile: "/tmp/env-cert.pem",
+      privateKeyFile: "/tmp/env-key.pem",
+      maxConnections: 11,
+      messageRateCount: 21,
+      messageRateWindowMs: 2_001,
+      unauthenticatedTimeoutMs: 3_001
+    });
+
+    const fromCli = parseHostConfig([
+      "--direct",
+      "--direct-host", "::1",
+      "--direct-port", "9446",
+      "--direct-cert", "/tmp/cli-cert.pem",
+      "--direct-key", "/tmp/cli-key.pem",
+      "--direct-max-connections", "12",
+      "--direct-message-rate-count", "22",
+      "--direct-message-rate-window-ms", "2002",
+      "--direct-unauthenticated-timeout-ms", "3002"
+    ], env, "/home/tester", completeFile);
+    expect(fromCli.direct).toEqual({
+      enabled: true,
+      host: "::1",
+      port: 9446,
+      certificateFile: "/tmp/cli-cert.pem",
+      privateKeyFile: "/tmp/cli-key.pem",
+      maxConnections: 12,
+      messageRateCount: 22,
+      messageRateWindowMs: 2_002,
+      unauthenticatedTimeoutMs: 3_002
+    });
+    expect(parseHostConfig(["--no-direct"], env, "/home/tester", completeFile).direct.enabled).toBe(false);
+  });
+
+  it("rejects mutually exclusive enable flags and non-boolean env values", () => {
+    expect(() => parseHostConfig(["--direct", "--no-direct"], {}, "/home/tester")).toThrow(/mutually exclusive/);
+    expect(() => parseHostConfig([], { PI_ADAPTOR_DIRECT_ENABLED: "true" }, "/home/tester")).toThrow(/DIRECT_ENABLED/);
+    expect(parseHostConfig([], { PI_ADAPTOR_DIRECT_ENABLED: "0" }, "/home/tester").direct.enabled).toBe(false);
+  });
+
+  it("fails closed on unknown keys, missing enabled inputs, and every invalid range", () => {
+    const invalid = [
+      { direct: { directName: "host.example" } },
+      { direct: { directRateCount: 60 } },
+      { direct: { enabled: true, host: "127.0.0.1", certificateFile: "/tmp/cert", privateKeyFile: "/tmp/key", port: 0 } },
+      { direct: { enabled: true, certificateFile: "/tmp/cert", privateKeyFile: "/tmp/key" } },
+      { direct: { enabled: true, host: "127.0.0.1", privateKeyFile: "/tmp/key" } },
+      { direct: { enabled: true, host: "127.0.0.1", certificateFile: "/tmp/cert" } },
+      { direct: { enabled: true, host: "127.0.0.1", certificateFile: "relative-cert", privateKeyFile: "/tmp/key" } },
+      { direct: { enabled: false, maxConnections: 0 } },
+      { direct: { enabled: false, maxConnections: 1025 } },
+      { direct: { enabled: false, messageRateCount: 0 } },
+      { direct: { enabled: false, messageRateCount: 601 } },
+      { direct: { enabled: false, messageRateWindowMs: 999 } },
+      { direct: { enabled: false, messageRateWindowMs: 60_001 } },
+      { direct: { enabled: false, unauthenticatedTimeoutMs: 999 } },
+      { direct: { enabled: false, unauthenticatedTimeoutMs: 30_001 } }
+    ];
+    for (const value of invalid) {
+      expect(() => parseHostConfig([], {}, "/home/tester", value as never), JSON.stringify(value)).toThrow();
+    }
+    expect(() => parseHostConfig(["--direct-port", "0"], {}, "/home/tester")).toThrow(/direct.port/);
+  });
+
+  it("ships the complete direct example and matching systemd env bindings", async () => {
+    const example = JSON.parse(await readFile(new URL("../config.example.json", import.meta.url), "utf8")) as HostConfigFile;
+    expect(parseHostConfig([], {}, "/home/tester", example).direct).toEqual({
+      enabled: true,
+      host: "0.0.0.0",
+      port: 9443,
+      certificateFile: "/home/ubuntu/.pi-adaptor/tls/direct-cert.pem",
+      privateKeyFile: "/home/ubuntu/.pi-adaptor/tls/direct-key.pem",
+      maxConnections: 64,
+      messageRateCount: 60,
+      messageRateWindowMs: 10_000,
+      unauthenticatedTimeoutMs: 10_000
+    });
+    const unit = await readFile(new URL("../deploy/pi-adaptor.service", import.meta.url), "utf8");
+    for (const name of [
+      "PI_ADAPTOR_DIRECT_ENABLED",
+      "PI_ADAPTOR_DIRECT_HOST",
+      "PI_ADAPTOR_DIRECT_PORT",
+      "PI_ADAPTOR_DIRECT_CERTIFICATE_FILE",
+      "PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE",
+      "PI_ADAPTOR_DIRECT_MAX_CONNECTIONS",
+      "PI_ADAPTOR_DIRECT_MESSAGE_RATE_COUNT",
+      "PI_ADAPTOR_DIRECT_MESSAGE_RATE_WINDOW_MS",
+      "PI_ADAPTOR_DIRECT_UNAUTHENTICATED_TIMEOUT_MS"
+    ]) {
+      expect(unit).toContain(`Environment=${name}=`);
+    }
   });
 });

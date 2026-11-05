@@ -37,7 +37,7 @@ and uses a v1-compatible handshake on the same WebSocket endpoint, so the
 current SwiftUI project/session/turn flows work while the additive v2 methods
 are adopted incrementally.
 
-The Host binds only `127.0.0.1`. Reach it through the SSH `direct-tcpip`
+The Host binds only `127.0.0.2`. Reach it through the SSH `direct-tcpip`
 tunnel; do not expose the port publicly.
 
 ## Release and install
@@ -46,28 +46,28 @@ tunnel; do not expose the port publicly.
 # Version comes from package.json (single source); the script refuses to build
 # bytes whose runtime version differs from host-release.json.
 scripts/build-release.sh
-# -> release/pi-adaptor-0.0.1-linux-x64.tar.gz(+.sha256)
-# -> release/pi-adaptor-0.0.1-linux-arm64.tar.gz(+.sha256)
+# -> release/pi-adaptor-0.0.2-linux-x64.tar.gz(+.sha256)
+# -> release/pi-adaptor-0.0.2-linux-arm64.tar.gz(+.sha256)
 
 # The immutable release directory includes the full asset SHA-256.
 scripts/install.sh --install \
-  --bundle /absolute/path/pi-adaptor-0.0.1-linux-arm64 \
+  --bundle /absolute/path/pi-adaptor-0.0.2-linux-arm64 \
   --home "$HOME/.pi-adaptor" \
-  --version 0.0.1 \
+  --version 0.0.2 \
   --target linux-arm64 \
   --asset-sha256 <64-lowercase-hex> \
   --manifest-sha256 <64-lowercase-hex>
 ```
 
 `install.sh` publishes into
-`~/.pi-adaptor/releases/0.0.1-<full asset sha256>` and atomically replaces
+`~/.pi-adaptor/releases/0.0.2-<full asset sha256>` and atomically replaces
 `~/.pi-adaptor/current`. It also implements `--verify` and `--rollback` as
 defined in `docs/api/pi-adaptor-install-release.md`. The generated bootstrap
 uses the architecture-specific tarball selected from the server's `uname -m`.
 
 The iOS app installs the latest stable `pi-adaptor-v<version>` release by
 default, skipping drafts and prereleases. If that release cannot be resolved,
-it falls back to the compiled `0.0.1` manifest and pins that manifest's
+it falls back to the compiled `0.0.2` manifest and pins that manifest's
 SHA-256. Both paths verify the digest on the server before switching `current`.
 
 Verify the active installation on the Linux server:
@@ -82,11 +82,11 @@ jq '{step,status,error}' "$HOME/.pi-adaptor/.bootstrap/state.json"
 ```
 
 The expected active directory ends in
-`releases/0.0.1-<full asset sha256>`, the package is
-`@pi-ios/pi-adaptor 0.0.1`, the unit is active, and `ExecStart` contains
+`releases/0.0.2-<full asset sha256>`, the package is
+`@pi-ios/pi-adaptor 0.0.2`, the unit is active, and `ExecStart` contains
 `~/.pi-adaptor/current/dist/main.js`. A successful bootstrap state also has
 `status=ok` and an `error=null`; the app should report RACP
-`server.name=pi-adaptor` and `server.version=0.0.1`.
+`server.name=pi-adaptor` and `server.version=0.0.2`.
 
 ### Publishing
 

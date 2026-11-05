@@ -9,6 +9,7 @@ import { EventJournal, type Cursor, type HostEvent } from "../events/journal.js"
 import { BlobStore, type AttachmentRecord } from "../media/blob-store.js";
 import { MetaStore, type SessionMeta } from "../meta/store.js";
 import { NativeSessionCatalog } from "../pi/session-catalog.js";
+import { discoverProviderModels, ProviderDiscoveryError, type ProviderDiscoveryInput, type ProviderDiscoveryOptions } from "../providers/discovery.js";
 import { ProviderStore } from "../providers/store.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { TokenStore, type DeviceRecord } from "../security/tokens.js";
@@ -64,6 +65,28 @@ type LiveItem = {
 
 export type AuthContext = { device: DeviceRecord };
 export type EventSink = (event: HostEvent) => void;
+export type ConnectionEffects = {
+  rotationConfirmed?(deviceId: string, previousCredentialHash: string): void;
+};
+
+/** Preserve the discovery core's stable numeric/data envelope through the existing WS HostError boundary. */
+class HostProviderDiscoveryError extends HostError {
+  constructor(
+    private readonly discoveryError: ProviderDiscoveryError,
+    private readonly requestId: string | undefined
+  ) {
+    super("INTERNAL", discoveryError.message, discoveryError.data);
+    this.name = "ProviderDiscoveryError";
+  }
+
+  override toJSONRPC(id: string | number | null): ReturnType<ProviderDiscoveryError["toJSONRPC"]> {
+    const envelope = this.discoveryError.toJSONRPC(id);
+    if (this.requestId && !envelope.error.data.requestId) {
+      envelope.error.data = { requestId: this.requestId, ...envelope.error.data };
+    }
+    return envelope;
+  }
+}
 
 type Subscription = {
   id: string;
@@ -255,7 +278,8 @@ export class HostService {
 
   constructor(
     readonly config: HostConfig,
-    private readonly driver: AgentDriver
+    private readonly driver: AgentDriver,
+    private readonly discoveryOptions: ProviderDiscoveryOptions = {}
   ) {
     this.tokens = new TokenStore(config.dataDir);
     this.meta = new MetaStore(config.dataDir);
@@ -348,6 +372,9 @@ export class HostService {
   }
 
   async initialize(params: Record<string, unknown>) {
+    if (params.protocolVersion !== "1.0" && params.protocolVersion !== "2.0.0") {
+      throw new HostError("PROTOCOL_MISMATCH", "unsupported initialize protocolVersion");
+    }
     if (params.protocolVersion === "1.0") {
       return {
         protocolVersion: "1.0",
@@ -370,7 +397,9 @@ export class HostService {
           providers: true,
           sessionBranches: true,
           sessionDelete: true,
-          nativePiSessions: true
+          nativePiSessions: true,
+          directTransport: true,
+          providerDiscovery: true
         }
       };
     }
@@ -398,7 +427,9 @@ export class HostService {
         providers: true,
         sessionBranches: true,
         sessionDelete: true,
-        nativePiSessions: true
+        nativePiSessions: true,
+        directTransport: true,
+        providerDiscovery: true
       }
     };
   }
@@ -413,7 +444,13 @@ export class HostService {
     return this.tokens.createPairingToken(ttlSeconds);
   }
 
-  async handle(method: string, rawParams: unknown, auth: AuthContext | null, pairingToken?: string): Promise<unknown> {
+  async handle(
+    method: string,
+    rawParams: unknown,
+    auth: AuthContext | null,
+    pairingToken?: string,
+    effects?: ConnectionEffects
+  ): Promise<unknown> {
     const params = rawParams === undefined ? {} : obj(rawParams);
     if (method === "connection/initialize") return this.initialize(params);
     if (method === "connection/pair") {
@@ -428,36 +465,42 @@ export class HostService {
           key,
           method,
           requestDigest(params),
-          () => this.dispatch(method, params, auth, pairingToken),
+          () => this.dispatch(method, params, auth, pairingToken, effects),
           auth.device.deviceId
         );
       }
     }
-    return this.dispatch(method, params, auth, pairingToken);
+    return this.dispatch(method, params, auth, pairingToken, effects);
   }
 
   private async dispatch(
     method: string,
     params: Record<string, unknown>,
     auth: AuthContext,
-    pairingToken?: string
+    pairingToken?: string,
+    effects?: ConnectionEffects
   ): Promise<unknown> {
     switch (method) {
       case "connection/ping":
-        return { pong: true };
+        return { ok: true, serverTime: new Date().toISOString(), pong: true, hostId: this.hostId };
       case "device/list":
         return { devices: await this.tokens.listDevices() };
       case "device/pairing-token":
         return this.createPairingToken(typeof params.ttlSeconds === "number" ? params.ttlSeconds : 600);
       case "connection/rotate-token":
         return this.tokens.rotate(auth.device.deviceId, idempotencyKeyFrom(params));
-      case "connection/confirm-rotation":
-        return {
-          confirmed: await this.tokens.confirmRotation(
-            auth.device.deviceId,
-            str(params.rotationId, "rotationId")
-          )
-        };
+      case "connection/confirm-rotation": {
+        let previousCredentialHash: string | undefined;
+        const confirmed = await this.tokens.confirmRotation(
+          auth.device.deviceId,
+          str(params.rotationId, "rotationId"),
+          (hash) => { previousCredentialHash = hash; }
+        );
+        if (confirmed && previousCredentialHash) {
+          effects?.rotationConfirmed?.(auth.device.deviceId, previousCredentialHash);
+        }
+        return { confirmed };
+      }
       case "connection/revoke":
         return { revoked: await this.tokens.revoke(str(params.deviceId, "deviceId")) };
       case "project/list":
@@ -511,7 +554,9 @@ export class HostService {
       case "events/subscribe":
         return this.subscribe(params, auth);
       case "events/unsubscribe":
-        this.subscriptions.delete(str(params.subscriptionId, "subscriptionId"));
+        // Transport owns socket/subscription membership; deleting here would let
+        // another socket remove the owner's live subscription before ownership checks.
+        str(params.subscriptionId, "subscriptionId");
         return { unsubscribed: true };
       case "events/ack":
         return { acknowledged: true };
@@ -545,7 +590,7 @@ export class HostService {
       case "provider/test":
         return { ok: (await this.providers.secret(str(params.providerId, "providerId"))) !== null, checkedAt: new Date().toISOString() };
       case "provider/discover":
-        return { models: [] };
+        return this.discoverProvider(params, auth);
       case "skill/list":
         return { skills: await this.skills.list() };
       case "skill/get":
@@ -586,6 +631,108 @@ export class HostService {
         );
       default:
         throw new HostError("INVALID_ARGUMENT", `unknown method: ${method}`);
+    }
+  }
+
+  private invalidDiscovery(
+    field: string,
+    reason: string,
+    requestId?: string
+  ): HostError {
+    return new HostError("INVALID_ARGUMENT", "invalid provider discovery request", {
+      field,
+      reason,
+      ...(requestId ? { requestId } : {})
+    });
+  }
+
+  private parseProviderDiscoveryRequest(params: Record<string, unknown>): {
+    providerId?: string;
+    input?: ProviderDiscoveryInput;
+    requestId?: string;
+  } {
+    const rawContext = params.context;
+    const requestId = rawContext && typeof rawContext === "object" && !Array.isArray(rawContext) &&
+      typeof (rawContext as { requestId?: unknown }).requestId === "string" &&
+      ((rawContext as { requestId: string }).requestId.length > 0)
+      ? (rawContext as { requestId: string }).requestId
+      : undefined;
+    for (const key of Object.keys(params)) {
+      if (!["providerId", "baseUrl", "apiKey", "context"].includes(key)) {
+        throw this.invalidDiscovery(key, key === "idempotencyKey" ? "idempotency_forbidden" : "unknown_field", requestId);
+      }
+    }
+    if (rawContext !== undefined) {
+      if (!rawContext || typeof rawContext !== "object" || Array.isArray(rawContext)) {
+        throw this.invalidDiscovery("context", "invalid_type", requestId);
+      }
+      const context = rawContext as Record<string, unknown>;
+      for (const key of Object.keys(context)) {
+        if (key !== "requestId") throw this.invalidDiscovery(`context.${key}`, "unknown_field", requestId);
+      }
+      if (!requestId) throw this.invalidDiscovery("context.requestId", "required", requestId);
+    }
+
+    const saved = params.providerId !== undefined;
+    const adHoc = params.baseUrl !== undefined || params.apiKey !== undefined;
+    if (saved && adHoc) throw this.invalidDiscovery("providerId", "mutually_exclusive", requestId);
+    if (!saved && !adHoc) throw this.invalidDiscovery("providerId", "required", requestId);
+    if (saved) {
+      if (typeof params.providerId !== "string" || params.providerId.length === 0) {
+        throw this.invalidDiscovery("providerId", "required", requestId);
+      }
+      return { providerId: params.providerId, ...(requestId ? { requestId } : {}) };
+    }
+    if (typeof params.baseUrl !== "string" || params.baseUrl.length === 0) {
+      throw this.invalidDiscovery("baseUrl", "required", requestId);
+    }
+    if (typeof params.apiKey !== "string" || params.apiKey.length === 0) {
+      throw this.invalidDiscovery("apiKey", "required", requestId);
+    }
+    if (params.apiKey.length > 16_384 || /[\r\n]/.test(params.apiKey)) {
+      throw this.invalidDiscovery("apiKey", "api_key", requestId);
+    }
+    return {
+      input: { baseUrl: params.baseUrl, apiKey: params.apiKey },
+      ...(requestId ? { requestId } : {})
+    };
+  }
+
+  private async discoverProvider(params: Record<string, unknown>, auth: AuthContext) {
+    if (auth.device.role !== "owner") {
+      throw new HostError("FORBIDDEN", "provider discovery requires owner");
+    }
+    const request = this.parseProviderDiscoveryRequest(params);
+    const deadlineAt = Date.now() + 7_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new ProviderDiscoveryError("UPSTREAM_TIMEOUT", "provider discovery deadline exceeded"));
+      }, Math.max(0, deadlineAt - Date.now()));
+    });
+    const work = (async () => {
+      let input: ProviderDiscoveryInput;
+      if (request.providerId !== undefined) {
+        input = await this.providers.discoveryInput(request.providerId);
+      } else if (request.input) {
+        input = request.input;
+      } else {
+        throw new HostError("INTERNAL", "provider discovery request could not be resolved");
+      }
+      if (Date.now() >= deadlineAt) {
+        throw new ProviderDiscoveryError("UPSTREAM_TIMEOUT", "provider discovery deadline exceeded");
+      }
+      return discoverProviderModels(input, { ...this.discoveryOptions, deadlineAt });
+    })();
+    try {
+      return await Promise.race([work, deadline]);
+    } catch (error) {
+      if (error instanceof ProviderDiscoveryError) {
+        throw new HostProviderDiscoveryError(error, request.requestId);
+      }
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 

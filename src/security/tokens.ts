@@ -227,7 +227,11 @@ export class TokenStore {
    * window. Requires the id returned by `rotate`, so a late or duplicated
    * confirmation cannot clear a newer rotation.
    */
-  async confirmRotation(deviceId: string, rotationId: string): Promise<boolean> {
+  async confirmRotation(
+    deviceId: string,
+    rotationId: string,
+    onConfirmed?: (previousTokenHash: string) => void
+  ): Promise<boolean> {
     return this.serialized(async () => {
       const data = await this.load();
       const device = data.devices.find((entry) => entry.deviceId === deviceId && !entry.revokedAt);
@@ -235,11 +239,13 @@ export class TokenStore {
       if (!device.pendingRotation || device.pendingRotation.rotationId !== rotationId) {
         throw new HostError("INVALID_ARGUMENT", "rotationId does not match a pending rotation");
       }
+      const previousTokenHash = device.pendingRotation.previousTokenHash;
       delete device.pendingRotation;
       delete device.previousTokenHash;
       delete device.previousValidUntil;
       this.pendingRotations.delete(deviceId);
       await this.save(data);
+      onConfirmed?.(previousTokenHash);
       return true;
     });
   }

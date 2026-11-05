@@ -2,7 +2,31 @@ import { chmod, mkdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+
+export type DirectConfig = {
+  enabled: boolean;
+  host: string;
+  port: number;
+  certificateFile: string | null;
+  privateKeyFile: string | null;
+  maxConnections: number;
+  messageRateCount: number;
+  messageRateWindowMs: number;
+  unauthenticatedTimeoutMs: number;
+};
+
+export type DirectConfigFile = {
+  enabled?: boolean;
+  host?: string;
+  port?: number;
+  certificateFile?: string;
+  privateKeyFile?: string;
+  maxConnections?: number;
+  messageRateCount?: number;
+  messageRateWindowMs?: number;
+  unauthenticatedTimeoutMs?: number;
+};
 
 export type HostConfig = {
   /** Single isolated root; every default path lives below it. */
@@ -22,6 +46,7 @@ export type HostConfig = {
   hostId: string;
   hostVersion: string;
   piVersion: string;
+  direct: DirectConfig;
 };
 
 /**
@@ -38,6 +63,7 @@ export type HostConfigFile = {
   hostVersion?: string;
   piVersion?: string;
   providerSeedFile?: string;
+  direct?: DirectConfigFile;
 };
 
 /**
@@ -78,6 +104,102 @@ function numberFromPort(raw: unknown, source: string): number {
     throw new Error(`invalid port (${source}): ${String(raw)}`);
   }
   return port;
+}
+
+const DIRECT_CONFIG_KEYS = new Set([
+  "enabled",
+  "host",
+  "port",
+  "certificateFile",
+  "privateKeyFile",
+  "maxConnections",
+  "messageRateCount",
+  "messageRateWindowMs",
+  "unauthenticatedTimeoutMs"
+]);
+
+function directCliValue(args: string[], name: string): string | undefined {
+  const indexes = args.flatMap((value, index) => value === name ? [index] : []);
+  if (indexes.length === 0) return undefined;
+  if (indexes.length !== 1) throw new Error(`duplicate direct CLI option: ${name}`);
+  const value = args[indexes[0]! + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`missing value for ${name}`);
+  }
+  return value;
+}
+
+function directNumber(raw: unknown, field: string, minimum: number, maximum: number): number {
+  if ((typeof raw !== "string" && typeof raw !== "number") || raw === "") {
+    throw new Error(`invalid direct.${field}: ${String(raw)}`);
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`invalid direct.${field}: expected ${minimum}..${maximum}`);
+  }
+  return value;
+}
+
+function directString(raw: unknown, field: string): string {
+  if (typeof raw !== "string" || raw.length === 0 || raw.trim() !== raw || /\s/.test(raw)) {
+    throw new Error(`invalid direct.${field}: expected a non-empty value without whitespace`);
+  }
+  return raw;
+}
+
+function parseDirectConfig(args: string[], env: NodeJS.ProcessEnv, fileConfig: HostConfigFile): DirectConfig {
+  const fileValue = fileConfig.direct as unknown;
+  if (fileValue !== undefined && (!fileValue || typeof fileValue !== "object" || Array.isArray(fileValue))) {
+    throw new Error("invalid direct config: expected an object");
+  }
+  const file = (fileValue ?? {}) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(file)) {
+    if (!DIRECT_CONFIG_KEYS.has(key)) throw new Error(`unknown direct config key: ${key}`);
+    if (value === undefined) continue;
+    const expected = key === "enabled" ? "boolean" : ["host", "certificateFile", "privateKeyFile"].includes(key) ? "string" : "number";
+    if (typeof value !== expected) throw new Error(`invalid direct.${key}: expected ${expected}`);
+  }
+
+  const cliEnabled = args.includes("--direct");
+  const cliDisabled = args.includes("--no-direct");
+  if (cliEnabled && cliDisabled) throw new Error("--direct and --no-direct are mutually exclusive");
+  let enabled = file.enabled === true;
+  if (env.PI_ADAPTOR_DIRECT_ENABLED !== undefined) {
+    if (env.PI_ADAPTOR_DIRECT_ENABLED !== "0" && env.PI_ADAPTOR_DIRECT_ENABLED !== "1") {
+      throw new Error("invalid PI_ADAPTOR_DIRECT_ENABLED: expected 0 or 1");
+    }
+    enabled = env.PI_ADAPTOR_DIRECT_ENABLED === "1";
+  }
+  if (cliEnabled) enabled = true;
+  if (cliDisabled) enabled = false;
+
+  const hostRaw = directCliValue(args, "--direct-host") ?? env.PI_ADAPTOR_DIRECT_HOST ?? file.host;
+  const host = hostRaw === undefined ? "" : directString(hostRaw, "host");
+  const certificateRaw = directCliValue(args, "--direct-cert") ?? env.PI_ADAPTOR_DIRECT_CERTIFICATE_FILE ?? file.certificateFile;
+  const keyRaw = directCliValue(args, "--direct-key") ?? env.PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE ?? file.privateKeyFile;
+  const certificateFile = certificateRaw === undefined ? null : directString(certificateRaw, "certificateFile");
+  const privateKeyFile = keyRaw === undefined ? null : directString(keyRaw, "privateKeyFile");
+  if (certificateFile !== null && !isAbsolute(certificateFile)) {
+    throw new Error("invalid direct.certificateFile: expected an absolute path");
+  }
+  if (privateKeyFile !== null && !isAbsolute(privateKeyFile)) {
+    throw new Error("invalid direct.privateKeyFile: expected an absolute path");
+  }
+  if (enabled && (!host || !certificateFile || !privateKeyFile)) {
+    throw new Error("direct.enabled requires direct.host, direct.certificateFile, and direct.privateKeyFile");
+  }
+
+  return {
+    enabled,
+    host,
+    port: directNumber(directCliValue(args, "--direct-port") ?? env.PI_ADAPTOR_DIRECT_PORT ?? file.port ?? 9443, "port", 1, 65_535),
+    certificateFile,
+    privateKeyFile,
+    maxConnections: directNumber(directCliValue(args, "--direct-max-connections") ?? env.PI_ADAPTOR_DIRECT_MAX_CONNECTIONS ?? file.maxConnections ?? 64, "maxConnections", 1, 1024),
+    messageRateCount: directNumber(directCliValue(args, "--direct-message-rate-count") ?? env.PI_ADAPTOR_DIRECT_MESSAGE_RATE_COUNT ?? file.messageRateCount ?? 60, "messageRateCount", 1, 600),
+    messageRateWindowMs: directNumber(directCliValue(args, "--direct-message-rate-window-ms") ?? env.PI_ADAPTOR_DIRECT_MESSAGE_RATE_WINDOW_MS ?? file.messageRateWindowMs ?? 10_000, "messageRateWindowMs", 1000, 60_000),
+    unauthenticatedTimeoutMs: directNumber(directCliValue(args, "--direct-unauthenticated-timeout-ms") ?? env.PI_ADAPTOR_DIRECT_UNAUTHENTICATED_TIMEOUT_MS ?? file.unauthenticatedTimeoutMs ?? 10_000, "unauthenticatedTimeoutMs", 1000, 30_000)
+  };
 }
 
 /**
@@ -164,7 +286,8 @@ export function parseHostConfig(
     pair: args.includes("--pair") || env.PI_ADAPTOR_PAIR === "1" || fileConfig.pair === true,
     hostId: valueAfter(args, "--host-id") ?? env.PI_ADAPTOR_HOST_ID ?? fileConfig.hostId ?? "",
     hostVersion: env.PI_ADAPTOR_VERSION ?? fileConfig.hostVersion ?? HOST_VERSION,
-    piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.3.0"
+    piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.3.0",
+    direct: parseDirectConfig(args, env, fileConfig)
   };
 }
 

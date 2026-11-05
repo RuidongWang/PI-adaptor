@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { BOOTSTRAP_HOST, pairingTokenLine, readyLine } from "../src/bootstrap-output.js";
+import { BOOTSTRAP_HOST, directTrustLine, pairingTokenLine, readyLine } from "../src/bootstrap-output.js";
 import { HOST_VERSION } from "../src/config.js";
 
 function readLines(stream: NodeJS.ReadableStream): {
@@ -65,6 +65,51 @@ describe("bootstrap stdout", () => {
       port: 43871,
       fingerprint: "abc123"
     });
+  });
+
+  it("formats direct trust independently without endpoint or credentials", () => {
+    const payload = {
+      schemaVersion: 1 as const,
+      attemptId: "boot_test",
+      hostId: "host-id",
+      certificateSha256: "0123456789abcdef".repeat(4),
+      notBefore: "2026-11-05T00:00:00.000Z",
+      notAfter: "2028-02-08T00:00:00.000Z"
+    };
+    const line = directTrustLine(payload);
+    expect(line.startsWith("PI_HOST_DIRECT_TRUST ")).toBe(true);
+    expect(JSON.parse(line.trim().slice("PI_HOST_DIRECT_TRUST ".length))).toEqual(payload);
+    expect(line).not.toContain("endpoint");
+    expect(line).not.toContain("privateKey");
+    expect(() => directTrustLine({ ...payload, certificateSha256: "ABC" })).toThrow(/certificateSha256/);
+  });
+
+  it("invalidates trust only for the matching or stale attempt", async () => {
+    const { removeDirectTrustFile, removeStaleDirectTrustFile } = await import("../src/bootstrap-output.js");
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-trust-cleanup-"));
+    const directory = join(root, ".bootstrap");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, "direct-trust.json");
+    const trust = (attemptId: string) => JSON.stringify({
+      schemaVersion: 1,
+      attemptId,
+      hostId: "host-id",
+      certificateSha256: "0123456789abcdef".repeat(4),
+      notBefore: "2026-11-05T00:00:00.000Z",
+      notAfter: "2028-02-08T00:00:00.000Z"
+    });
+    await writeFile(path, trust("boot_b"), { mode: 0o600 });
+    await removeDirectTrustFile(root, "boot_a");
+    expect((await stat(path)).isFile()).toBe(true);
+    await removeDirectTrustFile(root, "boot_b");
+    await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+
+    await writeFile(path, trust("boot_a"), { mode: 0o600 });
+    await removeStaleDirectTrustFile(root, "boot_b");
+    await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(path, trust("boot_b"), { mode: 0o600 });
+    await removeStaleDirectTrustFile(root, "boot_b");
+    expect((await stat(path)).isFile()).toBe(true);
   });
 
   it("emits pairing and ready records from the real host process", async () => {

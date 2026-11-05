@@ -20,6 +20,18 @@ Type=simple
 Environment=PI_ADAPTOR_HOME=%h/.pi-adaptor
 Environment=PI_ADAPTOR_PORT=19445
 
+# Direct is opt-in. After installing a validated single-leaf certificate and a
+# service-owned 0600 key, set PI_ADAPTOR_DIRECT_ENABLED=1 and restart the unit.
+Environment=PI_ADAPTOR_DIRECT_ENABLED=0
+Environment=PI_ADAPTOR_DIRECT_HOST=0.0.0.0
+Environment=PI_ADAPTOR_DIRECT_PORT=9443
+Environment=PI_ADAPTOR_DIRECT_CERTIFICATE_FILE=%h/.pi-adaptor/tls/direct-cert.pem
+Environment=PI_ADAPTOR_DIRECT_PRIVATE_KEY_FILE=%h/.pi-adaptor/tls/direct-key.pem
+Environment=PI_ADAPTOR_DIRECT_MAX_CONNECTIONS=64
+Environment=PI_ADAPTOR_DIRECT_MESSAGE_RATE_COUNT=60
+Environment=PI_ADAPTOR_DIRECT_MESSAGE_RATE_WINDOW_MS=10000
+Environment=PI_ADAPTOR_DIRECT_UNAUTHENTICATED_TIMEOUT_MS=10000
+
 # Absolute path to the built entrypoint for the deployed version.
 ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js --home %h/.pi-adaptor --port 19445
 
