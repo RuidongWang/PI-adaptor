@@ -21,12 +21,12 @@
     "linux-x64": {
       "bundleDirectory": "pi-adaptor-0.0.2-linux-x64",
       "file": "pi-adaptor-0.0.2-linux-x64.tar.gz",
-      "sha256": "37af13b6ba0ea59b1bf9b82ef29a9644fc4f1988c1d4726672d81f1b8e4c6ba9"
+      "sha256": "d33745ac369e956bcca95c632e2efa33eea8b05875a68135de52db1e5e0c4f71"
     },
     "linux-arm64": {
       "bundleDirectory": "pi-adaptor-0.0.2-linux-arm64",
       "file": "pi-adaptor-0.0.2-linux-arm64.tar.gz",
-      "sha256": "a38554330f59adf6caa85c36273983143982dd88064d0d0fd2072926a9da2681"
+      "sha256": "4177354bc553ae9883f6fec796498a45a243bb64bb8d04faea8a62c9bef0c164"
     }
   }
 }

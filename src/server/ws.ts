@@ -652,6 +652,14 @@ async function handleMessage(
     } else if (!token || !token.startsWith("ppt2.")) {
       throw new HostError("UNAUTHORIZED", "a device or pairing token is required");
     }
+    // A pairing token is not an authenticated device, but the v1 handshake still
+    // sends the initialization notification before `connection/pair`. It carries
+    // no authority and must not be routed to device-authenticated dispatch.
+    if (listener === "loopback"
+      && frame.method === "notifications/initialized"
+      && token?.startsWith("ppt2.")) {
+      return;
+    }
     let rotatedCredential: { deviceId: string; credentialHash: string } | undefined;
     const result = await service.handle(
       frame.method,
