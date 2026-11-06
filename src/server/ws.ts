@@ -652,12 +652,17 @@ async function handleMessage(
     } else if (!token || !token.startsWith("ppt2.")) {
       throw new HostError("UNAUTHORIZED", "a device or pairing token is required");
     }
-    // A pairing token is not an authenticated device, but the v1 handshake still
-    // sends the initialization notification before `connection/pair`. It carries
-    // no authority and must not be routed to device-authenticated dispatch.
-    if (listener === "loopback"
-      && frame.method === "notifications/initialized"
-      && token?.startsWith("ppt2.")) {
+    // The frozen v1 handshake sends `notifications/initialized` (a notification:
+    // no id, no response) after `connection/initialize`. It carries no authority
+    // and must never be dispatched as a business method on the loopback listener.
+    // Returning an INVALID_ARGUMENT error here breaks the contract: strict clients
+    // treat an error frame for the initialization notification as a handshake
+    // failure and close the socket immediately after it was established. Accept it
+    // for both a valid device token (authenticated above) and a pairing token.
+    if (listener === "loopback" && frame.method === "notifications/initialized") {
+      if (frame.id !== undefined && frame.id !== null) {
+        throw new HostError("PROTOCOL_MISMATCH", "notifications/initialized must not carry an id");
+      }
       return;
     }
     let rotatedCredential: { deviceId: string; credentialHash: string } | undefined;

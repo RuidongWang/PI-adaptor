@@ -99,6 +99,29 @@ describe("RACP v2 websocket", () => {
     expect(v1Paired.result.deviceToken).toMatch(/^pdt2\./);
     v1PairingSocket.close();
 
+    // The v1 handshake notification must also be accepted on a device-token
+    // connection. Returning INVALID_ARGUMENT made strict clients treat the
+    // handshake as failed and close the socket immediately after it opened.
+    const v1DeviceSocket = await connect(url, paired.result.deviceToken);
+    const v1DeviceInitialized = await rpc(v1DeviceSocket, 21, "connection/initialize", {
+      client: { name: "device", version: "0.0.3", capabilities: {} },
+      protocolVersion: "1.0"
+    });
+    expect(v1DeviceInitialized.result.protocolVersion).toBe("1.0");
+    const unexpected: Frame[] = [];
+    v1DeviceSocket.on("message", (raw) => unexpected.push(JSON.parse(raw.toString()) as Frame));
+    v1DeviceSocket.send(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+      params: {}
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unexpected).toEqual([]);
+    expect(v1DeviceSocket.readyState).toBe(WebSocket.OPEN);
+    const v1DevicePing = await rpc(v1DeviceSocket, 22, "connection/ping", {});
+    expect(v1DevicePing.result.ok).toBe(true);
+    v1DeviceSocket.close();
+
     const socket = await connect(url, paired.result.deviceToken);
     const projectResult = await rpc(socket, 3, "project/register", {
       path: project,
