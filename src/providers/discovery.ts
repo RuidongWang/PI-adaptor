@@ -1,7 +1,8 @@
 import { lookup as systemLookup } from "node:dns/promises";
 import type { IncomingHttpHeaders } from "node:http";
+import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { connect as tcpConnect, isIP } from "node:net";
+import { connect as tcpConnect, isIP, type Socket } from "node:net";
 import type { Readable } from "node:stream";
 import { checkServerIdentity, connect as tlsConnect, type TLSSocket } from "node:tls";
 import { TextDecoder } from "node:util";
@@ -81,6 +82,8 @@ export type ProviderDiscoveryConnectOptions = {
   servername: string | undefined;
   rejectUnauthorized: true;
   signal: AbortSignal;
+  /** Plain HTTP is only accepted for loopback gateways (no certificate to verify). */
+  scheme?: "https" | "http";
 };
 
 export type ProviderDiscoveryRequest = {
@@ -139,7 +142,18 @@ type NormalizedEndpoint = {
   hostHeader: string;
   port: number;
   servername: string | undefined;
+  scheme: "https" | "http";
 };
+
+/** Loopback gateways may be plain HTTP: the request never leaves the host. */
+export function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.replace(/\.$/, "").toLowerCase();
+  return host === "localhost"
+    || host.endsWith(".localhost")
+    || host === "127.0.0.1"
+    || host === "::1"
+    || host === "0:0:0:0:0:0:0:1";
+}
 
 function failure(
   code: ProviderDiscoveryErrorCode,
@@ -325,11 +339,21 @@ function canonicalAllowlistEntry(entry: string): string {
   return (parsed?.canonical ?? unbracketed.replace(/\.$/, "")).toLowerCase();
 }
 
+function isLoopbackAddress(address: ParsedAddress): boolean {
+  if (address.version === 4) return address.ipv4 >>> 24 === 127;
+  return address.canonical === "::1";
+}
+
 function privateAddressAllowed(
   hostname: string,
   address: ParsedAddress,
   allowlist: ReadonlySet<string>
 ): boolean {
+  // Loopback gateways are a product default (localhost 模型服务), and a
+  // loopback connection cannot reach anything outside the host itself. Only
+  // allow it when the requested hostname is itself loopback, so a public name
+  // that rebinds to 127.0.0.1 stays rejected.
+  if (isLoopbackAddress(address) && isLoopbackHostname(hostname)) return true;
   return allowlist.has(canonicalAllowlistEntry(hostname)) || allowlist.has(address.canonical);
 }
 
@@ -343,7 +367,7 @@ function isLocalOrMetadataHostname(hostname: string): boolean {
 }
 
 function rawHostname(raw: string): string | null {
-  const authority = /^https:\/\/([^/?#]*)/i.exec(raw)?.[1];
+  const authority = /^https?:\/\/([^/?#]*)/i.exec(raw)?.[1];
   if (authority === undefined) return null;
   const withoutUserinfo = authority.slice(authority.lastIndexOf("@") + 1);
   if (withoutUserinfo.startsWith("[")) {
@@ -365,7 +389,7 @@ function normalizeEndpoint(raw: string): NormalizedEndpoint {
   } catch {
     throw invalidUrl("invalid_url");
   }
-  if (url.protocol !== "https:") throw invalidUrl("scheme");
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw invalidUrl("scheme");
   if (url.username !== "" || url.password !== "") throw invalidUrl("userinfo");
   if (url.search !== "") throw invalidUrl("query");
   if (url.hash !== "") throw invalidUrl("fragment");
@@ -374,6 +398,7 @@ function normalizeEndpoint(raw: string): NormalizedEndpoint {
     ? bracketedHostname.slice(1, -1)
     : bracketedHostname;
   if (hostname === "") throw invalidUrl("hostname");
+  if (url.protocol === "http:" && !isLoopbackHostname(hostname)) throw invalidUrl("scheme");
   const originalHostname = rawHostname(raw);
   if (!originalHostname || originalHostname.includes("%")) throw invalidUrl("hostname");
   const literal = parseAddress(hostname);
@@ -381,7 +406,7 @@ function normalizeEndpoint(raw: string): NormalizedEndpoint {
   if (!literal && /^(?:0x[0-9a-f]+|[0-9.]+)$/i.test(originalHostname) && isIP(hostname) === 4) {
     throw invalidUrl("hostname");
   }
-  const port = url.port === "" ? 443 : Number(url.port);
+  const port = url.port === "" ? (url.protocol === "http:" ? 80 : 443) : Number(url.port);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw invalidUrl("port");
 
   let path = url.pathname.replace(/\/+$/, "");
@@ -399,7 +424,8 @@ function normalizeEndpoint(raw: string): NormalizedEndpoint {
     hostname: hostname.toLowerCase(),
     hostHeader: url.host,
     port,
-    servername: literal ? undefined : hostname.toLowerCase()
+    servername: literal ? undefined : hostname.toLowerCase(),
+    scheme: url.protocol === "http:" ? "http" : "https"
   };
 }
 
@@ -415,21 +441,23 @@ const defaultLookup: ProviderDiscoveryLookup = async (hostname) => {
 };
 
 function requestOverSocket(
-  socket: TLSSocket,
+  socket: Socket,
   options: ProviderDiscoveryConnectOptions,
-  request: ProviderDiscoveryRequest
+  request: ProviderDiscoveryRequest,
+  secure: boolean
 ): Promise<ProviderDiscoveryResponse> {
   return new Promise((resolve, reject) => {
     let responded = false;
-    const outgoing = httpsRequest({
-      protocol: "https:",
+    const client = secure ? httpsRequest : httpRequest;
+    const outgoing = client({
+      protocol: secure ? "https:" : "http:",
       hostname: options.hostname,
       port: options.port,
       method: "GET",
       path: request.path,
       headers: request.headers,
       agent: false,
-      createConnection: () => socket,
+      createConnection: () => socket as never,
       signal: request.signal
     }, (response) => {
       responded = true;
@@ -475,6 +503,17 @@ const defaultConnect: ProviderDiscoveryConnector = (options, validateRemoteAddre
         fail(error as Error);
         return;
       }
+      if (options.scheme === "http") {
+        // Loopback plain-HTTP gateway: the TCP socket itself is the transport.
+        settled = true;
+        options.signal.removeEventListener("abort", onAbort);
+        resolve({
+          remoteAddress: raw.remoteAddress,
+          request: (request) => requestOverSocket(raw, options, request, false),
+          close: () => raw.destroy()
+        });
+        return;
+      }
       tls = tlsConnect({
         socket: raw,
         ...(options.servername === undefined ? {} : { servername: options.servername }),
@@ -499,7 +538,7 @@ const defaultConnect: ProviderDiscoveryConnector = (options, validateRemoteAddre
         }
         resolve({
           remoteAddress: socket.remoteAddress,
-          request: (request) => requestOverSocket(socket, options, request),
+          request: (request) => requestOverSocket(socket, options, request, true),
           close: () => socket.destroy()
         });
       });
@@ -814,7 +853,9 @@ async function executeDiscovery(
   validateApiKey(input.apiKey);
   assertDeadline();
   const allowlist = new Set((options.testOnly?.allowPrivateHosts ?? []).map(canonicalAllowlistEntry));
-  if (isLocalOrMetadataHostname(endpoint.hostname) && !allowlist.has(canonicalAllowlistEntry(endpoint.hostname))) {
+  if (isLocalOrMetadataHostname(endpoint.hostname)
+      && !isLoopbackHostname(endpoint.hostname)
+      && !allowlist.has(canonicalAllowlistEntry(endpoint.hostname))) {
     throw rejected("private_address");
   }
   const lookup = options.testOnly?.lookup ?? defaultLookup;
@@ -874,7 +915,8 @@ async function executeDiscovery(
         hostname: endpoint.hostname,
         servername: endpoint.servername,
         rejectUnauthorized: true,
-        signal
+        signal,
+        scheme: endpoint.scheme
       };
       let connection: ProviderDiscoveryConnection;
       try {

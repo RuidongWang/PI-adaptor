@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { HostError } from "../errors.js";
+import { providerApi } from "../providers/protocol.js";
 import { uuid } from "../util/id.js";
 
 export type AgentEvent = {
@@ -37,6 +38,8 @@ export type AgentTurnRequest = {
     baseUrl: string;
     apiKey: string | null;
     authKind?: "api_key" | "none";
+    /** Wire protocol selected by the client; unknown values fall back to OpenAI Chat Completions. */
+    protocol?: string | undefined;
     models: Array<{
       id: string;
       displayName: string;
@@ -181,15 +184,16 @@ export class PiAgentDriver implements AgentDriver {
           authPath: join(request.cwd, ".pi-host-auth.json"),
           modelsPath: null
         });
+        const api = providerApi(request.provider.protocol);
         runtime.registerProvider(request.provider.id, {
           name: request.provider.name,
           baseUrl: request.provider.baseUrl,
           apiKey: request.provider.apiKey ?? "none",
-          api: "openai-completions",
+          api,
           models: request.provider.models.map((model) => ({
             id: model.id,
             name: model.displayName,
-            api: "openai-completions",
+            api,
             input: model.supportsImages ? ["text", "image"] : ["text"],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
             contextWindow: model.contextWindow,

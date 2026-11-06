@@ -48,12 +48,20 @@ export async function assertPublicHttpsEndpoint(
   } catch {
     throw new HostError("INVALID_ARGUMENT", "invalid endpoint URL");
   }
-  if (!policy.allowHttp && url.protocol !== "https:") {
-    throw new HostError("INVALID_ARGUMENT", "endpoint must use https");
-  }
   if (url.username || url.password) throw new HostError("INVALID_ARGUMENT", "credentials in URL are forbidden");
   const host = url.hostname.toLowerCase();
-  if (!policy.allowPrivateHosts) {
+  // 回环网关（默认的 localhost 模型服务）不需要证书，也永远出不了本机；
+  // 其余主机仍要求 https，且默认拒绝私网地址。
+  const loopback = host === "localhost"
+    || host.endsWith(".localhost")
+    || host === "127.0.0.1"
+    || host === "::1"
+    || host === "[::1]";
+  const httpAllowed = url.protocol === "http:" && (loopback || policy.allowHttp);
+  if (url.protocol !== "https:" && !httpAllowed) {
+    throw new HostError("INVALID_ARGUMENT", "endpoint must use https");
+  }
+  if (!policy.allowPrivateHosts && !loopback) {
     if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") {
       throw new HostError("INVALID_ARGUMENT", "private endpoint is forbidden");
     }

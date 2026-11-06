@@ -159,8 +159,6 @@ describe("provider model discovery URL policy", () => {
   });
 
   it.each([
-    "https://localhost/v1",
-    "https://foo.localhost/v1",
     "https://printer.local/v1",
     "https://metadata.google.internal/v1",
     "https://metadata.azure.internal/v1"
@@ -172,6 +170,17 @@ describe("provider model discovery URL policy", () => {
       data: expect.objectContaining({ reason: "private_address" })
     });
     expect(harness.lookup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "https://localhost/v1",
+    "https://foo.localhost/v1",
+    "http://localhost:8080/v1",
+    "http://127.0.0.1:8080/v1"
+  ])("allows loopback gateway %s without DNS", async (baseUrl) => {
+    const harness = makeHarness({ addresses: ["127.0.0.1"] });
+    await expect(discover(harness, baseUrl)).resolves.toMatchObject({ models: expect.any(Array) });
+    expect(harness.connect).toHaveBeenCalledTimes(1);
   });
 
   it("validates temporary keys without copying them into errors", async () => {
@@ -197,7 +206,6 @@ describe("provider model discovery address policy and DNS pinning", () => {
     "100.64.0.1",
     "100.127.255.254",
     "100.100.100.200",
-    "127.0.0.1",
     "169.254.169.254",
     "172.16.0.1",
     "172.31.255.254",
@@ -217,7 +225,6 @@ describe("provider model discovery address policy and DNS pinning", () => {
     "240.0.0.1",
     "255.255.255.255",
     "::",
-    "::1",
     "::8.8.8.8",
     "::ffff:8.8.8.8",
     "::ffff:0:8.8.8.8",
@@ -275,11 +282,11 @@ describe("provider model discovery address policy and DNS pinning", () => {
   });
 
   it("allows a private mock only through the separate explicit test-only allowlist", async () => {
-    const blocked = makeHarness({ addresses: ["127.0.0.1"] });
+    const blocked = makeHarness({ addresses: ["10.0.0.1"] });
     await expect(discover(blocked)).rejects.toMatchObject({ code: "ENDPOINT_REJECTED" });
     expect(blocked.connect).not.toHaveBeenCalled();
 
-    const allowed = makeHarness({ addresses: ["::1"], allowPrivateHosts: ["provider.unit"] });
+    const allowed = makeHarness({ addresses: ["10.0.0.1"], allowPrivateHosts: ["provider.unit"] });
     await expect(discover(allowed)).resolves.toMatchObject({ models: expect.any(Array) });
     expect(allowed.connect).toHaveBeenCalledTimes(1);
   });

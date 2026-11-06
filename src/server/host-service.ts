@@ -2,7 +2,10 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { AgentDriver, type AgentEvent } from "../agent/driver.js";
+import { providerApi } from "../providers/protocol.js";
 import { HostConfig } from "../config.js";
 import { HostError } from "../errors.js";
 import { EventJournal, type Cursor, type HostEvent } from "../events/journal.js";
@@ -111,6 +114,45 @@ type TurnState = {
   /** True once a stop was requested, so an abort-induced end is not read as success. */
   stopRequested?: boolean;
   handle?: { abort(): Promise<void>; wait(): Promise<void> };
+};
+
+/** 标题只保留一行：去引号/句末标点，压缩空白，限长。 */
+export function sanitizeSessionTitle(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw
+    .replace(/\s+/g, " ")
+    .replace(/^["'“”‘’。.，,：:；;\s]+/, "")
+    .replace(/["'“”‘’。.，,：:；;\s]+$/, "")
+    .trim();
+  if (!cleaned) return undefined;
+  return cleaned.length <= 40 ? cleaned : `${cleaned.slice(0, 40)}…`;
+}
+
+export function fallbackSessionTitle(instruction: string): string {
+  const firstLine = instruction.split(/\r?\n/)[0] ?? instruction;
+  const collapsed = firstLine.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "New session";
+  return collapsed.length <= 24 ? collapsed : `${collapsed.slice(0, 24)}…`;
+}
+
+/**
+ * 一次性标题补全只需要请求期的临时 API Key，绝不能把凭据写进服务器磁盘。
+ * `ModelRuntime.create` 默认会落到 `authPath` 指向的文件，这里注入纯内存存储。
+ */
+const ephemeralCredentialStore: CredentialStore = {
+  async read(): Promise<Credential | undefined> {
+    return undefined;
+  },
+  async list(): Promise<readonly CredentialInfo[]> {
+    return [];
+  },
+  async modify(
+    _providerId: string,
+    fn: (current: Credential | undefined) => Promise<Credential | undefined>
+  ): Promise<Credential | undefined> {
+    return fn(undefined);
+  },
+  async delete(): Promise<void> {}
 };
 
 function str(value: unknown, field: string): string {
@@ -589,6 +631,8 @@ export class HostService {
         return { session: this.summarize(await this.configureSession(params)) };
       case "session/rename":
         return { session: this.summarize(await this.renameSession(params)) };
+      case "session/suggest-title":
+        return this.suggestSessionTitle(params);
       case "session/archive":
         return { session: this.summarize(await this.archiveSession(params)) };
       case "session/branch":
@@ -1082,6 +1126,78 @@ export class HostService {
     return updated;
   }
 
+  /**
+   * 用会话当前模型为首条指令生成一个短标题。
+   *
+   * 只做一次非流式补全，不创建 turn、不写会话历史；失败由客户端退回本地标题，
+   * 因此这里不缓存、不重试，也不把它算作会话状态的一部分。
+   */
+  private async suggestSessionTitle(params: Record<string, unknown>) {
+    const sessionId = str(params.sessionId, "sessionId");
+    const rawInstruction = str(params.instruction, "instruction");
+    const instruction = rawInstruction.slice(0, 4_000);
+    const session = await this.requireSession(sessionId);
+    const providerId = typeof params.providerId === "string" && params.providerId
+      ? params.providerId
+      : session.providerId;
+    const modelId = typeof params.modelId === "string" && params.modelId
+      ? params.modelId
+      : session.modelId;
+    if (!providerId) throw new HostError("PROVIDER_NOT_CONFIGURED", "provider is required");
+    if (!modelId) throw new HostError("PROVIDER_NOT_CONFIGURED", "model is required");
+    const provider = (await this.providers.list()).find((entry) => entry.id === providerId);
+    if (!provider) throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
+
+    const apiKey = transientApiKey(params);
+    if (provider.authKind !== "none" && !apiKey) {
+      throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
+    }
+    const api = providerApi(provider.protocol);
+    const declared = provider.models.find((model) => model.id === modelId);
+    const runtime = await ModelRuntime.create({
+      credentials: ephemeralCredentialStore,
+      modelsPath: null
+    });
+    runtime.registerProvider(provider.id, {
+      name: provider.name,
+      baseUrl: provider.baseUrl,
+      apiKey: apiKey ?? "none",
+      api,
+      models: [{
+        id: modelId,
+        name: declared?.displayName ?? modelId,
+        api,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: declared?.contextWindow ?? 32_768,
+        maxTokens: declared?.maxTokens ?? 4_096,
+        reasoning: declared?.thinkingLevels.length ? true : false
+      }]
+    });
+    const model = runtime.getModel(provider.id, modelId);
+    if (!model) throw new HostError("PROVIDER_NOT_CONFIGURED", "model is not configured");
+
+    const prompt = [
+      "You name coding sessions. Write a concise title for the session based on the user's first instruction.",
+      "Requirements: at most 12 Chinese characters or 6 English words; no quotes, no trailing punctuation, no explanation.",
+      "Reply with the title only.",
+      "",
+      "First instruction:",
+      instruction
+    ].join("\n");
+    const message = await runtime.completeSimple(
+      model,
+      { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+      { maxTokens: 64 }
+    );
+    const text = message.content
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join(" ")
+      .trim();
+    return { title: sanitizeSessionTitle(text) ?? fallbackSessionTitle(instruction) };
+  }
+
   private async renameSession(params: Record<string, unknown>) {
     const sessionId = str(params.sessionId, "sessionId");
     const title = str(params.title, "title");
@@ -1332,6 +1448,7 @@ export class HostService {
             baseUrl: provider.baseUrl,
             apiKey: provider.authKind === "api_key" ? (apiKey ?? null) : null,
             authKind: provider.authKind,
+            protocol: provider.protocol,
             models: provider.models
           }
         : undefined,

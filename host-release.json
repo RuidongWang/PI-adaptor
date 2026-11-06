@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "repository": "RuidongWang/PI-adaptor",
-  "version": "0.0.3",
-  "releaseTag": "pi-adaptor-v0.0.3",
+  "version": "0.0.4",
+  "releaseTag": "pi-adaptor-v0.0.4",
   "protocolVersion": "2.0.0",
   "runtime": {
     "serverName": "pi-adaptor"
@@ -19,14 +19,14 @@
   },
   "artifacts": {
     "linux-x64": {
-      "bundleDirectory": "pi-adaptor-0.0.3-linux-x64",
-      "file": "pi-adaptor-0.0.3-linux-x64.tar.gz",
-      "sha256": "3b9c159d6494f20efc4a3711119b666e32286764606a692042d2bb3de68f11cf"
+      "bundleDirectory": "pi-adaptor-0.0.4-linux-x64",
+      "file": "pi-adaptor-0.0.4-linux-x64.tar.gz",
+      "sha256": "71c0c925f6ac231ced8815372bf40721a21eb63dd43bdb3fc2f903be539b36f0"
     },
     "linux-arm64": {
-      "bundleDirectory": "pi-adaptor-0.0.3-linux-arm64",
-      "file": "pi-adaptor-0.0.3-linux-arm64.tar.gz",
-      "sha256": "4fe89dd6585774e78ee72cb19fef3a3ef79b45abd8265a313f1e54e6b20bfe1e"
+      "bundleDirectory": "pi-adaptor-0.0.4-linux-arm64",
+      "file": "pi-adaptor-0.0.4-linux-arm64.tar.gz",
+      "sha256": "8d1ce517c670e13dcbcfd36c019444a759db35c65e098d01e0750f6a17816bdc"
     }
   }
 }
