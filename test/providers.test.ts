@@ -223,6 +223,28 @@ describe("HostService provider/discover", () => {
     expect(JSON.stringify(result)).not.toContain(temporaryKey);
   });
 
+  it("forwards the ad-hoc wire protocol to discovery auth and rejects unknown protocols", async () => {
+    const { service, harness, auth } = await makeDiscoveryService();
+    await service.handle("provider/discover", {
+      baseUrl: "https://provider.unit/v1",
+      apiKey: "anthropic-temporary-key",
+      protocol: "anthropic-messages",
+      context: { requestId: "req_protocol" }
+    }, auth);
+    expect(harness.requests[0]?.path).toBe("/v1/models");
+    expect(harness.requests[0]?.headers["x-api-key"]).toBe("anthropic-temporary-key");
+    expect(harness.requests[0]?.headers).not.toHaveProperty("Authorization");
+
+    await expect(service.handle("provider/discover", {
+      baseUrl: "https://provider.unit/v1",
+      apiKey: "key",
+      protocol: "graphql"
+    }, auth)).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+      data: expect.objectContaining({ field: "protocol", reason: "unsupported" })
+    });
+  });
+
   it("validates the two request shapes, ownership, saved secrets, and fixed provider errors", async () => {
     const { service, harness, auth } = await makeDiscoveryService();
     const invalid = [

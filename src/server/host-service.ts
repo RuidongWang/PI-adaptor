@@ -5,7 +5,7 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { AgentDriver, type AgentEvent } from "../agent/driver.js";
-import { providerApi } from "../providers/protocol.js";
+import { isSupportedProviderProtocol, providerApi } from "../providers/protocol.js";
 import { HostConfig } from "../config.js";
 import { HostError } from "../errors.js";
 import { EventJournal, type Cursor, type HostEvent } from "../events/journal.js";
@@ -753,7 +753,7 @@ export class HostService {
       ? (rawContext as { requestId: string }).requestId
       : undefined;
     for (const key of Object.keys(params)) {
-      if (!["providerId", "baseUrl", "apiKey", "context"].includes(key)) {
+      if (!["providerId", "baseUrl", "apiKey", "protocol", "context"].includes(key)) {
         throw this.invalidDiscovery(key, key === "idempotencyKey" ? "idempotency_forbidden" : "unknown_field", requestId);
       }
     }
@@ -776,7 +776,15 @@ export class HostService {
       if (typeof params.providerId !== "string" || params.providerId.length === 0) {
         throw this.invalidDiscovery("providerId", "required", requestId);
       }
+      if (params.protocol !== undefined) {
+        throw this.invalidDiscovery("protocol", "mutually_exclusive", requestId);
+      }
       return { providerId: params.providerId, ...(requestId ? { requestId } : {}) };
+    }
+    if (params.protocol !== undefined) {
+      if (typeof params.protocol !== "string" || !isSupportedProviderProtocol(params.protocol)) {
+        throw this.invalidDiscovery("protocol", "unsupported", requestId);
+      }
     }
     if (typeof params.baseUrl !== "string" || params.baseUrl.length === 0) {
       throw this.invalidDiscovery("baseUrl", "required", requestId);
@@ -788,7 +796,11 @@ export class HostService {
       throw this.invalidDiscovery("apiKey", "api_key", requestId);
     }
     return {
-      input: { baseUrl: params.baseUrl, apiKey: params.apiKey },
+      input: {
+        baseUrl: params.baseUrl,
+        apiKey: params.apiKey,
+        ...(typeof params.protocol === "string" ? { protocol: params.protocol } : {})
+      },
       ...(requestId ? { requestId } : {})
     };
   }

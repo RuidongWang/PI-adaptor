@@ -146,14 +146,16 @@ export class ProviderStore {
   }
 
   /** Atomic endpoint/auth snapshot for provider/discover, serialized with update/delete. */
-  async discoveryInput(id: string): Promise<{ baseUrl: string; apiKey?: string }> {
+  async discoveryInput(id: string): Promise<{ baseUrl: string; apiKey?: string; protocol: string }> {
     return this.serialized(async () => {
       const data = await this.load();
       const provider = data.providers.find((entry) => entry.id === id);
       if (!provider) {
         throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
       }
-      if (provider.authKind === "none") return { baseUrl: provider.baseUrl };
+      if (provider.authKind === "none") {
+        return { baseUrl: provider.baseUrl, protocol: provider.protocol };
+      }
       // Host no longer holds the key, so a saved-provider discovery cannot
       // authenticate. Clients should use the ad-hoc `baseUrl + apiKey` form.
       throw new HostError("PROVIDER_SECRET_MISSING", "provider secret is not stored on the host", {

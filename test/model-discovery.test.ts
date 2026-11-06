@@ -77,10 +77,15 @@ function makeHarness(options: HarnessOptions = {}) {
 function discover(
   harness: ReturnType<typeof makeHarness>,
   baseUrl = "https://provider.unit/v1",
-  apiKey?: string
+  apiKey?: string,
+  protocol?: string
 ) {
   return discoverProviderModels(
-    { baseUrl, ...(apiKey === undefined ? {} : { apiKey }) },
+    {
+      baseUrl,
+      ...(apiKey === undefined ? {} : { apiKey }),
+      ...(protocol === undefined ? {} : { protocol })
+    },
     { testOnly: harness.testOnly }
   );
 }
@@ -420,6 +425,44 @@ describe("provider model discovery HTTPS request", () => {
       Host: "provider.unit:8443",
       "User-Agent": "pi-adaptor-provider-discovery/1.0"
     });
+  });
+
+  it("authenticates Anthropic Messages with x-api-key and a fixed version header", async () => {
+    const harness = makeHarness();
+    await discover(harness, "https://api.anthropic.com/v1", "sk-ant-only", "anthropic-messages");
+    expect(harness.requests[0]?.headers).toEqual({
+      Accept: "application/json",
+      Host: "api.anthropic.com",
+      "User-Agent": "pi-adaptor-provider-discovery/1.0",
+      "anthropic-version": "2023-06-01",
+      "x-api-key": "sk-ant-only"
+    });
+  });
+
+  it("authenticates Google Generative AI with x-goog-api-key and keeps the key out of the URL", async () => {
+    const harness = makeHarness();
+    await discover(
+      harness,
+      "https://generativelanguage.googleapis.com/v1beta",
+      "google-only",
+      "google-generative-ai"
+    );
+    expect(harness.requests[0]?.headers).toEqual({
+      Accept: "application/json",
+      Host: "generativelanguage.googleapis.com",
+      "User-Agent": "pi-adaptor-provider-discovery/1.0",
+      "x-goog-api-key": "google-only"
+    });
+    expect(harness.requests[0]?.path).toBe("/v1beta/models");
+    expect(harness.requests[0]?.path).not.toContain("google-only");
+  });
+
+  it("falls back to Bearer for OpenAI Responses and unknown protocols", async () => {
+    for (const protocol of ["openai-responses", "not-a-protocol"]) {
+      const harness = makeHarness();
+      await discover(harness, "https://provider.unit/v1", "sk-temporary-only", protocol);
+      expect(harness.requests[0]?.headers.Authorization).toBe("Bearer sk-temporary-only");
+    }
   });
 
   it("omits Authorization for a saved provider with authKind none", async () => {

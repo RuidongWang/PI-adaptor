@@ -8,6 +8,7 @@ import { checkServerIdentity, connect as tlsConnect, type TLSSocket } from "node
 import { TextDecoder } from "node:util";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import type { ProviderModel } from "./store.js";
+import { providerApi, type ProviderApi } from "./protocol.js";
 
 export const PROVIDER_DISCOVERY_DEADLINE_MS = 7_000;
 export const PROVIDER_DISCOVERY_MAX_BYTES = 2 * 1024 * 1024;
@@ -65,6 +66,12 @@ export type ProviderDiscoveryInput = {
   baseUrl: string;
   /** Omit for authKind:none. Ad-hoc request schema requires this field separately. */
   apiKey?: string;
+  /**
+   * Wire protocol of the provider being discovered. It decides only how the
+   * list request authenticates (`/models` is shared by all four APIs); unknown
+   * or missing values keep the OpenAI Chat Completions behaviour.
+   */
+  protocol?: string;
 };
 
 export type ProviderDiscoveryResult = { models: ProviderModel[] };
@@ -427,6 +434,29 @@ function normalizeEndpoint(raw: string): NormalizedEndpoint {
     servername: literal ? undefined : hostname.toLowerCase(),
     scheme: url.protocol === "http:" ? "http" : "https"
   };
+}
+
+/**
+ * `<base>/models` lists models for all four APIs, but each API authenticates
+ * differently. Keys stay in headers — never in the URL — so they cannot leak
+ * through request logs or diagnostics.
+ */
+function applyDiscoveryAuth(
+  headers: Record<string, string>,
+  api: ProviderApi,
+  apiKey: string
+): void {
+  switch (api) {
+    case "anthropic-messages":
+      headers["x-api-key"] = apiKey;
+      headers["anthropic-version"] = "2023-06-01";
+      return;
+    case "google-generative-ai":
+      headers["x-goog-api-key"] = apiKey;
+      return;
+    default:
+      headers.Authorization = `Bearer ${apiKey}`;
+  }
 }
 
 function validateApiKey(apiKey: string | undefined): void {
@@ -935,7 +965,7 @@ async function executeDiscovery(
           Host: endpoint.hostHeader,
           "User-Agent": USER_AGENT
         };
-        if (input.apiKey !== undefined) headers.Authorization = `Bearer ${input.apiKey}`;
+        if (input.apiKey !== undefined) applyDiscoveryAuth(headers, providerApi(input.protocol), input.apiKey);
         let response: ProviderDiscoveryResponse;
         try {
           response = await connection.request({
