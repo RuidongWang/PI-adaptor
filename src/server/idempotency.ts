@@ -29,10 +29,28 @@ function stableStringify(value: unknown): string {
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(",")}}`;
 }
 
+/**
+ * Replace credential-bearing values before hashing. Provider keys are accepted
+ * at `provider/create|update` (`provider.apiKey`) and `turn/start` (top-level
+ * `apiKey`), and the digest itself is persisted in `meta/idempotency.json`: even
+ * a hash of a secret is a secret-derived value, so every `apiKey` field becomes
+ * a constant. Two requests that differ only by key therefore share an identity,
+ * which is the intended idempotency semantics.
+ */
+function redactSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => redactSecrets(entry));
+  if (value === null || typeof value !== "object") return value;
+  const redacted: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    redacted[key] = key === "apiKey" ? "[redacted]" : redactSecrets(entry);
+  }
+  return redacted;
+}
+
 /** Digest of the params with the retry-varying `context` removed. */
 export function requestDigest(params: Record<string, unknown>): string {
   const { context: _context, ...rest } = params;
-  return sha256(stableStringify(rest));
+  return sha256(stableStringify(redactSecrets(rest)));
 }
 
 /**

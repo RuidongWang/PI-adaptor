@@ -143,6 +143,25 @@ function idempotencyKeyFrom(params: Record<string, unknown>): string | undefined
   return typeof key === "string" && key.length > 0 ? key : undefined;
 }
 
+/**
+ * Optional transient provider key accepted at the top level of `turn/start`
+ * (contract §8.1). It is never stored: it is used for this call, and — when the
+ * turn is queued — kept only in the in-memory queue entry until it starts.
+ */
+function transientApiKey(params: Record<string, unknown>): string | undefined {
+  const value = params.apiKey;
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new HostError("INVALID_ARGUMENT", "apiKey must be a non-empty string", { field: "apiKey" });
+  }
+  if (value.length > 16_384 || /[\r\n]/.test(value)) {
+    throw new HostError("INVALID_ARGUMENT", "apiKey must be at most 16384 characters without CR/LF", {
+      field: "apiKey"
+    });
+  }
+  return value;
+}
+
 function imageExtension(mimeType: string): string {
   return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
 }
@@ -260,7 +279,18 @@ export class HostService {
   /** turnId → (itemId → partial output) for the in-flight turn's active items. */
   private readonly liveItems = new Map<string, Map<string, LiveItem>>();
   /** sessionId → queued turn starts awaiting the running turn (contract §8.1). */
-  private readonly queuedStarts = new Map<string, Array<{ turnId: string; run: () => Promise<void> }>>();
+  private readonly queuedStarts = new Map<
+    string,
+    Array<{
+      turnId: string;
+      /** Snapshot-only prompt summary so a reattach can render the queued instruction. */
+      text: string;
+      attachmentCount: number;
+      /** Transient client key; lives in memory only and dies with the queue entry. */
+      apiKey?: string;
+      run: () => Promise<void>;
+    }>
+  >();
   private maintenanceTimer: NodeJS.Timeout | undefined;
   private readonly pendingApprovals = new Map<
     string,
@@ -293,7 +323,7 @@ export class HostService {
     this.hostId = config.hostId || uuid();
   }
 
-  async init(): Promise<void> {
+  async init(): Promise<{ removedLegacySecrets: number }> {
     await this.blobs.init();
     await this.journal.load();
     const hostPath = join(this.config.dataDir, "meta", "host.json");
@@ -317,6 +347,11 @@ export class HostService {
         ...(record.settledReason ? { settledReason: record.settledReason } : {})
       });
     }
+    // Provider keys are no longer persisted; older builds kept them under
+    // data/providers/secrets. Remove leftovers so an upgraded host never leaves
+    // a secret on disk. Only the count is reported, never names or contents.
+    const removedLegacySecrets = await this.providers.purgeLegacySecrets();
+    return { removedLegacySecrets };
   }
 
   /** Start periodic media GC. Call from the process entrypoint after `init()`. */
@@ -399,7 +434,9 @@ export class HostService {
           sessionDelete: true,
           nativePiSessions: true,
           directTransport: true,
-          providerDiscovery: true
+          providerDiscovery: true,
+          // Keys are supplied per turn by the client; nothing is stored on the host.
+          providerClientKeys: true
         }
       };
     }
@@ -429,7 +466,9 @@ export class HostService {
         sessionDelete: true,
         nativePiSessions: true,
         directTransport: true,
-        providerDiscovery: true
+        providerDiscovery: true,
+        // Keys are supplied per turn by the client; nothing is stored on the host.
+        providerClientKeys: true
       }
     };
   }
@@ -587,8 +626,15 @@ export class HostService {
         }
         return { deleted: await this.providers.delete(providerId) };
       }
-      case "provider/test":
-        return { ok: (await this.providers.secret(str(params.providerId, "providerId"))) !== null, checkedAt: new Date().toISOString() };
+      case "provider/test": {
+        // No server-side secret exists to verify: an api_key provider can only
+        // be tested by the client, at turn/start. Reporting `ok:false` here is
+        // honest but must not be read as "provider unusable".
+        const providerId = str(params.providerId, "providerId");
+        const provider = (await this.providers.list()).find((entry) => entry.id === providerId);
+        if (!provider) throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
+        return { ok: provider.authKind === "none", checkedAt: new Date().toISOString() };
+      }
       case "provider/discover":
         return this.discoverProvider(params, auth);
       case "skill/list":
@@ -892,10 +938,20 @@ export class HostService {
           toolName: item.toolName ?? null
         }))
       : [];
-    const queuedTurns = (this.queuedStarts.get(sessionId) ?? [])
-      .map((entry) => this.turns.get(entry.turnId))
-      .filter((turn): turn is TurnState => turn !== undefined)
-      .map((turn) => this.publicTurn(turn));
+    const queuedTurns = (this.queuedStarts.get(sessionId) ?? []).flatMap((entry) => {
+      const turn = this.turns.get(entry.turnId);
+      if (!turn) return [];
+      // The queued prompt text is carried by the queue entry, not by the turn
+      // state: it only ever appears in this snapshot (contract §3.6), never in
+      // events, turn/get or idempotency results.
+      return [
+        {
+          ...this.publicTurn(turn),
+          text: entry.text,
+          attachmentCount: entry.attachmentCount
+        }
+      ];
+    });
     return {
       session: summary,
       snapshot: {
@@ -1086,8 +1142,12 @@ export class HostService {
     if (!text && attachments.length === 0) throw new HostError("INVALID_ARGUMENT", "message is empty");
     if (attachments.length > 10) throw new HostError("ATTACHMENT_INVALID", "too many images");
     const admission = params.admission === "queue" ? "queue" : "reject_if_busy";
+    const apiKey = transientApiKey(params);
     const session = await this.requireSession(sessionId);
     if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
+    // Fail before any placeholder/queue entry exists: the client must learn that
+    // it has to supply its key, not watch a queued turn that can never run.
+    await this.assertProviderKey(session, apiKey);
     // Single in-process writer actor per session (contract §6.2): serialize
     // admission, reservation, and queue insertion under the session mutex.
     const plan = await this.sessionLocks.run(sessionId, async () => {
@@ -1107,10 +1167,13 @@ export class HostService {
         const queue = this.queuedStarts.get(sessionId) ?? [];
         queue.push({
           turnId: queuedId,
+          text,
+          attachmentCount: attachments.length,
+          ...(apiKey ? { apiKey } : {}),
           run: async () => {
             const fresh = await this.requireSession(sessionId);
             if (fresh.readOnlyReason) return;
-            await this.launchTurn(fresh, queuedId, text, attachments);
+            await this.launchTurn(fresh, queuedId, text, attachments, apiKey);
           }
         });
         this.queuedStarts.set(sessionId, queue);
@@ -1134,7 +1197,7 @@ export class HostService {
     }
 
     try {
-      const turn = await this.launchTurn(session, plan.turnId, text, attachments);
+      const turn = await this.launchTurn(session, plan.turnId, text, attachments, apiKey);
       return { turn };
     } catch (error) {
       this.turns.delete(plan.turnId);
@@ -1143,12 +1206,37 @@ export class HostService {
     }
   }
 
+  private async sessionProvider(session: SessionMeta) {
+    return session.providerId
+      ? (await this.providers.list()).find((entry) => entry.id === session.providerId)
+      : undefined;
+  }
+
+  /**
+   * A provider with `authKind:"api_key"` requires the transient per-turn key:
+   * the host stores nothing. Providers with `authKind:"none"` ignore the field.
+   */
+  private async assertProviderKey(session: SessionMeta, apiKey: string | undefined): Promise<void> {
+    const provider = await this.sessionProvider(session);
+    if (provider?.authKind !== "api_key" || apiKey) return;
+    throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
+  }
+
   private async launchTurn(
     session: SessionMeta,
     turnId: string,
     text: string,
-    attachmentIds: string[]
+    attachmentIds: string[],
+    apiKey?: string
   ): Promise<TurnState> {
+    // Resolve the provider first: the key check must fail before any session
+    // file is created. Re-resolving here (rather than trusting startTurn's
+    // pre-check) also covers a queued turn whose session was reconfigured while
+    // it waited.
+    const provider = await this.sessionProvider(session);
+    if (provider?.authKind === "api_key" && !apiKey) {
+      throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
+    }
     if (!session.nativePath) {
       const sessionDir = join(this.config.dataDir, "sessions");
       session.nativePath = await this.sessionLocks.run(session.id, () =>
@@ -1156,8 +1244,6 @@ export class HostService {
       );
       await this.meta.updateSession(session.id, { nativePath: session.nativePath });
     }
-    const provider = session.providerId ? (await this.providers.list()).find((entry) => entry.id === session.providerId) : undefined;
-    const providerSecret = provider ? await this.providers.secret(provider.id) : null;
     const images = [];
     for (const id of attachmentIds) {
       const read = await this.blobs.read(id, 0, 20 * 1024 * 1024);
@@ -1181,7 +1267,7 @@ export class HostService {
             id: provider.id,
             name: provider.name,
             baseUrl: provider.baseUrl,
-            apiKey: providerSecret,
+            apiKey: provider.authKind === "api_key" ? (apiKey ?? null) : null,
             authKind: provider.authKind,
             models: provider.models
           }

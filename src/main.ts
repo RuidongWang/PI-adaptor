@@ -42,7 +42,12 @@ const driver = useDeterministic
   ? new DeterministicAgentDriver()
   : new PiAgentDriver(config.agentDir, [join(config.dataDir, "skills", "versions")]);
 const service = new HostService(config, driver);
-await service.init();
+const { removedLegacySecrets } = await service.init();
+// Provider keys are no longer persisted; announce the one-time cleanup by count
+// only (never names or contents) so an operator can confirm the migration ran.
+if (removedLegacySecrets > 0) {
+  process.stdout.write(`PI_HOST_PROVIDER_SECRETS_REMOVED ${JSON.stringify({ count: removedLegacySecrets })}\n`);
+}
 // Seed providers from a key file (test/bootstrap), if configured. Runs before
 // the server accepts connections so a session can bind immediately. Errors are
 // fatal: a misconfigured seed file must fail loudly, not silently skip.

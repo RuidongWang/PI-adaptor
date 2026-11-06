@@ -279,6 +279,7 @@
       "method": "turn/start",
       "params": {
         "sessionId": "x",
+        "apiKey": "x",
         "input": {
           "text": "x"
         },
@@ -597,7 +598,8 @@
           "providers": false,
           "sessionBranches": false,
           "sessionDelete": false,
-          "nativePiSessions": false
+          "nativePiSessions": false,
+          "providerClientKeys": true
         }
       }
     },
@@ -949,7 +951,9 @@
               "status": "queued",
               "createdAt": "2026-10-30T08:00:00Z",
               "settledAt": "2026-10-30T08:00:00Z",
-              "settledReason": "x"
+              "settledReason": "x",
+              "text": "queued message",
+              "attachmentCount": 1
             }
           ],
           "pendingApprovals": [
@@ -1234,8 +1238,9 @@
             "protocol": "x",
             "baseUrl": "https://example.com/v1",
             "authKind": "api_key",
-            "hasApiKey": false,
-            "apiKeyMask": "x",
+            "hasApiKey": true,
+            "apiKeyMask": null,
+            "keyStorage": "client",
             "isDefault": false,
             "models": [
               {
@@ -1269,8 +1274,9 @@
           "protocol": "x",
           "baseUrl": "https://example.com/v1",
           "authKind": "api_key",
-          "hasApiKey": false,
-          "apiKeyMask": "x",
+          "hasApiKey": true,
+          "apiKeyMask": null,
+          "keyStorage": "client",
           "isDefault": false,
           "models": [
             {
@@ -1302,8 +1308,9 @@
           "protocol": "x",
           "baseUrl": "https://example.com/v1",
           "authKind": "api_key",
-          "hasApiKey": false,
-          "apiKeyMask": "x",
+          "hasApiKey": true,
+          "apiKeyMask": null,
+          "keyStorage": "client",
           "isDefault": false,
           "models": [
             {

@@ -489,6 +489,11 @@
             "null"
           ]
         },
+        "keyStorage": {
+          "enum": [
+            "client"
+          ]
+        },
         "isDefault": {
           "type": "boolean"
         },
@@ -694,6 +699,13 @@
             "string",
             "null"
           ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "attachmentCount": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
@@ -3662,6 +3674,12 @@
             "reject_if_busy",
             "queue"
           ]
+        },
+        "apiKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384,
+          "pattern": "^[^\\r\\n]*$"
         },
         "input": {
           "type": "object",

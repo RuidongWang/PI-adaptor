@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -46,7 +46,7 @@ describe("provider seed", () => {
     expect(() => parseProviderSeed({ nope: true })).toThrow(/expected a JSON array/);
   });
 
-  it("creates providers then idempotently updates on re-seed", async () => {
+  it("creates providers then idempotently updates on re-seed without persisting keys", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-seed-"));
     const store = new ProviderStore(root, true);
 
@@ -54,10 +54,13 @@ describe("provider seed", () => {
     expect(first).toEqual({ created: 1, updated: 0 });
 
     const provider = (await store.list())[0]!;
+    // A seeded key is validated and then dropped: the host keeps no key.
     expect(provider.hasApiKey).toBe(true);
-    expect(await store.secret(provider.id)).toBe(ENTRY.apiKey);
+    expect(provider.keyStorage).toBe("client");
+    expect(await readFile(join(root, "providers", "providers.json"), "utf8")).not.toContain(ENTRY.apiKey);
+    await expect(readdir(join(root, "providers", "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
 
-    // Same file again: no duplicate, the record (and its secret) is updated in place.
+    // Same file again: no duplicate, the record is updated in place.
     const rotatedKey = "sk-test-rotated";
     const renamed = { ...ENTRY, name: "DeepSeek Official", apiKey: rotatedKey };
     const second = await applyProviderSeed(store, parseProviderSeed({ providers: [renamed] }));
@@ -66,7 +69,8 @@ describe("provider seed", () => {
     expect(list).toHaveLength(1);
     expect(list[0]!.id).toBe(provider.id);
     expect(list[0]!.name).toBe("DeepSeek Official");
-    expect(await store.secret(provider.id)).toBe(rotatedKey);
+    expect(await readFile(join(root, "providers", "providers.json"), "utf8")).not.toContain(rotatedKey);
+    await expect(readdir(join(root, "providers", "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("fails loudly when the seed file is missing or not JSON", async () => {

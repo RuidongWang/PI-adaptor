@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -22,7 +22,7 @@ describe("provider store", () => {
     await store.delete(second.id);
     expect((await store.list()).find((entry) => entry.id === first.id)?.isDefault).toBe(true);
   });
-  it("stores secrets separately and masks them", async () => {
+  it("keeps provider metadata without persisting the api key", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-"));
     const store = new ProviderStore(root, true);
     const created = await store.create({
@@ -35,17 +35,33 @@ describe("provider store", () => {
       apiKey: "sk-test-secret",
       models: []
     });
+    // The host stores nothing: how the view describes the key changed.
     expect(created.hasApiKey).toBe(true);
     expect(created.apiKey).toBeUndefined();
-    expect(created.apiKeyMask).not.toContain("secret");
-    expect(await store.secret(created.id)).toBe("sk-test-secret");
+    expect(created.apiKeyMask).toBeNull();
+    expect(created.keyStorage).toBe("client");
     expect(await readFile(join(root, "providers", "providers.json"), "utf8")).not.toContain("sk-test-secret");
+    // No secret directory is ever created on a fresh host.
+    await expect(readdir(join(root, "providers", "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
     await store.delete(created.id);
     expect(await store.list()).toHaveLength(0);
-    expect(await store.secret(created.id)).toBeNull();
   });
 
-  it("updates every model while retaining the secret, default flag, and creation time", async () => {
+  it("purges legacy secret files on startup migration and reports only a count", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-purge-"));
+    const store = new ProviderStore(root, true);
+    const secretsDir = join(root, "providers", "secrets");
+    await mkdir(secretsDir, { recursive: true });
+    await writeFile(join(secretsDir, "legacy-1"), "sk-legacy-one");
+    await writeFile(join(secretsDir, "legacy-2"), "sk-legacy-two");
+
+    expect(await store.purgeLegacySecrets()).toBe(2);
+    await expect(readdir(secretsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    // Idempotent: a second startup has nothing left to delete.
+    expect(await store.purgeLegacySecrets()).toBe(0);
+  });
+
+  it("updates every model while retaining the default flag and creation time", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-update-"));
     const store = new ProviderStore(root, true);
     const created = await store.create({
@@ -78,8 +94,10 @@ describe("provider store", () => {
     expect(updated.updatedAt).toBe("2026-01-02T00:00:00.000Z");
     expect(updated.isDefault).toBe(true);
     expect(updated.apiKey).toBeUndefined();
-    expect(await store.secret(created.id)).toBe("sk-test-update-secret");
+    expect(updated.keyStorage).toBe("client");
+    // An update carrying a key still leaves nothing on disk.
     expect(await readFile(join(root, "providers", "providers.json"), "utf8")).not.toContain("sk-test-update-secret");
+    await expect(readdir(join(root, "providers", "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
   });
   it("rejects invalid auth combinations", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-"));
@@ -156,7 +174,7 @@ async function persistedText(path: string): Promise<string> {
 }
 
 describe("HostService provider/discover", () => {
-  it("resolves saved providers, preserves authKind none, and returns normalized models", async () => {
+  it("discovers saved providers only when they need no key, and never reads a server secret", async () => {
     const { service, harness, auth } = await makeDiscoveryService();
     const saved = await service.providers.create({
       name: "Saved", vendorKey: "saved", type: "openai_compatible", protocol: "openai_compatible",
@@ -166,19 +184,25 @@ describe("HostService provider/discover", () => {
       name: "None", vendorKey: "none", type: "openai_compatible", protocol: "openai_compatible",
       baseUrl: "https://provider.unit/v2", authKind: "none", models: []
     });
-    const result = await service.handle("provider/discover", {
+    // A saved api_key provider cannot authenticate: the host never stored its key.
+    await expect(service.handle("provider/discover", {
       providerId: saved.id,
       context: { requestId: "req_saved" }
+    }, auth)).rejects.toMatchObject({
+      code: "PROVIDER_SECRET_MISSING",
+      data: expect.objectContaining({ field: "providerId" })
+    });
+    expect(harness.requests).toHaveLength(0);
+
+    const result = await service.handle("provider/discover", {
+      providerId: none.id,
+      context: { requestId: "req_none" }
     }, auth) as { models: Array<{ id: string }> };
     expect(result.models.map((model) => model.id)).toEqual(["model-a", "model-b"]);
     expect(result).not.toHaveProperty("baseUrl");
     expect(result).not.toHaveProperty("apiKey");
-    expect(harness.requests[0]?.path).toBe("/v1/models");
-    expect(harness.requests[0]?.headers.Authorization).toBe("Bearer saved-secret");
-
-    await service.handle("provider/discover", { providerId: none.id }, auth);
-    expect(harness.requests[1]?.path).toBe("/v2/models");
-    expect(harness.requests[1]?.headers).not.toHaveProperty("Authorization");
+    expect(harness.requests[0]?.path).toBe("/v2/models");
+    expect(harness.requests[0]?.headers).not.toHaveProperty("Authorization");
   });
 
   it("uses an ad-hoc key only in memory without provider or idempotency persistence", async () => {
@@ -228,7 +252,8 @@ describe("HostService provider/discover", () => {
       name: "Saved", vendorKey: "saved", type: "openai_compatible", protocol: "openai_compatible",
       baseUrl: "https://provider.unit", authKind: "api_key", apiKey: "saved-secret", models: []
     });
-    await rm(join(service.config.dataDir, "providers", "secrets", saved.id));
+    // Creating a provider writes no secret, so nothing can be deleted to make it "missing".
+    expect(await readdir(join(service.config.dataDir, "providers"))).not.toContain("secrets");
     await expect(service.handle("provider/discover", { providerId: saved.id }, auth)).rejects.toMatchObject({
       code: "PROVIDER_SECRET_MISSING",
       data: expect.objectContaining({ field: "providerId" })
@@ -250,27 +275,43 @@ describe("HostService provider/discover", () => {
     }
   });
 
-  it("takes discovery credentials and origin as one snapshot serialized with updates", async () => {
+  it("takes a saved provider's endpoint as one snapshot serialized with updates", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-snapshot-"));
     const store = new ProviderStore(root, true);
     const created = await store.create({
       name: "Original", vendorKey: "snapshot", type: "openai_compatible", protocol: "openai_compatible",
-      baseUrl: "https://provider-a.unit/v1", authKind: "api_key", apiKey: "key-a", models: []
+      baseUrl: "https://provider-a.unit/v1", authKind: "none", models: []
     });
     const update = {
       name: "Updated", vendorKey: "snapshot", type: "openai_compatible", protocol: "openai_compatible",
-      baseUrl: "https://provider-b.unit/v1", authKind: "api_key" as const, apiKey: "key-b", models: []
+      baseUrl: "https://provider-b.unit/v1", authKind: "none" as const, models: []
     };
     for (let index = 0; index < 20; index++) {
       const [snapshot] = await Promise.all([
         store.discoveryInput(created.id),
         index % 2 === 0 ? store.update(created.id, update) : Promise.resolve(null)
       ]);
-      expect(
-        (snapshot.baseUrl === "https://provider-a.unit/v1" && snapshot.apiKey === "key-a") ||
-        (snapshot.baseUrl === "https://provider-b.unit/v1" && snapshot.apiKey === "key-b")
-      ).toBe(true);
+      expect(["https://provider-a.unit/v1", "https://provider-b.unit/v1"]).toContain(snapshot.baseUrl);
+      expect(snapshot.apiKey).toBeUndefined();
     }
+  });
+
+  it("reports provider/test ok only for providers that need no client key", async () => {
+    const { service, auth } = await makeDiscoveryService();
+    const none = await service.providers.create({
+      name: "None", vendorKey: "none", type: "openai_compatible", protocol: "openai_compatible",
+      baseUrl: "https://provider.unit/v2", authKind: "none", models: []
+    });
+    const keyed = await service.providers.create({
+      name: "Keyed", vendorKey: "keyed", type: "openai_compatible", protocol: "openai_compatible",
+      baseUrl: "https://provider.unit/v1", authKind: "api_key", apiKey: "key", models: []
+    });
+    expect(await service.handle("provider/test", { providerId: none.id }, auth)).toMatchObject({ ok: true });
+    expect(await service.handle("provider/test", { providerId: keyed.id }, auth)).toMatchObject({ ok: false });
+    await expect(service.handle("provider/test", { providerId: "missing" }, auth)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      data: expect.objectContaining({ field: "providerId" })
+    });
   });
 
   it("includes saved provider snapshot reads in the single seven-second deadline", async () => {

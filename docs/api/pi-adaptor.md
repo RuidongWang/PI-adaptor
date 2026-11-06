@@ -18,7 +18,7 @@
 2. 除 `connection/initialize` 与 `connection/pair` 外，所有请求都要求设备令牌。
 3. 所有写操作都携带 `context.requestId`；可重试写操作还必须携带 `context.idempotencyKey`。
 4. 事件只通过持久游标去重；不得用墙钟时间判断新旧。
-5. provider 密钥永不进入响应、日志、事件或错误体。
+5. provider 密钥不落 Host 持久化：`provider/create|update` 与 seed 只校验并丢弃 `apiKey`，`turn/start` 的 transient `apiKey` 仅存在于请求与进程内存（排队时随队列条目）；密钥永不进入响应、日志、事件、错误体或 `meta/idempotency.json`（请求 digest 对 `apiKey` 脱敏）。
 6. 运行中会话不得被静默换 provider/model，也不得被删除。
 7. 删除会话前必须确认目标 ID；删除后不得继续返回该会话。
 
@@ -109,7 +109,8 @@
     "providers": true,
     "sessionBranches": true,
     "sessionDelete": true,
-    "nativePiSessions": true
+    "nativePiSessions": true,
+    "providerClientKeys": true
   }
 }
 ```
@@ -326,6 +327,14 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 {"settledReason":"agent_restarted_unconfirmed"}
 ```
 
+`queued` 状态的 turn 在 `session/attach` 快照的 `queuedTurns[]` 中额外携带两个字段（仅快照）：
+
+```json
+{"text":"排队中的指令正文","attachmentCount":1}
+```
+
+`text` 是入队时的指令正文，`attachmentCount` 是入队时声明的附件数量。二者不出现在 `turn/start` 响应、`turn/get`、事件或幂等结果中；Host 重启后队列消失（对应 turn 变为 `uncertain`），正文不可恢复。
+
 ### 3.7 Attachment
 
 ```json
@@ -399,11 +408,11 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 | `turn/cancel` | owner | 是 | 取消排队 turn |
 | `approval/respond` | owner | 是 | 审批 |
 | `input/respond` | owner | 是 | AskTool 回答 |
-| `provider/list` | owner | 否 | 掩码 provider 列表 |
+| `provider/list` | owner | 否 | provider 列表（无服务端密钥） |
 | `provider/create` | owner | 是 | 新建 provider |
-| `provider/update` | owner | 是 | 更新 provider/替换密钥 |
+| `provider/update` | owner | 是 | 更新 provider 元数据（apiKey 只校验不入库） |
 | `provider/delete` | owner | 是 | 删除 provider |
-| `provider/test` | owner | 否 | 验证认证/模型 |
+| `provider/test` | owner | 否 | 验证认证/模型（Host 无服务端密钥） |
 | `provider/discover` | owner | 否 | 发现模型 |
 | `skill/list` | owner | 否 | 已安装 Skill |
 | `skill/get` | owner | 否 | Skill 详情 |
@@ -642,6 +651,8 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 
 `admission`：`reject_if_busy`（默认）或 `queue`。结果：`{"turn":{}}`。
 
+可选顶层 `apiKey`（字符串，1..16384 字符，不得含 CR/LF）：会话绑定 provider 的 `authKind==="api_key"` 时**必须**提供，否则返回 `PROVIDER_SECRET_MISSING`（`data.field:"apiKey"`），且不会创建 turn；`authKind==="none"` 时该字段被忽略。密钥只用于本次执行（排队时留在 Host 进程内存的队列条目里），不落盘、不进响应/事件/`turn/get`/幂等结果。
+
 `attachments` 只能引用同会话、`ready`、总数 ≤10 的图片。单条消息所有图片的声明字节总和不得超过 200 MiB（209,715,200 bytes）。纯图片消息允许 `text:""`。
 
 ### 8.2 中断与取消
@@ -691,7 +702,8 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
   "baseUrl": "https://api.deepseek.com/v1",
   "authKind": "api_key",
   "hasApiKey": true,
-  "apiKeyMask": "sk-…1234",
+  "apiKeyMask": null,
+  "keyStorage": "client",
   "isDefault": false,
   "models": [
     {
@@ -709,9 +721,11 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 }
 ```
 
+`hasApiKey` 的语义是「该 provider 需要客户端在 `turn/start` 提供 API key」，即 `authKind === "api_key"`；Host 不保存任何密钥，所以 `apiKeyMask` 恒为 `null`，`keyStorage` 恒为 `"client"`。旧客户端据 `hasApiKey` 仍应把 provider 视为可用（不得因本字段把它标成 `unavailable`）；本机没有密钥时，发送会以 `PROVIDER_SECRET_MISSING` 显式失败。
+
 ### 9.2 `provider/list`
 
-请求：`{}`。结果：`{"providers":[],"revision":1}`。任何密钥明文都不得出现。
+请求：`{}`。结果：`{"providers":[],"revision":1}`。任何密钥明文都不得出现；Host 也不持有可读的密钥。
 
 ### 9.3 `provider/create` / `provider/update`
 
@@ -733,7 +747,7 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 }
 ```
 
-`provider/update` 还需 `providerId`。`apiKey` 省略表示保留旧密钥，空字符串表示拒绝。结果：`{"provider":{}}`。
+`provider/update` 还需 `providerId`。`apiKey` 只做校验：`authKind==="api_key"` 时必填、`none` 时禁止，校验后即丢弃；Host 从不保存密钥，因此省略 `apiKey` 不会“保留”任何服务端密钥。结果：`{"provider":{}}`。
 
 Host 不自动导入旧 `~/.pi-desktop` provider 或密钥；现有配置必须通过 iOS 重新导入或录入。响应和日志永远不得返回密钥明文。
 
@@ -743,11 +757,18 @@ v2 CRUD 首版只接受 `authKind: api_key | none`。若只读外部 provider �
 
 ### 9.4 `provider/delete`
 
-请求：`{"providerId":"id","confirmProviderId":"id","context":{"requestId":"req","idempotencyKey":"key"}}`。结果：`{"deleted":true}`。若目标仍是默认项，Host 清空默认项但不自动选择替代项。
+请求：`{"providerId":"id","confirmProviderId":"id","context":{"requestId":"req","idempotencyKey":"key"}}`。结果：`{"deleted":true}`。若目标仍是默认项，Host 清空默认项但不自动选择替代项。删除不需要清理服务端密钥（从未落盘）；客户端应自行清除本机保存的对应密钥。
 
 ### 9.5 `provider/test` / `provider/discover`
 
-请求：`{"providerId":"id"}`。`test` 结果：`{"ok":true,"checkedAt":"..."}` 或失败码。`discover` 结果：`{"models":[]}`，仅返回发现结果，必须由客户端显式保存后才改变 provider。
+`provider/test` 请求 `{"providerId":"id"}`：`authKind==="none"` → `{"ok":true,"checkedAt":"..."}`；`authKind==="api_key"` → `{"ok":false,"checkedAt":"..."}`（Host 没有密钥可供验证，`ok:false` 不代表 provider 不可用）；未知 `providerId` → `NOT_FOUND`。本版本不提供 `apiKey` 参数。
+
+`provider/discover` 仍是两种互斥形态：
+
+- `{"providerId":"id"}`：仅 `authKind==="none"` 可用；`api_key` provider 返回 `PROVIDER_SECRET_MISSING`（`data.field:"providerId"`），因为 Host 不再持有密钥。
+- `{"baseUrl":"…","apiKey":"…"}`：日常发现模型的路径，密钥只在该请求内使用，不落盘、不进幂等或响应。
+
+`discover` 结果：`{"models":[]}`，仅返回发现结果，必须由客户端显式保存后才改变 provider。
 
 ## 10. Skill 管理
 
@@ -880,7 +901,7 @@ Git 来源只允许公开 HTTPS URL；拒绝私网/回环/链路本地目标和�
 | `-32013` | `SESSION_BUSY` | 会话运行中/有队列 | 否 |
 | `-32014` | `SESSION_READ_ONLY` | 会话损坏/不支持/外部占用 | 否 |
 | `-32015` | `PROVIDER_NOT_CONFIGURED` | 目标 provider/model 不可用 | 否 |
-| `-32016` | `PROVIDER_SECRET_MISSING` | 密钥缺失 | 否 |
+| `-32016` | `PROVIDER_SECRET_MISSING` | 客户端未在 `turn/start` 提供密钥，或 saved provider 发现无服务端密钥 | 否 |
 | `-32017` | `PROVIDER_IN_USE` | 运行中会话使用中 | 是 |
 | `-32018` | `SKILL_SOURCE_UNAVAILABLE` | Git/目录不可达 | 是 |
 | `-32019` | `SKILL_CONFLICT` | 同名安装冲突 | 否 |
@@ -904,6 +925,8 @@ Git 来源只允许公开 HTTPS URL；拒绝私网/回环/链路本地目标和�
 5. 旧 v1 Host 不满足本契约；iOS 必须依据子协议或握手失败给出明确升级提示。
 6. Host 记录、Keychain account 与 iOS SQLite 复合键必须包含协议大版本；v1 与 v2 Host 不得共享事件游标、缓存主键或设备令牌。
 7. Host 进程重启后必须更换事件 `epoch`；未完成 turn 先确认/终止旧进程组。能证明已停止且未产生后续输出时标记 `interrupted`，否则标记 `uncertain` 并带 `settledReason:"agent_restarted_unconfirmed"`；不得自动续跑。
+8. Host 不持久化 provider API key（本版本起）：`create/update/seed` 的 `apiKey` 只校验后丢弃；`turn/start` 必须携带 transient `apiKey`（会话 provider `authKind==="api_key"` 时），否则返回 `PROVIDER_SECRET_MISSING`。旧客户端不传该字段，服务端与客户端必须一起升级；`initialize.capabilities.providerClientKeys=true` 供新客户端识别。升级启动时会一次性删除遗留的 `data/providers/secrets/`（只记录 `PI_HOST_PROVIDER_SECRETS_REMOVED {"count":N}`）。
+9. 幂等 `context.idempotencyKey` 的 digest 对 `apiKey`（含嵌套）脱敏后再哈希；不同密钥、其余参数相同的重试视为同一请求。升级前已写入的旧 digest 不做回写清洗（无法还原），只保证新写入不再含密钥派生值。
 
 ## 14. 验收标准映射
 
@@ -922,9 +945,9 @@ Git 来源只允许公开 HTTPS URL；拒绝私网/回环/链路本地目标和�
 | AC-11 | `item.delta`、`tool.*` | 流式事件断言 |
 | AC-12 | `turn/interrupt` | 确认前后状态与幂等 |
 | AC-13 | `provider/create`、`provider/list` | 跨进程重启查询 |
-| AC-14 | `provider/update`、`turn/start` | 密钥替换与解析快照 |
-| AC-15 | `provider/delete` | 删除矩阵/密钥清除 |
-| AC-16 | provider 视图/日志 | Key canary |
+| AC-14 | `provider/update`、`turn/start` | client key 透传与解析快照 |
+| AC-15 | `provider/delete` | 删除矩阵（无服务端密钥可清除） |
+| AC-16 | provider 视图/日志 | Key canary（响应/日志/幂等文件无密钥） |
 | AC-17 | provider 错误码 | 超时/不确定响应 |
 | AC-18 | `session/configure`、审批 | ask/auto 行为矩阵 |
 | AC-19 | `approval/respond` | allow-once/session/deny |
@@ -947,6 +970,7 @@ Git 来源只允许公开 HTTPS URL；拒绝私网/回环/链路本地目标和�
 - [x] 每个写操作都有幂等/确认规则
 - [x] 错误码覆盖校验、鉴权、不存在、冲突、资源超限和服务端失败
 - [x] 图片与密钥不会泄漏到日志
+- [x] provider 密钥不落盘：create/update/seed 只校验、`turn/start` transient、启动清理遗留 secrets、idempotency digest 脱敏
 - [x] 原生 Pi 双向互操作与外部写入/SIGKILL 注入有自动化测试计划
 - [x] 设备撤销会关闭活跃连接
 - [x] Skill 版本目录与逐 turn reload 语义可验证

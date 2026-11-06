@@ -1,7 +1,6 @@
 import { join } from "node:path";
-import { rm } from "node:fs/promises";
 import { HostError } from "../errors.js";
-import { readSecret, writeSecret } from "../security/secrets.js";
+import { purgeSecretDirectory } from "../security/secrets.js";
 import { assertPublicHttpsEndpoint } from "../security/endpoint.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import { uuid } from "../util/id.js";
@@ -37,11 +36,12 @@ type ProviderRecord = ProviderInput & {
 type ProviderFile = { version: 1; providers: ProviderRecord[] };
 const EMPTY: ProviderFile = { version: 1, providers: [] };
 
-function mask(key: string): string {
-  if (key.length <= 8) return "••••";
-  return `${key.slice(0, 3)}…${key.slice(-4)}`;
-}
-
+/**
+ * Provider metadata only. API keys are never persisted: `create`/`update`
+ * still validate the shape of `apiKey` (required for `api_key`, forbidden for
+ * `none`) and then discard it, and turns receive a transient client-supplied
+ * key. `keyStorage:"client"` tells clients where the key lives.
+ */
 export class ProviderStore {
   private pending: Promise<void> = Promise.resolve();
 
@@ -52,11 +52,12 @@ export class ProviderStore {
   }
 
   private readonly index: string;
-  private readonly secretsDir: string;
+  /** Legacy location written by older builds; only read to migrate on startup. */
+  private readonly legacySecretsDir: string;
 
   constructor(dataDir: string, private readonly allowPrivateHosts = false) {
     this.index = join(dataDir, "providers", "providers.json");
-    this.secretsDir = join(dataDir, "providers", "secrets");
+    this.legacySecretsDir = join(dataDir, "providers", "secrets");
   }
 
   private async load(): Promise<ProviderFile> {
@@ -69,18 +70,21 @@ export class ProviderStore {
     await writeJsonFileAtomic(this.index, value, 0o600);
   }
 
-  private async view(record: ProviderRecord) {
-    const key = await readSecret(join(this.secretsDir, record.id));
+  private view(record: ProviderRecord) {
     return {
       ...record,
       apiKey: undefined,
-      hasApiKey: key !== null,
-      apiKeyMask: key ? mask(key) : null
+      // The key is not stored server-side, so "has an API key" now means "this
+      // provider requires a client-supplied key at turn/start". Keeping it true
+      // for api_key providers stops older clients from marking them unavailable.
+      hasApiKey: record.authKind === "api_key",
+      apiKeyMask: null,
+      keyStorage: "client" as const
     };
   }
 
   async list() {
-    return Promise.all((await this.load()).providers.map((record) => this.view(record)));
+    return (await this.load()).providers.map((record) => this.view(record));
   }
 
   async create(input: ProviderInput, now = new Date()) {
@@ -104,7 +108,6 @@ export class ProviderStore {
         updatedAt: now.toISOString(),
         isDefault: data.providers.length === 0
       };
-      if (input.apiKey) await writeSecret(join(this.secretsDir, record.id), input.apiKey);
       data.providers.push(record);
       await this.save(data);
       return this.view(record);
@@ -121,7 +124,6 @@ export class ProviderStore {
         throw new HostError("INVALID_ARGUMENT", "apiKey is forbidden for none provider");
       }
       Object.assign(record, input, { apiKey: undefined, updatedAt: now.toISOString() });
-      if (input.apiKey) await writeSecret(join(this.secretsDir, id), input.apiKey);
       await this.save(data);
       return this.view(record);
     });
@@ -134,13 +136,13 @@ export class ProviderStore {
       if (index < 0) throw new HostError("NOT_FOUND", "provider not found");
       data.providers.splice(index, 1);
       await this.save(data);
-      await rm(join(this.secretsDir, id), { force: true });
       return true;
     });
   }
 
-  async secret(id: string): Promise<string | null> {
-    return readSecret(join(this.secretsDir, id));
+  /** Delete provider secrets written by older builds. Returns how many files were removed. */
+  async purgeLegacySecrets(): Promise<number> {
+    return this.serialized(() => purgeSecretDirectory(this.legacySecretsDir));
   }
 
   /** Atomic endpoint/auth snapshot for provider/discover, serialized with update/delete. */
@@ -152,11 +154,11 @@ export class ProviderStore {
         throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
       }
       if (provider.authKind === "none") return { baseUrl: provider.baseUrl };
-      const apiKey = await readSecret(join(this.secretsDir, id));
-      if (apiKey === null) {
-        throw new HostError("PROVIDER_SECRET_MISSING", "provider secret is missing", { field: "providerId" });
-      }
-      return { baseUrl: provider.baseUrl, apiKey };
+      // Host no longer holds the key, so a saved-provider discovery cannot
+      // authenticate. Clients should use the ad-hoc `baseUrl + apiKey` form.
+      throw new HostError("PROVIDER_SECRET_MISSING", "provider secret is not stored on the host", {
+        field: "providerId"
+      });
     });
   }
 }

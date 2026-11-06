@@ -1,33 +1,21 @@
-import { chmod, mkdir, open, readFile, rename } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { readdir, rm } from "node:fs/promises";
 
-export async function readSecret(path: string): Promise<string | null> {
+/**
+ * Remove a legacy provider-secret directory left by older builds.
+ *
+ * Host no longer persists provider API keys (transient per-turn instead), so
+ * startup migrates old installations by deleting the whole directory. Only the
+ * number of removed entries is reported: names and contents must never reach a
+ * log, response or error body.
+ */
+export async function purgeSecretDirectory(directory: string): Promise<number> {
+  let entries: string[];
   try {
-    return (await readFile(path, "utf8")).trimEnd();
+    entries = await readdir(directory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
     throw error;
   }
-}
-
-export async function writeSecret(path: string, value: string): Promise<void> {
-  const dir = dirname(path);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const temp = join(dir, `.${randomUUID()}.tmp`);
-  const handle = await open(temp, "wx", 0o600);
-  try {
-    await handle.writeFile(value, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await chmod(temp, 0o600);
-  await rename(temp, path);
-  const dirHandle = await open(dir, "r");
-  try {
-    await dirHandle.sync();
-  } finally {
-    await dirHandle.close();
-  }
+  await rm(directory, { recursive: true, force: true });
+  return entries.length;
 }

@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -39,9 +40,83 @@ class ControlledDriver implements AgentDriver {
     this.pending.delete(turnId);
     pending.resolveWait();
   }
+
+  requestFor(turnId: string): AgentTurnRequest | undefined {
+    return this.pending.get(turnId)?.request;
+  }
 }
 
-async function setup(driver: AgentDriver) {
+/** Transient provider key used by the key-handling tests; must never hit disk. */
+const TEST_TRANSIENT_KEY = "sk-test-transient-key";
+
+async function createTestProvider(
+  service: HostService,
+  auth: AuthContext,
+  authKind: "api_key" | "none",
+  vendorKey: string
+): Promise<string> {
+  const created = (await service.handle(
+    "provider/create",
+    {
+      provider: {
+        name: "Mock",
+        vendorKey,
+        type: "openai_compatible",
+        protocol: "openai_compatible",
+        baseUrl: "https://example.com/v1",
+        authKind,
+        ...(authKind === "api_key" ? { apiKey: TEST_TRANSIENT_KEY } : {}),
+        models: [
+          {
+            id: "mock-model",
+            displayName: "Mock Model",
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+            thinkingLevels: [],
+            defaultThinkingLevel: null,
+            supportsImages: false
+          }
+        ]
+      }
+    },
+    auth
+  )) as { provider: { id: string } };
+  return created.provider.id;
+}
+
+/** Upload a tiny ready attachment through the real attachment path. */
+async function uploadPng(service: HostService, auth: AuthContext, sessionId: string): Promise<string> {
+  const bytes = Buffer.from("fake-png-bytes");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const created = (await service.handle(
+    "attachment/create",
+    { sessionId, fileName: "a.png", mimeType: "image/png", byteLength: bytes.length, sha256 },
+    auth
+  )) as { attachmentId: string };
+  await service.handle(
+    "attachment/chunk",
+    { attachmentId: created.attachmentId, offset: 0, dataBase64: bytes.toString("base64") },
+    auth
+  );
+  await service.handle("attachment/complete", { attachmentId: created.attachmentId, sha256 }, auth);
+  return created.attachmentId;
+}
+
+/** Concatenate every regular file under `dir` so a test can prove a value never landed. */
+async function persistedText(dir: string): Promise<string> {
+  let output = "";
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const child = join(dir, entry.name);
+    if (entry.isDirectory()) output += await persistedText(child);
+    else if (entry.isFile()) output += await readFile(child, "utf8");
+  }
+  return output;
+}
+
+async function setup(
+  driver: AgentDriver,
+  options: { provider?: "api_key" | "none" } = {}
+) {
   const root = await mkdtemp(join(tmpdir(), "pi-adaptor-hardening-"));
   const project = join(root, "project");
   await mkdir(project, { recursive: true });
@@ -67,10 +142,20 @@ async function setup(driver: AgentDriver) {
     }
   };
   const projectRecord = await service.meta.registerProject(project, "project");
-  const session = (await service.handle("session/create", { projectId: projectRecord.id }, auth)) as {
+  const providerId = options.provider
+    ? await createTestProvider(service, auth, options.provider, `mock-${options.provider}`)
+    : undefined;
+  const session = (await service.handle(
+    "session/create",
+    {
+      projectId: projectRecord.id,
+      ...(providerId ? { providerId, modelId: "mock-model" } : {})
+    },
+    auth
+  )) as {
     session: { id: string };
   };
-  return { root, config, service, auth, sessionId: session.session.id };
+  return { root, config, service, auth, sessionId: session.session.id, providerId };
 }
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -616,5 +701,169 @@ describe("session history pagination", () => {
     )) as { items: Array<{ id: string }>; hasMore: boolean };
     expect(atStart.items).toEqual([]);
     expect(atStart.hasMore).toBe(false);
+  });
+});
+
+describe("transient provider keys", () => {
+  it("rejects a turn for an api_key provider without a key and leaves no turn behind", async () => {
+    const { service, auth, sessionId } = await setup(new DeterministicAgentDriver(), { provider: "api_key" });
+    const subscription = (await service.handle(
+      "events/subscribe",
+      { scope: "session", sessionId },
+      auth
+    )) as { subscriptionId: string };
+    const events: { kind: string }[] = [];
+    service.setSubscriptionSink(subscription.subscriptionId, (event) => events.push(event as never));
+
+    await expect(
+      service.handle("turn/start", { sessionId, input: { text: "hi" } }, auth)
+    ).rejects.toMatchObject({
+      code: "PROVIDER_SECRET_MISSING",
+      data: expect.objectContaining({ field: "apiKey" })
+    });
+
+    const attached = (await service.handle("session/attach", { sessionId }, auth)) as {
+      snapshot: { activeTurn: unknown; queuedTurns: unknown[] };
+    };
+    expect(attached.snapshot.activeTurn).toBeNull();
+    expect(attached.snapshot.queuedTurns).toEqual([]);
+    expect(events.filter((event) => event.kind === "turn.started")).toHaveLength(0);
+  });
+
+  it("passes the transient key to the driver and never writes it to disk", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId, config } = await setup(driver, { provider: "api_key" });
+    const started = (await service.handle(
+      "turn/start",
+      { sessionId, apiKey: TEST_TRANSIENT_KEY, input: { text: "hello" } },
+      auth
+    )) as { turn: { id: string; status: string } };
+    expect(started.turn.status).toBe("running");
+    expect(driver.requestFor(started.turn.id)?.provider?.apiKey).toBe(TEST_TRANSIENT_KEY);
+    expect(await persistedText(config.dataDir)).not.toContain(TEST_TRANSIENT_KEY);
+  });
+
+  it("rejects malformed transient keys", async () => {
+    const { service, auth, sessionId } = await setup(new DeterministicAgentDriver(), { provider: "api_key" });
+    for (const apiKey of ["", "line\nbreak", "x".repeat(16_385)]) {
+      await expect(
+        service.handle("turn/start", { sessionId, apiKey, input: { text: "hi" } }, auth)
+      ).rejects.toMatchObject({
+        code: "INVALID_ARGUMENT",
+        data: expect.objectContaining({ field: "apiKey" })
+      });
+    }
+  });
+
+  it("ignores a transient key for a provider that needs none", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver, { provider: "none" });
+    const started = (await service.handle(
+      "turn/start",
+      { sessionId, apiKey: "unused-key", input: { text: "hi" } },
+      auth
+    )) as { turn: { id: string } };
+    expect(driver.requestFor(started.turn.id)?.provider?.apiKey).toBeNull();
+  });
+
+  it("does not persist a key-derived digest for an idempotent turn", async () => {
+    const { service, auth, sessionId, config } = await setup(new ControlledDriver(), { provider: "api_key" });
+    const firstKey = "sk-first-transient-key";
+    const secondKey = "sk-second-transient-key";
+    const first = (await service.handle(
+      "turn/start",
+      {
+        sessionId,
+        apiKey: firstKey,
+        input: { text: "hi" },
+        context: { requestId: "r1", idempotencyKey: "redacted-k1" }
+      },
+      auth
+    )) as { turn: { id: string } };
+    // A different key is not a different request: the redacted digest replays
+    // the first result instead of raising IDEMPOTENCY_CONFLICT.
+    const replay = (await service.handle(
+      "turn/start",
+      {
+        sessionId,
+        apiKey: secondKey,
+        input: { text: "hi" },
+        context: { requestId: "r2", idempotencyKey: "redacted-k1" }
+      },
+      auth
+    )) as { turn: { id: string } };
+    expect(replay.turn.id).toBe(first.turn.id);
+
+    const idempotencyText = await readFile(join(config.dataDir, "meta", "idempotency.json"), "utf8");
+    for (const key of [firstKey, secondKey]) {
+      expect(idempotencyText).not.toContain(key);
+      expect(idempotencyText).not.toContain(createHash("sha256").update(key).digest("hex"));
+    }
+    expect(await persistedText(config.dataDir)).not.toContain(firstKey);
+  });
+});
+
+describe("queued turn snapshot", () => {
+  it("returns queued text and attachment count in the snapshot only, and drops them on cancel", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId, config } = await setup(driver, { provider: "api_key" });
+    await service.handle(
+      "turn/start",
+      { sessionId, apiKey: TEST_TRANSIENT_KEY, input: { text: "first" } },
+      auth
+    );
+    const attachmentId = await uploadPng(service, auth, sessionId);
+    const queued = (await service.handle(
+      "turn/start",
+      {
+        sessionId,
+        admission: "queue",
+        apiKey: TEST_TRANSIENT_KEY,
+        input: { text: "queue-one", attachments: [attachmentId] }
+      },
+      auth
+    )) as { turn: { id: string; status: string; text?: string; attachmentCount?: number } };
+    expect(queued.turn.status).toBe("queued");
+    // D2: the prompt text never rides on the turn/start response.
+    expect(queued.turn.text).toBeUndefined();
+    expect(queued.turn.attachmentCount).toBeUndefined();
+
+    const attached = (await service.handle("session/attach", { sessionId }, auth)) as {
+      snapshot: { queuedTurns: Array<Record<string, unknown>> };
+    };
+    expect(attached.snapshot.queuedTurns).toHaveLength(1);
+    expect(attached.snapshot.queuedTurns[0]).toMatchObject({
+      id: queued.turn.id,
+      status: "queued",
+      text: "queue-one",
+      attachmentCount: 1
+    });
+    // The transient key lives in memory only.
+    expect(await persistedText(config.dataDir)).not.toContain(TEST_TRANSIENT_KEY);
+    expect(await persistedText(config.dataDir)).not.toContain("queue-one");
+
+    await service.handle("turn/cancel", { turnId: queued.turn.id }, auth);
+    const after = (await service.handle("session/attach", { sessionId }, auth)) as {
+      snapshot: { queuedTurns: unknown[] };
+    };
+    expect(after.snapshot.queuedTurns).toEqual([]);
+    expect(await persistedText(config.dataDir)).not.toContain(TEST_TRANSIENT_KEY);
+  });
+});
+
+describe("provider secret migration", () => {
+  it("removes legacy secret files on init, reports only a count, and is idempotent", async () => {
+    const { config } = await setup(new DeterministicAgentDriver());
+    const secretsDir = join(config.dataDir, "providers", "secrets");
+    await mkdir(secretsDir, { recursive: true });
+    await writeFile(join(secretsDir, "legacy-1"), "sk-legacy-one");
+    await writeFile(join(secretsDir, "legacy-2"), "sk-legacy-two");
+
+    const restarted = new HostService(config, new DeterministicAgentDriver());
+    expect(await restarted.init()).toEqual({ removedLegacySecrets: 2 });
+    await expect(readdir(secretsDir)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const second = new HostService(config, new DeterministicAgentDriver());
+    expect(await second.init()).toEqual({ removedLegacySecrets: 0 });
   });
 });

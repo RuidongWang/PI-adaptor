@@ -124,10 +124,11 @@ pnpm start -- --home "$HOME/.pi-adaptor" --port 19445 --pair
 
 ## Security
 
-- Data directories are `0700`; token and secret files are `0600`.
+- Data directories are `0700`; token files are `0600`.
 - Device and pairing tokens are stored only as SHA-256 hashes.
-- Provider keys are never returned by API responses and are stored outside the
-  provider index.
+- Provider API keys are never persisted: `provider/create|update` only validate
+  them, `turn/start` carries a transient key used for that turn, and legacy
+  `data/providers/secrets/` is deleted on startup.
 - Revoking a device closes its active WebSocket connections.
 - WebSocket frames are text-only and bounded to 1 MiB.
 
@@ -140,5 +141,6 @@ pnpm build
 ```
 
 The test suite includes the frozen v2 contract, real Pi v3 JSONL append/branch,
-project/session metadata, token rotation, media uploads/GC, provider secrets,
-Skill versions, WebSocket pairing, turn streaming and approval gating.
+project/session metadata, token rotation, media uploads/GC, provider metadata
+without persisted keys, Skill versions, WebSocket pairing, turn streaming and
+approval gating.
