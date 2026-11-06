@@ -52,6 +52,11 @@ const IDEMPOTENT_METHODS = new Set([
   "attachment/complete"
 ]);
 
+/** Keep history responses well below the client's 1 MiB advertised receive budget. */
+const HISTORY_RESPONSE_MAX_BYTES = 512 * 1024;
+const SNAPSHOT_HISTORY_LIMIT = 100;
+const HISTORY_PAGE_MAX_ITEMS = 200;
+
 /** Partial live output for a turn, used to rebuild `snapshot.activeItems`. */
 type LiveItem = {
   itemId: string;
@@ -905,9 +910,6 @@ export class HostService {
     // its already-settled turn is still reported as active in this snapshot.
     const seq = this.journal.currentCursor();
     const history = session.nativePath ? await this.catalog.history(session.nativePath) : [];
-    const items = (
-      await Promise.all(history.map((entry) => itemFromEntry(entry, session.id, this.blobs)))
-    ).filter((item): item is Record<string, unknown> => item !== null);
     const cursor = seq;
     // A pending tool approval is not part of the native JSONL history, so it has
     // to be replayed from the live turn state. Without this, a client that
@@ -952,13 +954,13 @@ export class HostService {
         }
       ];
     });
-    return {
+    const result = {
       session: summary,
       snapshot: {
         session: summary,
         revision: session.revision,
         cursor,
-        items,
+        items: [] as Record<string, unknown>[],
         activeItems,
         // 契约 §3.4：会话摘要带 activeTurnId；重连/切后台后客户端据此恢复运行态与中止入口。
         activeTurn: activeTurn
@@ -979,30 +981,91 @@ export class HostService {
       },
       replayComplete: true
     };
+    const page = await this.historyPage(
+      session.id,
+      history,
+      undefined,
+      SNAPSHOT_HISTORY_LIMIT,
+      Buffer.byteLength(JSON.stringify(result), "utf8")
+    );
+    result.snapshot.items = page.items;
+    result.snapshot.hasMoreHistory = page.hasMore;
+    return result;
+  }
+
+  /**
+   * Select a contiguous suffix before a stable native item id. Project only the
+   * selected page, never the full history; neither message bodies nor source
+   * files are truncated. Byte limits apply to the entire result, including live
+   * snapshot state, with ample headroom for the JSON-RPC envelope.
+   */
+  private async historyPage(
+    sessionId: string,
+    entries: SessionEntry[],
+    beforeItemId: string | undefined,
+    limit: number,
+    baseBytes: number
+  ): Promise<{ items: Record<string, unknown>[]; hasMore: boolean }> {
+    const messages = entries.filter((entry) => entry.type === "message");
+    let end = messages.length;
+    if (beforeItemId !== undefined) {
+      end = messages.findIndex((entry) => entry.id === beforeItemId);
+      if (end < 0) {
+        throw new HostError("NOT_FOUND", "history item no longer exists", { field: "beforeItemId" });
+      }
+    }
+    if (baseBytes > HISTORY_RESPONSE_MAX_BYTES) {
+      throw new HostError("PAYLOAD_TOO_LARGE", "session snapshot state exceeds the response budget", {
+        maxBytes: HISTORY_RESPONSE_MAX_BYTES
+      });
+    }
+    const items: Record<string, unknown>[] = [];
+    let bytes = baseBytes;
+    let start = end;
+    while (start > 0 && items.length < limit) {
+      const item = await itemFromEntry(messages[start - 1]!, sessionId, this.blobs);
+      if (!item) break;
+      const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (items.length > 0 ? 1 : 0);
+      if (bytes + itemBytes > HISTORY_RESPONSE_MAX_BYTES) {
+        if (items.length === 0) {
+          throw new HostError("PAYLOAD_TOO_LARGE", "history item exceeds the response budget", {
+            field: "items",
+            maxBytes: HISTORY_RESPONSE_MAX_BYTES
+          });
+        }
+        break;
+      }
+      items.push(item);
+      bytes += itemBytes;
+      start -= 1;
+    }
+    items.reverse();
+    return { items, hasMore: start > 0 };
   }
 
   private async history(sessionId: string, params: Record<string, unknown> = {}) {
-    const session = await this.requireSession(sessionId);
-    let allItems = session.nativePath
-      ? (
-          await Promise.all(
-            (await this.catalog.history(session.nativePath)).map((entry) =>
-              itemFromEntry(entry, session.id, this.blobs)
-            )
-          )
-        ).filter((item): item is Record<string, unknown> => item !== null)
-      : [];
-    const limit = typeof params.limit === "number" ? Math.max(1, Math.min(200, params.limit)) : 100;
-    const beforeItemId = typeof params.beforeItemId === "string" ? params.beforeItemId : undefined;
-    if (beforeItemId) {
-      const idx = allItems.findIndex((item) => item.id === beforeItemId);
-      if (idx >= 0) {
-        allItems = allItems.slice(0, idx);
-      }
+    const limit = params.limit === undefined ? SNAPSHOT_HISTORY_LIMIT : params.limit;
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > HISTORY_PAGE_MAX_ITEMS) {
+      throw new HostError("INVALID_ARGUMENT", "history limit must be an integer from 1 to 200", { field: "limit" });
     }
-    const hasMore = allItems.length > limit;
-    const items = hasMore ? allItems.slice(allItems.length - limit) : allItems;
-    return { items, hasMore, revision: session.revision };
+    const beforeItemId = params.beforeItemId === undefined
+      ? undefined
+      : str(params.beforeItemId, "beforeItemId");
+    return this.sessionLocks.run(sessionId, async () => {
+      const session = await this.requireSession(sessionId);
+      const history = session.nativePath ? await this.catalog.history(session.nativePath) : [];
+      const result = { items: [] as Record<string, unknown>[], hasMore: false, revision: session.revision };
+      const page = await this.historyPage(
+        session.id,
+        history,
+        beforeItemId,
+        limit,
+        Buffer.byteLength(JSON.stringify(result), "utf8")
+      );
+      result.items = page.items;
+      result.hasMore = page.hasMore;
+      return result;
+    });
   }
 
   private async configureSession(params: Record<string, unknown>) {
