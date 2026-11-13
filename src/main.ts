@@ -105,7 +105,7 @@ process.stdout.write(readyLine({
 }));
 
 async function shutdown(): Promise<void> {
-  service.stopMaintenance();
+  await service.shutdown();
   if (bootstrapAttemptId) await removeDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
   else await invalidateDirectTrustFile(config.home).catch(() => undefined);
   await Promise.all([server.close(), directServer?.close()]);

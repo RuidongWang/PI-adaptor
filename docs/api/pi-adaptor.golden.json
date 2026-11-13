@@ -1,5 +1,12 @@
 {
+  "extensionScenarios": [
+    {"jsonrpc":"2.0","id":201,"result":{"hostId":"host_fixture","configRevision":"config_fixture","userLoadingEnabled":false,"capturedAt":"2026-11-12T00:00:00Z","entries":[{"id":"disabled","name":"Disabled entry","configuredVersion":null,"entryPath":"/srv/extensions/disabled.ts","enabled":false,"compatibility":"unknown","entryState":"valid","diagnostics":[]}]}},
+    {"jsonrpc":"2.0","id":202,"result":{"hostId":"host_fixture","sessionId":"session_fixture","configRevision":"new_config","userLoadingEnabled":true,"runningTurnId":"turn_current","latestAttempt":{"id":"current","hostId":"host_fixture","sessionId":"session_fixture","turnId":"turn_current","configRevision":"new_config","revision":1,"startedAt":"2026-11-12T01:00:00Z","completedAt":null,"phase":"loading","entries":[],"diagnostics":[]},"previousCompleted":{"id":"previous","hostId":"host_fixture","sessionId":"session_fixture","turnId":"turn_previous","configRevision":"old_config","revision":3,"startedAt":"2026-11-12T00:00:00Z","completedAt":"2026-11-12T00:00:01Z","phase":"ready","entries":[],"diagnostics":[]}}},
+    {"jsonrpc":"2.0","id":203,"result":{"hostId":"host_fixture","sessionId":"session_fixture","configRevision":"config_fixture","userLoadingEnabled":true,"runningTurnId":null,"latestAttempt":{"id":"partial","hostId":"host_fixture","sessionId":"session_fixture","turnId":"turn_fixture","configRevision":"config_fixture","revision":3,"startedAt":"2026-11-12T00:00:00Z","completedAt":"2026-11-12T00:00:01Z","phase":"ready","entries":[{"id":"good","name":"Tools","configuredVersion":"1.0.0","loadState":"loaded","skipReason":null,"registeredTools":["fixture_tool","inactive_tool"],"activeTools":["fixture_tool"],"registeredCommands":["fixture_command"],"mobileInvocable":false,"diagnostics":[]},{"id":"bad","name":"Broken entry","configuredVersion":null,"loadState":"failed","skipReason":null,"registeredTools":[],"activeTools":[],"registeredCommands":[],"mobileInvocable":false,"diagnostics":[{"stage":"load","severity":"error","code":"EXTENSION_LOAD_FAILED","message":"SDK could not load this entry; raw error details were withheld.","occurredAt":"2026-11-12T00:00:01Z"}]},{"id":"ui","name":"UI entry","configuredVersion":null,"loadState":"skipped","skipReason":"not-adapted","registeredTools":[],"activeTools":[],"registeredCommands":[],"mobileInvocable":false,"diagnostics":[]}],"diagnostics":[]},"previousCompleted":null}}
+  ],
   "requests": [
+    {"jsonrpc":"2.0","id":101,"method":"extension/list","params":{}},
+    {"jsonrpc":"2.0","id":102,"method":"session/extensions","params":{"sessionId":"session_fixture"}},
     {
       "jsonrpc": "2.0",
       "id": 1,
@@ -567,6 +574,8 @@
     }
   ],
   "responses": [
+    {"jsonrpc":"2.0","id":101,"result":{"hostId":"host_fixture","configRevision":"config_fixture","userLoadingEnabled":false,"capturedAt":"2026-11-12T00:00:00Z","entries":[]}},
+    {"jsonrpc":"2.0","id":102,"result":{"hostId":"host_fixture","sessionId":"session_fixture","configRevision":"config_fixture","userLoadingEnabled":false,"runningTurnId":null,"latestAttempt":null,"previousCompleted":null}},
     {
       "jsonrpc": "2.0",
       "id": 1,
@@ -592,6 +601,7 @@
           "approvalDisconnectSeconds": 1
         },
         "capabilities": {
+          "extensionInventory":true,"sessionExtensions":true,"extensionManagement":false,"extensionUI":false,
           "attachments": false,
           "imageOutput": false,
           "skills": false,
@@ -1862,6 +1872,7 @@
     }
   ],
   "events": [
+    {"jsonrpc":"2.0","method":"events/event","params":{"event":{"scope":"session","kind":"session.extensions.updated","sessionId":"session_fixture","turnId":"turn_fixture","epoch":"epoch_fixture","sequence":100,"payload":{"id":"snapshot_fixture","hostId":"host_fixture","sessionId":"session_fixture","turnId":"turn_fixture","configRevision":"config_fixture","revision":1,"startedAt":"2026-11-12T00:00:00Z","completedAt":null,"phase":"loading","entries":[],"diagnostics":[]}}}},
     {
       "jsonrpc": "2.0",
       "method": "events/event",
@@ -2250,6 +2261,9 @@
     }
   ],
   "invalid": [
+    {"jsonrpc":"2.0","id":101,"method":"extension/list","params":{"entryPath":"/tmp/rogue.ts"}},
+    {"jsonrpc":"2.0","id":102,"method":"session/extensions","params":{}},
+    {"jsonrpc":"2.0","method":"events/event","params":{"event":{"scope":"session","kind":"session.extensions.updated","sessionId":"s","turnId":"t","epoch":"e","sequence":1,"payload":{"snapshot":{}}}}},
     {
       "jsonrpc": "2.0",
       "id": 1,

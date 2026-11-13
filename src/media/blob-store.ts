@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { HostError } from "../errors.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
@@ -26,6 +26,9 @@ type MediaIndex = {
 const EMPTY: MediaIndex = { version: 1, attachments: [] };
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_STAGING_BYTES = 1024 * 1024 * 1024;
+/// One attachment/read response must stay small enough for a single frame and
+/// for the iOS client's chunk budget.
+export const MAX_READ_CHUNK_BYTES = 1024 * 1024;
 
 // sha256 直接用作 blob 文件名，必须严格限定为 64 位小写十六进制，
 // 否则 `../../x` 之类的取值会让 rm/read 落到 blobs 目录之外。
@@ -107,8 +110,17 @@ export class BlobStore {
       }
       const sha256 = normalizeSha256(input.sha256);
       const data = await this.load();
+      // Expired uploads still occupy disk until GC. Purge them before measuring
+      // the quota, and count every remaining staging file regardless of its
+      // expiresAt so the budget reflects real disk usage.
+      for (const entry of data.attachments) {
+        if (entry.state === "uploading" && entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) {
+          await rm(this.partPath(entry.id), { force: true });
+          entry.state = "failed";
+        }
+      }
       const stagingBytes = data.attachments
-        .filter((entry) => entry.state === "uploading" && entry.expiresAt && Date.parse(entry.expiresAt) > now.getTime())
+        .filter((entry) => entry.state === "uploading")
         .reduce((total, entry) => total + entry.byteLength, 0);
       if (stagingBytes + input.byteLength > MAX_STAGING_BYTES) {
         throw new HostError("PAYLOAD_TOO_LARGE", "staging quota exceeded");
@@ -125,9 +137,16 @@ export class BlobStore {
         createdAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + 60 * 60 * 1000).toISOString()
       };
-      data.attachments.push(record);
-      await this.save(data);
+      // Create the staging file before publishing the index entry. If either
+      // step fails, roll the other back so a retry starts from a clean state.
       await writeFile(this.partPath(record.id), new Uint8Array(), { mode: 0o600 });
+      data.attachments.push(record);
+      try {
+        await this.save(data);
+      } catch (error) {
+        await rm(this.partPath(record.id), { force: true });
+        throw error;
+      }
       return record;
     });
   }
@@ -137,6 +156,12 @@ export class BlobStore {
       const index = await this.load();
       const record = index.attachments.find((entry) => entry.id === id && entry.state === "uploading");
       if (!record) throw new HostError("ATTACHMENT_INCOMPLETE", "upload not found");
+      if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
+        record.state = "failed";
+        await this.save(index);
+        await rm(this.partPath(id), { force: true });
+        throw new HostError("ATTACHMENT_INCOMPLETE", "upload expired");
+      }
       const chunk = Buffer.from(dataBase64, "base64");
       const current = await readFile(this.partPath(id));
       if (offset !== current.length) {
@@ -156,6 +181,12 @@ export class BlobStore {
       const index = await this.load();
       const record = index.attachments.find((entry) => entry.id === id && entry.state === "uploading");
       if (!record) throw new HostError("ATTACHMENT_INCOMPLETE", "upload not found");
+      if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
+        record.state = "failed";
+        await this.save(index);
+        await rm(this.partPath(id), { force: true });
+        throw new HostError("ATTACHMENT_INCOMPLETE", "upload expired");
+      }
       const bytes = await readFile(this.partPath(id));
       const actual = createHash("sha256").update(bytes).digest("hex");
       const expected = normalizeSha256(expectedSha256);
@@ -166,15 +197,31 @@ export class BlobStore {
         throw new HostError("ATTACHMENT_INVALID", "length or sha256 mismatch");
       }
       const destination = this.blobPath(actual);
+      let movedIntoPlace = false;
       try {
         await stat(destination);
         await rm(this.partPath(id), { force: true });
       } catch {
         await rename(this.partPath(id), destination);
+        movedIntoPlace = true;
       }
       record.state = "ready";
       delete record.expiresAt;
-      await this.save(index);
+      try {
+        await this.save(index);
+      } catch (error) {
+        // Restore the recoverable uploading state instead of leaving an index
+        // entry whose part file no longer exists.
+        if (movedIntoPlace) {
+          await rename(destination, this.partPath(id)).catch(() => undefined);
+        } else {
+          await copyFile(destination, this.partPath(id)).catch(() => undefined);
+        }
+        record.state = "uploading";
+        record.expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+        await this.save(index).catch(() => undefined);
+        throw error;
+      }
       return record;
     });
   }
@@ -187,9 +234,19 @@ export class BlobStore {
     const record = (await this.load()).attachments.find((entry) => entry.id === id && entry.state === "ready");
     if (!record) throw new HostError("NOT_FOUND", "attachment not found");
     if (!isSha256Hex(record.sha256)) throw new HostError("NOT_FOUND", "attachment not found");
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new HostError("INVALID_ARGUMENT", "offset must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(length) || length < 1 || length > MAX_READ_CHUNK_BYTES) {
+      throw new HostError("INVALID_ARGUMENT", "length must be between 1 and the read chunk limit");
+    }
     const bytes = await readFile(this.blobPath(record.sha256));
-    const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + Math.max(1, length)));
-    return { attachment: record, dataBase64: chunk.toString("base64"), eof: offset + chunk.length >= bytes.length };
+    if (offset >= bytes.length) {
+      return { attachment: record, dataBase64: "", eof: true };
+    }
+    const end = Math.min(bytes.length, offset + length);
+    const chunk = bytes.subarray(offset, end);
+    return { attachment: record, dataBase64: chunk.toString("base64"), eof: end >= bytes.length };
   }
 
   async importImageBase64(input: {

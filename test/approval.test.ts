@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 import type { AgentDriver, AgentTurnHandle, AgentTurnRequest } from "../src/agent/driver.js";
 import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
 import { HostService } from "../src/server/host-service.js";
+import { PiAgentDriver } from "../src/agent/driver.js";
+import { hostFixture } from "./fixtures/extensions/host-fixture.js";
+import { scriptedProvider } from "./fixtures/extensions/scripted-provider.js";
+import { fileURLToPath } from "node:url";
+import { readFile, rm } from "node:fs/promises";
+import { vi } from "vitest";
 
 /// A driver that always asks for a tool approval and leaves the turn pending, so
 /// the service holds a live approval the way a real "ask"-mode turn does.
@@ -33,7 +39,7 @@ class ApprovalToolDriver implements AgentDriver {
   }
 }
 
-async function setup() {
+async function setup(driver: AgentDriver = new ApprovalToolDriver()) {
   const root = await mkdtemp(join(tmpdir(), "pi-adaptor-approval-test-"));
   const project = join(root, "project");
   await mkdir(project, { recursive: true });
@@ -43,7 +49,7 @@ async function setup() {
     root
   );
   await ensureHostDirectories(config);
-  const service = new HostService(config, new ApprovalToolDriver());
+  const service = new HostService(config, driver);
   await service.init();
   const pairing = await service.createPairingToken();
   const paired = await service.pair({ deviceLabel: "test" }, pairing.token);
@@ -118,5 +124,66 @@ describe("pending tool approvals", () => {
     }
     expect(resolved).toHaveLength(1);
     expect(resolved[0]?.payload).toMatchObject({ status: "denied" });
+  });
+});
+
+describe("extension integration", () => {
+  class ExtensionToolDriver extends ApprovalToolDriver {
+    override start(request: AgentTurnRequest): AgentTurnHandle {
+      return super.start({ ...request, requestApproval: (_name, input) => request.requestApproval!("fixture_tool", input) });
+    }
+  }
+  it("routes extension tool approval through pending/deny and leaves no live approval", async () => {
+    const { service, auth, sessionId } = await setup(new ExtensionToolDriver());
+    await service.handle("turn/start", { sessionId, input: { text: "extension" } }, auth);
+    for (let n = 0; n < 50 && service["pendingApprovals"].size === 0; n += 1) await new Promise(resolve => setTimeout(resolve, 10));
+    const attached = await service.handle("session/attach", { sessionId }, auth) as { snapshot: { pendingApprovals: Array<{ id: string; toolName: string }> } };
+    expect(attached.snapshot.pendingApprovals[0]?.toolName).toBe("fixture_tool");
+    await service.handle("approval/respond", { approvalId: attached.snapshot.pendingApprovals[0]!.id, decision: "deny" }, auth);
+    expect(service["pendingApprovals"].size).toBe(0);
+  });
+  it("releases pending extension approval before awaiting abort cleanup", async () => {
+    class WaitingAbortDriver extends ExtensionToolDriver {
+      override start(request: AgentTurnRequest) {
+        const handle = super.start(request);
+        return { ...handle, async abort() { await handle.wait(); } };
+      }
+    }
+    const { service, auth, sessionId } = await setup(new WaitingAbortDriver());
+    const started = await service.handle("turn/start", { sessionId, input: { text: "extension" } }, auth) as { turn: { id: string } };
+    for (let n = 0; n < 50 && service["pendingApprovals"].size === 0; n += 1) await new Promise(resolve => setTimeout(resolve, 10));
+    await service.handle("turn/interrupt", { turnId: started.turn.id }, auth);
+    expect(service["pendingApprovals"].size).toBe(0);
+    expect(service["executingDrivers"].size).toBe(0);
+    const terminal = service.journal.replay("session", sessionId, { epoch: service.journal.epoch, sequence: 0 }).filter(event => ["turn.completed", "turn.failed", "turn.interrupted"].includes(event.kind));
+    expect(terminal.map(event => event.kind)).toEqual(["turn.interrupted"]);
+  });
+});
+
+describe("extension integration", () => {
+  it.each(["deny", "allow-once", "cancel"])("runs reviewed SDK tool through HostService approval decision=%s", async decision => {
+    const transport = await scriptedProvider();
+    const entryPath = fileURLToPath(new URL("./fixtures/extensions/reviewed-tool.ts", import.meta.url));
+    const fixture = await hostFixture({ appendsPrompt: true, start: request => new PiAgentDriver(join(request.cwd, "..", "agent")).start(request) }, { enabled: true, entries: [{ id: "reviewed", entryPath, compatibility: "headless-reviewed" }] });
+    const { service, auth, sessionId } = fixture;
+    try {
+      const provider = await service.providers.create({ name: "Fixture", vendorKey: "fixture", type: "openai_compatible", protocol: "openai_compatible", baseUrl: transport.baseUrl, authKind: "none", models: [{ id: "fixture", displayName: "Fixture", contextWindow: 32768, maxTokens: 1000, thinkingLevels: [], defaultThinkingLevel: null, supportsImages: false }] });
+      await service.handle("session/configure", { sessionId, providerId: provider.id, modelId: "fixture", permissionMode: "ask" }, auth);
+      const started = await service.handle("turn/start", { sessionId, input: { text: "call fixture_tool" } }, auth) as { turn: { id: string } };
+      await vi.waitFor(() => expect(service["pendingApprovals"].size).toBe(1));
+      const approval = [...service["pendingApprovals"].entries()][0]!;
+      expect(approval[1].toolName).toBe("fixture_tool");
+      if (decision === "cancel") await service.handle("turn/interrupt", { turnId: started.turn.id }, auth);
+      else await service.handle("approval/respond", { approvalId: approval[0], decision }, auth);
+      await vi.waitFor(() => expect(service["executingDrivers"].size).toBe(0));
+      const project = (await service.meta.getSession(sessionId))!.projectPath;
+      expect(await readFile(join(project, "extension-lifecycle.log"), "utf8")).toBe("start:false\nshutdown\n");
+      if (decision === "allow-once") expect(await readFile(join(project, "extension-executed.marker"), "utf8")).toBe("executed");
+      else await expect(readFile(join(project, "extension-executed.marker"))).rejects.toMatchObject({ code: "ENOENT" });
+      const snapshot = (await service.extensionSnapshots.get(sessionId)).latestAttempt!;
+      expect(snapshot.entries[0]).toMatchObject({ registeredTools: ["fixture_tool", "inactive_tool"], activeTools: ["fixture_tool"], registeredCommands: ["fixture_command"], mobileInvocable: false });
+      const terminal = service.journal.replay("session", sessionId, { epoch: service.journal.epoch, sequence: 0 }).filter(event => ["turn.completed", "turn.failed", "turn.interrupted"].includes(event.kind));
+      expect(terminal.map(event => event.kind)).toEqual([decision === "cancel" ? "turn.interrupted" : "turn.completed"]);
+    } finally { await service.shutdown(); await transport.close(); await rm(fixture.root, { recursive: true, force: true }); }
   });
 });

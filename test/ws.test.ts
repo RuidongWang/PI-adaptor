@@ -10,19 +10,26 @@ import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
 import type { ProviderDiscoveryRequest, ProviderDiscoveryTestOnly } from "../src/providers/discovery.js";
 import { HostService } from "../src/server/host-service.js";
 import { startWebSocketServer } from "../src/server/ws.js";
+import { hostFixture, SnapshotDriver } from "./fixtures/extensions/host-fixture.js";
+import { rm } from "node:fs/promises";
 
 type Frame = { id?: number; result?: any; error?: any; method?: string; params?: any };
 
 function rpc(socket: WebSocket, id: number, method: string, params: unknown = {}): Promise<Frame> {
   return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      socket.off("message", onMessage);
+      reject(error);
+    };
     const onMessage = (raw: WebSocket.RawData) => {
       const frame = JSON.parse(raw.toString()) as Frame;
       if (frame.id !== id) return;
       socket.off("message", onMessage);
+      socket.off("error", onError);
       resolve(frame);
     };
     socket.on("message", onMessage);
-    socket.once("error", reject);
+    socket.once("error", onError);
     socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
   });
 }
@@ -136,6 +143,37 @@ describe("RACP v2 websocket", () => {
       context: { requestId: "session", idempotencyKey: "session" }
     });
     const sessionId = created.result.session.id;
+
+    const plan = await rpc(socket, 40, "session/configure", {
+      sessionId,
+      mode: "plan",
+      context: { requestId: "configure-plan", idempotencyKey: "configure-plan" }
+    });
+    expect(plan.result.session.mode).toBe("plan");
+    const planReadBack = await rpc(socket, 41, "session/get", { sessionId });
+    expect(planReadBack.result.session.mode).toBe("plan");
+    const agent = await rpc(socket, 42, "session/configure", {
+      sessionId,
+      mode: "agent",
+      context: { requestId: "configure-agent", idempotencyKey: "configure-agent" }
+    });
+    expect(agent.result.session.mode).toBe("agent");
+    const revisionBeforeInvalidMode = agent.result.session.revision;
+    const goal = await rpc(socket, 43, "session/configure", {
+      sessionId,
+      mode: "goal",
+      context: { requestId: "configure-goal", idempotencyKey: "configure-goal" }
+    });
+    expect(goal.error.data.code).toBe("INVALID_ARGUMENT");
+    const unknown = await rpc(socket, 44, "session/configure", {
+      sessionId,
+      mode: "unknown",
+      context: { requestId: "configure-unknown", idempotencyKey: "configure-unknown" }
+    });
+    expect(unknown.error.data.code).toBe("INVALID_ARGUMENT");
+    const afterInvalidMode = await rpc(socket, 45, "session/get", { sessionId });
+    expect(afterInvalidMode.result.session.mode).toBe("agent");
+    expect(afterInvalidMode.result.session.revision).toBe(revisionBeforeInvalidMode);
 
     const events: Frame[] = [];
     socket.on("message", (raw) => {
@@ -425,5 +463,41 @@ describe("RACP v2 websocket", () => {
     rejected.close();
     socket.close();
     await server.close();
+  });
+});
+
+describe("extension integration", () => {
+  it.each(["1.0", "2.0.0"])("preserves legacy %s chat event cursors, ACK and reconnect replay without client capabilities", async protocolVersion => {
+    const fixture = await hostFixture(new SnapshotDriver());
+    const server = await startWebSocketServer(fixture.service, 0);
+    const sockets: WebSocket[] = [];
+    try {
+      const url = `ws://127.0.0.1:${server.port}/v1/racp/ws`;
+      const socket = await connect(url, fixture.token); sockets.push(socket);
+      const initialized = await rpc(socket, 1, "connection/initialize", { protocolVersion, client: { name: "legacy-fixture", version: "0.0.3", capabilities: {} } });
+      expect(initialized.result.capabilities.extensionInventory).toBe(true);
+      expect((await rpc(socket, 2, "extension/list")).result.entries).toEqual([]);
+      const frames: Frame[] = []; socket.on("message", raw => frames.push(JSON.parse(raw.toString()) as Frame));
+      const subscribed = await rpc(socket, 3, "events/subscribe", { scope: "session", sessionId: fixture.sessionId });
+      await rpc(socket, 4, "turn/start", { sessionId: fixture.sessionId, input: { text: "fixture" } });
+      await vi.waitFor(() => expect(frames.some(frame => frame.params?.event?.kind === "turn.completed")).toBe(true));
+      const events = frames.flatMap(frame => frame.params?.event ? [frame.params.event] : []);
+      const extension = events.find(event => event.kind === "session.extensions.updated");
+      expect(extension.payload).toMatchObject({ phase: "loading", revision: 1 }); expect(extension.payload.snapshot).toBeUndefined();
+      const ack = await rpc(socket, 5, "events/ack", { subscriptionId: subscribed.result.subscriptionId, epoch: extension.epoch, sequence: extension.sequence });
+      expect(ack.error).toBeUndefined();
+      socket.close();
+      const reconnected = await connect(url, fixture.token); sockets.push(reconnected);
+      await rpc(reconnected, 6, "connection/initialize", { protocolVersion, client: { name: "legacy-fixture", version: "0.0.3", capabilities: {} } });
+      const replay: Frame[] = []; reconnected.on("message", raw => replay.push(JSON.parse(raw.toString()) as Frame));
+      await rpc(reconnected, 7, "events/subscribe", { scope: "session", sessionId: fixture.sessionId, after: { epoch: extension.epoch, sequence: extension.sequence } });
+      await vi.waitFor(() => expect(replay.some(frame => frame.params?.event?.kind === "turn.completed")).toBe(true));
+      expect(replay.filter(frame => frame.params?.event).every(frame => frame.params.event.sequence > extension.sequence)).toBe(true);
+      expect((await rpc(reconnected, 8, "session/extensions", { sessionId: fixture.sessionId })).result.latestAttempt.phase).toBe("ready");
+      expect((await rpc(reconnected, 9, "connection/ping")).result.ok).toBe(true);
+    } finally {
+      for (const socket of sockets) socket.terminate();
+      await server.close(); await rm(fixture.root, { recursive: true, force: true });
+    }
   });
 });

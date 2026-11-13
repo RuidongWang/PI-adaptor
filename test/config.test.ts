@@ -291,3 +291,14 @@ describe("direct listener config", () => {
     }
   });
 });
+
+describe("extensions", () => {
+  it("defaults off and normalizes declared metadata", () => {
+    expect(parseHostConfig([], {}, "/tmp").extensions).toEqual({ enabled: false, entries: [] });
+    const config = parseHostConfig([], {}, "/tmp", { extensions: { entries: [{ id: "a", entryPath: "/tmp/a.ts" }] } });
+    expect(config.extensions.entries[0]).toEqual({ id: "a", entryPath: "/tmp/a.ts", name: "a.ts", enabled: true, version: null, compatibility: "unknown" });
+  });
+  it.each([null, [], true, { enabled: "true" }, { entries: {} }, { extra: true }, { entries: [null] }, { entries: [{ id: "bad id", entryPath: "/tmp/a.ts" }] }, { entries: [{ id: "a", entryPath: "/tmp/a.ts", enabled: 1 }] }, { entries: [{ id: "a", entryPath: "/tmp/a.ts", compatibility: "reviewed" }] }, { entries: [{ id: "a", entryPath: "/tmp/a.ts", name: 1 }] }, { entries: [{ id: "a", entryPath: "/tmp/a.ts", version: null }] }, { entries: [{ id: "a", entryPath: "/tmp/a.ts" }, { id: "a", entryPath: "/tmp/b.ts" }] }])("strictly rejects malformed config %#", extensions => {
+    expect(() => parseHostConfig([], {}, "/tmp", { extensions })).toThrow();
+  });
+});

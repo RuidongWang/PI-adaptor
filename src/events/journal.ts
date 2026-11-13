@@ -1,4 +1,6 @@
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { HostError } from "../errors.js";
 import { uuid } from "../util/id.js";
@@ -38,42 +40,90 @@ export class EventJournal {
    */
   private droppedHostSequence = 0;
   private readonly droppedSessionSequence = new Map<string, number>();
+  /// Disk retention: the active JSONL is rotated once it reaches this size and
+  /// only the newest `maxFiles` rotated files are kept.
+  private bytesWritten = 0;
 
-  constructor(dataDir: string, private readonly maxEvents = 10_000) {
+  constructor(
+    dataDir: string,
+    private readonly maxEvents = 10_000,
+    private readonly maxFileBytes = 8 * 1024 * 1024,
+    private readonly maxFiles = 5
+  ) {
     this.path = join(dataDir, "meta", "events.jsonl");
+  }
+
+  private rotatedPath(index: number): string {
+    return `${this.path}.${index}`;
+  }
+
+  private async rotate(): Promise<void> {
+    // Drop the oldest, shift the rest, then move the active file aside.
+    await rm(this.rotatedPath(this.maxFiles), { force: true });
+    for (let index = this.maxFiles - 1; index >= 1; index -= 1) {
+      const from = this.rotatedPath(index);
+      const to = this.rotatedPath(index + 1);
+      try {
+        await rename(from, to);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    try {
+      await rename(this.path, this.rotatedPath(1));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    this.bytesWritten = 0;
   }
 
   async load(): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    let raw = "";
-    try {
-      raw = await readFile(this.path, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
     this.events = [];
     this.sequence = 0;
     this.droppedHostSequence = 0;
     this.droppedSessionSequence.clear();
     let hadCorruptedTail = false;
-    if (raw.length > 0 && !raw.endsWith("\n")) {
-      hadCorruptedTail = true;
-    }
-    const validLines: string[] = [];
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
+    // Read rotated files oldest-first, then the active file. Only the last
+    // `maxEvents` events stay in memory; the file is streamed line by line so a
+    // long-lived journal does not have to fit in RAM at startup.
+    const files: string[] = [];
+    for (let index = this.maxFiles; index >= 1; index -= 1) files.push(this.rotatedPath(index));
+    files.push(this.path);
+    for (const file of files) {
       try {
-        const event = JSON.parse(line) as HostEvent;
-        this.events.push(event);
-        this.sequence = Math.max(this.sequence, event.sequence ?? 0);
-        validLines.push(line);
-      } catch {
-        hadCorruptedTail = true;
+        const info = await stat(file);
+        if (file === this.path) this.bytesWritten = info.size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      const reader = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+      try {
+        for await (const line of reader) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line) as HostEvent;
+            this.events.push(event);
+            this.sequence = Math.max(this.sequence, event.sequence ?? 0);
+            if (event.sequence === undefined || typeof event.payload !== "object" || event.payload === null) {
+              hadCorruptedTail = true;
+            }
+            if (this.events.length > this.maxEvents) this.trim();
+          } catch {
+            if (file === this.path) hadCorruptedTail = true;
+          }
+        }
+      } finally {
+        reader.close();
       }
     }
     if (hadCorruptedTail) {
-      const sanitized = validLines.length > 0 ? validLines.join("\n") + "\n" : "";
+      // Rewrite only the active file with the surviving suffix; rotated files
+      // are retained as-is because they are already bounded and immutable.
+      const sanitized = this.events.length > 0 ? this.events.map((event) => JSON.stringify(event)).join("\n") + "\n" : "";
       await writeFile(this.path, sanitized, { mode: 0o600 });
+      this.bytesWritten = Buffer.byteLength(sanitized, "utf8");
     }
     this.trim();
   }
@@ -113,7 +163,13 @@ export class EventJournal {
         payload,
         ...extra
       };
-      await appendFile(this.path, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+      const line = `${JSON.stringify(event)}\n`;
+      const lineBytes = Buffer.byteLength(line, "utf8");
+      if (this.bytesWritten > 0 && this.bytesWritten + lineBytes > this.maxFileBytes) {
+        await this.rotate();
+      }
+      await appendFile(this.path, line, { mode: 0o600 });
+      this.bytesWritten += lineBytes;
       this.sequence = nextSequence;
       this.events.push(event);
       this.trim();

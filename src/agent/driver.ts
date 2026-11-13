@@ -2,16 +2,21 @@ import { join } from "node:path";
 import {
   DefaultResourceLoader,
   ModelRuntime,
+  ExtensionRunner,
+  ModelRegistry,
   SessionManager,
   SettingsManager,
   createAgentSession,
-  type ExtensionFactory,
+  type ExtensionError,
   type AgentSessionEvent
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { HostError } from "../errors.js";
 import { providerApi } from "../providers/protocol.js";
 import { uuid } from "../util/id.js";
+import { ExtensionRegistry } from "../extensions/registry.js";
+import { HOST_APPROVAL_PATH, hostApprovalExtension } from "../extensions/approval.js";
+import { addDiagnostic, boundSnapshot, diagnostic, type ExtensionSnapshot, type ExtensionDiagnostic } from "../extensions/types.js";
 
 export type AgentEvent = {
   kind:
@@ -55,6 +60,7 @@ export type AgentTurnRequest = {
   text: string;
   images: ImageContent[];
   requestApproval?: ((toolName: string, input: unknown) => Promise<boolean>) | undefined;
+  extensions?: { registry: ExtensionRegistry; hostId: string; publish(snapshot: ExtensionSnapshot): Promise<void> };
   onEvent(event: AgentEvent): void;
 };
 
@@ -173,6 +179,32 @@ export class PiAgentDriver implements AgentDriver {
     const turnId = request.turnId;
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     let aborted = false;
+    let snapshot: ExtensionSnapshot | undefined;
+    let extensionStage: ExtensionDiagnostic["stage"] = "load";
+    let warningUpdates = 0;
+    let internalFailure = false;
+    let cleanupUnbound: (() => Promise<void>) | undefined;
+    let approvalStarted = false;
+    let unsubscribe: (() => void) | undefined;
+    let terminalError: string | null = null;
+    let failure: unknown;
+    let publishChain = Promise.resolve();
+    let publishFailure: unknown;
+    const publish = () => {
+      if (!snapshot || !request.extensions) return Promise.resolve();
+      snapshot.revision += 1;
+      const copy = boundSnapshot(snapshot);
+      publishChain = publishChain.then(() => request.extensions!.publish(copy)).catch(error => { publishFailure ??= error; });
+      return publishChain;
+    };
+    const onExtensionError = (error: ExtensionError) => {
+      if (error.extensionPath === HOST_APPROVAL_PATH) internalFailure = true;
+      if (!snapshot) return;
+      const entry = snapshot.entries.find(entry => selectedPaths.get(entry.id) === error.extensionPath);
+      const changed = addDiagnostic(entry?.diagnostics ?? snapshot.diagnostics, diagnostic(extensionStage, "EXTENSION_HANDLER_ERROR", `Extension handler failed during ${extensionStage}; raw error details were withheld.`));
+      if (changed && extensionStage === "runtime" && warningUpdates < 20) { warningUpdates += 1; void publish(); }
+    };
+    const selectedPaths = new Map<string, string>();
     const waitPromise = (async () => {
       try {
         if (!request.provider) throw new HostError("PROVIDER_NOT_CONFIGURED", "provider is required");
@@ -208,26 +240,49 @@ export class PiAgentDriver implements AgentDriver {
           defaultModel: request.modelId,
           defaultThinkingLevel: request.thinkingLevel as never
         });
+        const registry = request.extensions?.registry ?? new ExtensionRegistry();
+        const prepared = await registry.prepare();
+        for (const [id, path] of prepared.paths) selectedPaths.set(id, path);
+        snapshot = { id: uuid(), hostId: request.extensions?.hostId ?? "local", sessionId: request.sessionId, turnId, configRevision: registry.configRevision, revision: 0, startedAt: new Date().toISOString(), completedAt: null, phase: "loading", entries: prepared.entries, diagnostics: [] };
+        await publish();
+        if (publishFailure) throw publishFailure;
+        if (aborted) throw new HostError("INTERNAL", "Turn canceled before extension loading");
         const loader = new DefaultResourceLoader({
           cwd: request.cwd,
           agentDir: this.agentDir,
           settingsManager: settings,
           additionalSkillPaths: this.skillPaths,
           noExtensions: true,
-          extensionFactories: request.requestApproval
-            ? [
-                ((pi) => {
-                  pi.on("tool_call", async (event) => {
-                    const allowed = await request.requestApproval?.(event.toolName, event.input);
-                    return allowed === false
-                      ? { block: true, reason: "Tool call denied by user" }
-                      : undefined;
-                  });
-                }) satisfies ExtensionFactory
-              ]
-            : []
+          additionalExtensionPaths: [...selectedPaths.values()],
+          extensionFactories: [hostApprovalExtension(request.requestApproval, () => { approvalStarted = true; })]
         });
+        cleanupUnbound = async () => {
+          const result = loader.getExtensions();
+          const runner = new ExtensionRunner(result.extensions, result.runtime, request.cwd, SessionManager.inMemory(request.cwd), new ModelRegistry(runtime));
+          const removeErrorListener = runner.onError(onExtensionError);
+          try { await runner.emit({ type: "session_shutdown", reason: "quit" }); }
+          finally { removeErrorListener(); runner.invalidate(); }
+        };
         await loader.reload();
+        const loaded = loader.getExtensions();
+        for (const entry of snapshot.entries) {
+          const path = selectedPaths.get(entry.id);
+          if (!path) continue;
+          const actual = loaded.extensions.find(extension => extension.resolvedPath === path || extension.path === path);
+          if (actual) {
+            entry.loadState = "loaded";
+            entry.registeredTools = [...actual.tools.keys()];
+            entry.registeredCommands = [...actual.commands.keys()];
+          }
+          for (const error of loaded.errors.filter(error => error.path === path)) {
+            const conflict = /conflict|already registered|duplicate/i.test(error.error);
+            addDiagnostic(entry.diagnostics, diagnostic("load", conflict ? "REGISTRATION_CONFLICT" : "EXTENSION_LOAD_FAILED", conflict ? "SDK reported a registration conflict for this entry." : "SDK could not load this entry; raw error details were withheld."));
+          }
+          for (const warning of (loaded.warnings ?? []).filter(warning => warning.path === path)) addDiagnostic(entry.diagnostics, diagnostic("load", "EXTENSION_LOAD_WARNING", "SDK reported a load warning for this entry.", "warning"));
+          if (!actual && entry.diagnostics.length === 0) addDiagnostic(entry.diagnostics, diagnostic("load", "EXTENSION_LOAD_FAILED", "SDK did not return a loaded instance for this entry."));
+        }
+        const approval = loaded.extensions.find(extension => extension.path === HOST_APPROVAL_PATH);
+        if (!approval?.hidden || approval.handlers.get("tool_call")?.length !== 1 || approval.handlers.get("session_start")?.length !== 1 || loaded.errors.some(error => error.path === HOST_APPROVAL_PATH)) throw new HostError("INTERNAL", "Host approval extension initialization failed");
         const manager = request.sessionFile
           ? SessionManager.open(request.sessionFile)
           : SessionManager.create(request.cwd, request.sessionDir, { id: request.sessionId });
@@ -242,17 +297,27 @@ export class PiAgentDriver implements AgentDriver {
           resourceLoader: loader
         });
         session = created.session;
-        if (aborted) {
-          await session.abort();
-          return;
+        extensionStage = "startup";
+        await session.bindExtensions({ mode: "rpc", onError: onExtensionError, abortHandler: () => { aborted = true; void session?.abort(); }, shutdownHandler: () => { aborted = true; void session?.abort(); } });
+        if (internalFailure || !approvalStarted) throw new HostError("INTERNAL", "Host approval extension startup failed");
+        const active = new Set(session.getActiveToolNames());
+        const owners = new Map(session.getAllTools().map(tool => [tool.name, tool.sourceInfo.path]));
+        for (const entry of snapshot.entries) {
+          const actual = loaded.extensions.find(extension => extension.resolvedPath === selectedPaths.get(entry.id));
+          if (actual) { entry.registeredTools = [...actual.tools.keys()]; entry.registeredCommands = [...actual.commands.keys()]; }
+          entry.activeTools = entry.registeredTools.filter(name => active.has(name) && owners.get(name) === selectedPaths.get(entry.id));
         }
+        snapshot.phase = "ready"; snapshot.completedAt = new Date().toISOString();
+        await publish();
+        if (publishFailure) throw publishFailure;
+        extensionStage = "runtime";
+        if (aborted) { await session.abort(); return; }
         // Pi streams cumulative snapshots via `message_update`; the authoritative
         // incremental text lives in `assistantMessageEvent`. Keep one stable item
         // id for the whole message so clients can append deltas into one bubble.
         let streamItemId: string | null = null;
-        let terminalError: string | null = null;
         const toolOutput = new ToolOutputDeltaTracker();
-        session.subscribe((event: AgentSessionEvent) => {
+        unsubscribe = session.subscribe((event: AgentSessionEvent) => {
           const raw = event as unknown as Record<string, unknown>;
           const type = String(raw.type ?? "");
           if (type === "message_start") {
@@ -336,23 +401,36 @@ export class PiAgentDriver implements AgentDriver {
               }
             });
           } else if (type === "agent_settled") {
-            if (terminalError) {
-              request.onEvent({
-                kind: "turn.failed",
-                payload: { turnId, error: terminalError }
-              });
-            } else {
-              request.onEvent({ kind: "turn.completed", payload: { turnId } });
-            }
+            // The prompt resolves after this callback. Terminal delivery waits for shutdown/dispose.
           }
         });
         request.onEvent({ kind: "turn.started", payload: { turnId } });
         await session.prompt(request.text, { images: request.images, streamingBehavior: "followUp" });
       } catch (error) {
-        request.onEvent({
-          kind: "turn.failed",
-          payload: { turnId, error: error instanceof Error ? error.message : String(error) }
-        });
+        failure = error;
+        if (snapshot?.phase === "loading") {
+          snapshot.phase = "failed"; snapshot.completedAt = new Date().toISOString();
+          addDiagnostic(snapshot.diagnostics, diagnostic(extensionStage, aborted ? "TURN_CANCELED" : "INITIALIZATION_FAILED", aborted ? "Turn was canceled during extension initialization." : "Extension runtime initialization failed; raw error details were withheld."));
+          await publish();
+        }
+      } finally {
+        extensionStage = "cleanup";
+        if (session) {
+          try { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); }
+          catch { if (snapshot) addDiagnostic(snapshot.diagnostics, diagnostic("cleanup", "EXTENSION_SHUTDOWN_FAILED", "Extension shutdown failed; raw error details were withheld.")); }
+          finally {
+            unsubscribe?.();
+            try { session.dispose(); }
+            catch { if (snapshot) addDiagnostic(snapshot.diagnostics, diagnostic("cleanup", "EXTENSION_DISPOSE_FAILED", "Extension disposal failed; raw error details were withheld.")); }
+          }
+        }
+        if (!session && cleanupUnbound) {
+          try { await cleanupUnbound(); }
+          catch { if (snapshot) addDiagnostic(snapshot.diagnostics, diagnostic("cleanup", "EXTENSION_SHUTDOWN_FAILED", "Unbound extension shutdown failed; raw error details were withheld.")); }
+        }
+        if (snapshot) await publish();
+        await publishChain;
+        if (!aborted) request.onEvent({ kind: failure || terminalError || publishFailure ? "turn.failed" : "turn.completed", payload: { turnId, ...(failure || terminalError || publishFailure ? { error: "Agent turn failed; sensitive error details withheld" } : {}) } });
       }
     })();
     return {
@@ -360,6 +438,7 @@ export class PiAgentDriver implements AgentDriver {
       async abort() {
         aborted = true;
         await session?.abort();
+        await waitPromise;
       },
       wait: () => waitPromise
     };

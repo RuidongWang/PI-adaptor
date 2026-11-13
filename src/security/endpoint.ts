@@ -16,20 +16,39 @@ function isPrivateIPv4(address: string): boolean {
   );
 }
 
+/** Extract the IPv4 address embedded in a `::ffff:` mapped IPv6 address. */
+function mappedIPv4(address: string): string | null {
+  const lower = address.toLowerCase();
+  if (!lower.startsWith("::ffff:")) return null;
+  const rest = lower.slice("::ffff:".length);
+  if (isIP(rest) === 4) return rest;
+  // Hex form, e.g. ::ffff:7f00:1 or ::ffff:c0a8:101.
+  const match = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(rest);
+  if (!match) return null;
+  const high = parseInt(match[1]!, 16);
+  const low = parseInt(match[2]!, 16);
+  return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+}
+
+function isPrivateIPv6(address: string): boolean {
+  const lower = address.toLowerCase();
+  if (lower === "::1" || lower === "::") return true;
+  // IPv4-mapped addresses must be classified by their embedded IPv4 value;
+  // ::ffff:172.16.0.1 and ::ffff:ac10:1 both reach a private network.
+  const mapped = mappedIPv4(lower);
+  if (mapped) return isPrivateIPv4(mapped);
+  const first = parseInt(lower.split(":")[0] || "0", 16);
+  // fc00::/7 (unique local) and fe80::/10 (link-local) are not covered by a
+  // simple string prefix: fe80::/10 spans fe80 through febf.
+  if ((first & 0xfe00) === 0xfc00) return true;
+  if ((first & 0xffc0) === 0xfe80) return true;
+  return false;
+}
+
 function isPrivateAddress(address: string): boolean {
-  if (isIP(address) === 4) return isPrivateIPv4(address);
-  if (isIP(address) === 6) {
-    const lower = address.toLowerCase();
-    return (
-      lower === "::1" ||
-      lower.startsWith("fc") ||
-      lower.startsWith("fd") ||
-      lower.startsWith("fe80:") ||
-      lower.startsWith("::ffff:127.") ||
-      lower.startsWith("::ffff:10.") ||
-      lower.startsWith("::ffff:192.168.")
-    );
-  }
+  const version = isIP(address);
+  if (version === 4) return isPrivateIPv4(address);
+  if (version === 6) return isPrivateIPv6(address);
   return true;
 }
 

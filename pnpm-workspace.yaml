@@ -2,3 +2,7 @@
 # Release installs already pass --ignore-scripts; keep local installs consistent
 # without an interactive `pnpm approve-builds` step.
 strictDepBuilds: false
+
+overrides:
+  undici: ">=8.12.2"
+  minimatch: ">=11.0.1"

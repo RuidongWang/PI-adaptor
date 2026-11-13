@@ -1,10 +1,12 @@
-import { cp, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { HostError } from "../errors.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import { uuid } from "../util/id.js";
 import { assertPublicHttpsEndpoint } from "../security/endpoint.js";
+import { spawn as spawnProcess } from "node:child_process";
+import { KeyedMutex } from "../util/keyed-mutex.js";
 
 export type SkillSource = {
   type: "git" | "directory";
@@ -47,6 +49,84 @@ function frontmatter(body: string): { name: string; description: string } {
 }
 
 /**
+ * Reject any symbolic link inside a skill source tree. A symlink is followed by
+ * readFile/cp, so a link inside an allowed directory could otherwise read files
+ * outside that directory under the Host's privileges.
+ */
+async function assertNoSymlinks(root: string, prefix = ""): Promise<void> {
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const childRelative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const childPath = join(root, entry.name);
+    const info = await lstat(childPath);
+    if (info.isSymbolicLink()) {
+      throw new HostError("SKILL_SOURCE_UNAVAILABLE", `skill source contains a symbolic link: ${childRelative}`);
+    }
+    if (info.isDirectory()) {
+      await assertNoSymlinks(childPath, childRelative);
+    }
+  }
+}
+
+const MAX_SKILL_FILES = 5_000;
+const MAX_SKILL_BYTES = 200 * 1024 * 1024;
+const MAX_SKILL_DEPTH = 20;
+const MAX_SKILL_FILE_BYTES = 50 * 1024 * 1024;
+const GIT_TIMEOUT_MS = 120_000;
+
+/** Bound the resources a skill source may consume before hashing/copying it. */
+async function assertWithinResourceLimits(root: string): Promise<void> {
+  let files = 0;
+  let bytes = 0;
+  async function visit(dir: string, depth: number): Promise<void> {
+    if (depth > MAX_SKILL_DEPTH) {
+      throw new HostError("SKILL_SOURCE_UNAVAILABLE", "skill source directory is too deep");
+    }
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const childPath = join(dir, entry.name);
+      const info = await lstat(childPath);
+      if (info.isSymbolicLink()) continue; // already rejected by assertNoSymlinks
+      if (info.isDirectory()) {
+        await visit(childPath, depth + 1);
+      } else if (info.isFile()) {
+        files += 1;
+        if (files > MAX_SKILL_FILES) throw new HostError("SKILL_SOURCE_UNAVAILABLE", "skill source has too many files");
+        if (info.size > MAX_SKILL_FILE_BYTES) throw new HostError("SKILL_SOURCE_UNAVAILABLE", "skill source file is too large");
+        bytes += info.size;
+        if (bytes > MAX_SKILL_BYTES) throw new HostError("SKILL_SOURCE_UNAVAILABLE", "skill source is too large");
+      }
+    }
+  }
+  await visit(root, 0);
+}
+
+function runGit(args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<number> {
+  return new Promise<number>((resolveCode, reject) => {
+    const child = spawnProcess("git", args, { stdio: "ignore" });
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new HostError("SKILL_SOURCE_UNAVAILABLE", "git operation timed out"));
+    }, timeoutMs);
+    timer.unref?.();
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveCode(value ?? 1);
+    });
+  });
+}
+
+/**
  * Content hash over the whole skill directory (relative path + size + bytes of
  * every file), not just `SKILL.md`. A change to a script or reference file must
  * yield a new immutable version directory instead of overwriting the one a
@@ -78,6 +158,10 @@ async function hashDirectory(root: string): Promise<string> {
 export class SkillRegistry {
   private readonly index: string;
   private readonly root: string;
+  /// Serialises the read-modify-write of the whole index (install/update/
+  /// delete). Atomic rename alone does not make concurrent read-modify-write
+  /// transactions safe.
+  private readonly indexMutex = new KeyedMutex();
 
   constructor(dataDir: string, private readonly allowedRoot: string, private readonly allowPrivateHosts = false) {
     this.index = join(dataDir, "skills", "index.json");
@@ -113,6 +197,7 @@ export class SkillRegistry {
       if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         throw new HostError("INVALID_ARGUMENT", "skill directory escapes allowed root");
       }
+      await assertNoSymlinks(path);
       return { path };
     }
     if (!source.url) throw new HostError("INVALID_ARGUMENT", "git source requires url");
@@ -120,24 +205,17 @@ export class SkillRegistry {
     const temp = join(this.root, `.clone-${uuid()}`);
     await mkdir(temp, { recursive: true, mode: 0o700 });
     try {
-      const args = ["clone", "--depth", "1"];
+      // Refuse HTTP redirects: the initial URL passed the SSRF policy, but a
+      // redirect could point at a private destination the policy never saw.
+      const args = ["-c", "http.followRedirects=false", "clone", "--depth", "1"];
       if (source.ref && source.refType !== "commit") args.push("--branch", source.ref);
       args.push(source.url, temp);
-      const { spawn } = await import("node:child_process");
-      const code = await new Promise<number>((resolveCode, reject) => {
-        const child = spawn("git", args, { stdio: "ignore" });
-        child.on("error", reject);
-        child.on("exit", (value) => resolveCode(value ?? 1));
-      });
+      const code = await runGit(args);
       if (code !== 0) {
         throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git clone failed");
       }
       if (source.ref && source.refType === "commit") {
-        const checkoutCode = await new Promise<number>((resolveCode, reject) => {
-          const child = spawn("git", ["-C", temp, "checkout", source.ref!], { stdio: "ignore" });
-          child.on("error", reject);
-          child.on("exit", (value) => resolveCode(value ?? 1));
-        });
+        const checkoutCode = await runGit(["-C", temp, "checkout", source.ref!]);
         if (checkoutCode !== 0) {
           throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git checkout failed");
         }
@@ -147,6 +225,7 @@ export class SkillRegistry {
       if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         throw new HostError("INVALID_ARGUMENT", "skill directory escapes source");
       }
+      await assertNoSymlinks(path);
       return { path, temp };
     } catch (error) {
       await rm(temp, { recursive: true, force: true });
@@ -160,8 +239,18 @@ export class SkillRegistry {
     now = new Date(),
     updateSkillId?: string
   ): Promise<SkillRecord> {
+    return this.indexMutex.run("index", () => this.installLocked(source, replace, now, updateSkillId));
+  }
+
+  private async installLocked(
+    source: SkillSource,
+    replace: boolean,
+    now: Date,
+    updateSkillId?: string
+  ): Promise<SkillRecord> {
     const { path: sourceDir, temp } = await this.sourceDir(source);
     try {
+      await assertWithinResourceLimits(sourceDir);
       const body = await readFile(join(sourceDir, "SKILL.md"), "utf8");
       const meta = frontmatter(body);
       const data = await this.load();
@@ -216,18 +305,22 @@ export class SkillRegistry {
   }
 
   async update(id: string, source: SkillSource, now = new Date()): Promise<SkillRecord> {
-    const existing = (await this.load()).skills.find((entry) => entry.id === id);
-    if (!existing) throw new HostError("NOT_FOUND", "skill not found");
-    return this.install(source, true, now, id);
+    return this.indexMutex.run("index", async () => {
+      const existing = (await this.load()).skills.find((entry) => entry.id === id);
+      if (!existing) throw new HostError("NOT_FOUND", "skill not found");
+      return this.installLocked(source, true, now, id);
+    });
   }
 
   async delete(id: string): Promise<boolean> {
-    const data = await this.load();
-    const index = data.skills.findIndex((entry) => entry.id === id);
-    if (index < 0) throw new HostError("NOT_FOUND", "skill not found");
-    const [skill] = data.skills.splice(index, 1);
-    await this.save(data);
-    if (skill) await rm(join(this.root, skill.name), { recursive: true, force: true });
-    return true;
+    return this.indexMutex.run("index", async () => {
+      const data = await this.load();
+      const index = data.skills.findIndex((entry) => entry.id === id);
+      if (index < 0) throw new HostError("NOT_FOUND", "skill not found");
+      const [skill] = data.skills.splice(index, 1);
+      await this.save(data);
+      if (skill) await rm(join(this.root, skill.name), { recursive: true, force: true });
+      return true;
+    });
   }
 }

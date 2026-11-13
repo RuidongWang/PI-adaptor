@@ -61,6 +61,13 @@ export class TokenStore {
     }
   >();
 
+  /// Short-lived authentication cache. Every RACP frame used to re-read and
+  /// rewrite tokens.json (lastUsedAt), which is a large write amplification and
+  /// makes every request fail when the disk is read-only. Cache entries are
+  /// invalidated by `save()` so revocation/rotation take effect immediately.
+  private readonly authCache = new Map<string, { device: DeviceRecord; cachedAt: number }>();
+  private readonly lastUsedPersistedAt = new Map<string, number>();
+
   private serialized<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.then(work);
     this.pending = result.then(() => undefined, () => undefined);
@@ -78,7 +85,26 @@ export class TokenStore {
   }
 
   private async save(data: TokenFile): Promise<void> {
+    // Any mutation may revoke/rotate a token; drop cached identities first.
+    this.authCache.clear();
     await writeJsonFileAtomic(this.path, data, 0o600);
+  }
+
+  /// Refresh lastUsedAt in the background at most once per minute per device.
+  /// It is advisory metadata; failure must not fail an authenticated request.
+  private touchLastUsed(deviceId: string, now: Date): void {
+    this.lastUsedPersistedAt.set(deviceId, now.getTime());
+    void this.serialized(async () => {
+      try {
+        const data = await this.load();
+        const device = data.devices.find((entry) => entry.deviceId === deviceId);
+        if (!device || device.revokedAt) return;
+        device.lastUsedAt = now.toISOString();
+        await this.save(data);
+      } catch {
+        // best-effort only
+      }
+    });
   }
 
   async createPairingToken(ttlSeconds = 600, now = new Date()): Promise<{ token: string; expiresAt: string }> {
@@ -120,6 +146,13 @@ export class TokenStore {
   }
 
   async authenticate(token: string, now = new Date()): Promise<DeviceRecord> {
+    const tokenHash = sha256(token);
+    const cached = this.authCache.get(tokenHash);
+    if (cached && now.getTime() - cached.cachedAt < 5_000) {
+      const last = this.lastUsedPersistedAt.get(cached.device.deviceId) ?? 0;
+      if (now.getTime() - last > 60_000) this.touchLastUsed(cached.device.deviceId, now);
+      return cached.device;
+    }
     return this.serialized(async () => {
       const data = await this.load();
       const hash = sha256(token);
@@ -134,7 +167,9 @@ export class TokenStore {
       );
       if (!device) throw new HostError("UNAUTHORIZED", "device token is invalid or revoked");
       device.lastUsedAt = now.toISOString();
+      this.lastUsedPersistedAt.set(device.deviceId, now.getTime());
       await this.save(data);
+      this.authCache.set(tokenHash, { device, cachedAt: now.getTime() });
       return device;
     });
   }

@@ -19,20 +19,42 @@ export async function writeJsonFileAtomic(
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = join(dirname(path), `.${randomUUID()}.tmp`);
-  const handle = await open(temp, "wx", mode);
+  let renamed = false;
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
+    const handle = await open(temp, "wx", mode);
+    try {
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await chmod(temp, mode);
+    await rename(temp, path);
+    renamed = true;
   } finally {
-    await handle.close();
+    if (!renamed) {
+      // A failed write must not leave a temp file that may contain metadata.
+      await rm(temp, { force: true }).catch(() => undefined);
+    }
   }
-  await chmod(temp, mode);
-  await rename(temp, path);
+  // The rename committed the new value. A directory-sync failure after this
+  // point means durability is uncertain, not that the write failed outright;
+  // surface that distinct state to the caller.
   const dir = await open(dirname(path), "r");
   try {
     await dir.sync();
+  } catch (error) {
+    throw new JsonCommitUncertainError(path, error);
   } finally {
     await dir.close();
+  }
+}
+
+/** The new file is in place, but its directory entry may not be durable. */
+export class JsonCommitUncertainError extends Error {
+  constructor(readonly path: string, readonly cause: unknown) {
+    super(`json write committed but directory sync failed: ${path}`);
+    this.name = "JsonCommitUncertainError";
   }
 }
 

@@ -631,14 +631,18 @@ describe("provider model discovery response limits and errors", () => {
       vi.spyOn(console, method.name as "log").mockImplementation(() => undefined)
     );
     const failure = makeHarness({ statusCode: 500, body: `upstream echoed ${apiKey}` });
-    let serialized = "";
+    let caught: unknown;
     try {
       await discover(failure, undefined, apiKey);
     } catch (error) {
-      expect(error).toBeInstanceOf(ProviderDiscoveryError);
-      serialized = JSON.stringify(error) + JSON.stringify((error as ProviderDiscoveryError).toJSONRPC("req_1"));
-      expect(String(error)).not.toContain(apiKey);
+      caught = error;
     }
+    // A silent success used to leave `serialized` empty and pass every
+    // negative assertion below. Require the rejection explicitly.
+    expect(caught).toBeInstanceOf(ProviderDiscoveryError);
+    const discoveryError = caught as ProviderDiscoveryError;
+    const serialized = JSON.stringify(discoveryError) + JSON.stringify(discoveryError.toJSONRPC("req_1"));
+    expect(String(discoveryError)).not.toContain(apiKey);
     expect(serialized).not.toContain(apiKey);
     expect(serialized).not.toContain("upstream echoed");
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();

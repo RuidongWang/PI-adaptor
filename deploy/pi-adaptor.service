@@ -33,6 +33,10 @@ Environment=PI_ADAPTOR_DIRECT_MESSAGE_RATE_WINDOW_MS=10000
 Environment=PI_ADAPTOR_DIRECT_UNAUTHENTICATED_TIMEOUT_MS=10000
 
 # Absolute path to the built entrypoint for the deployed version.
+# NOTE: this template assumes Node is installed at /usr/bin/node. If Node is
+# managed by nvm/asdf, create a systemd drop-in overriding ExecStart with the
+# absolute interpreter path (systemd does not expand shell PATH lookups), and
+# make sure the service user can execute it.
 ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js --home %h/.pi-adaptor --port 19445
 
 Restart=on-failure

@@ -829,14 +829,18 @@ describe("main direct lifecycle and bootstrap trust", () => {
     const expectedFingerprint = createHash("sha256").update(
       new (await import("node:crypto")).X509Certificate(tls.certificatePem).raw
     ).digest("hex");
-    expect(trust).toEqual({
+    const certificate = new (await import("node:crypto")).X509Certificate(tls.certificatePem);
+    expect(trust).toMatchObject({
       schemaVersion: 1,
       attemptId: "boot_direct_test",
       hostId: ready.hostId,
-      certificateSha256: expectedFingerprint,
-      notBefore: trust.notBefore,
-      notAfter: trust.notAfter
+      certificateSha256: expectedFingerprint
     });
+    // Derive validity independently from the certificate instead of comparing
+    // the actual values with themselves.
+    expect(new Date(String(trust.notBefore)).getTime()).toBe(new Date(certificate.validFrom).getTime());
+    expect(new Date(String(trust.notAfter)).getTime()).toBe(new Date(certificate.validTo).getTime());
+    expect(new Date(String(trust.notBefore)).getTime()).toBeLessThan(new Date(String(trust.notAfter)).getTime());
     expect(ready.fingerprint).not.toBe(expectedFingerprint);
     expect(JSON.stringify(trust)).not.toContain("endpoint");
     expect(JSON.stringify(trust)).not.toContain("privateKey");

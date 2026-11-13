@@ -20,6 +20,9 @@ import { sha256, uuid } from "../util/id.js";
 import { KeyedMutex } from "../util/keyed-mutex.js";
 import { IdempotencyStore, requestDigest } from "./idempotency.js";
 import { ACTIVE_TURN_STATUSES, TurnStore, type TurnRecord } from "./turn-store.js";
+import { ExtensionRegistry } from "../extensions/registry.js";
+import { ExtensionSnapshotStore } from "../extensions/snapshot-store.js";
+import type { ExtensionSnapshot } from "../extensions/types.js";
 
 /**
  * Mutating methods that must be replay-safe. Retries carrying the same
@@ -57,6 +60,11 @@ const IDEMPOTENT_METHODS = new Set([
 
 /** Keep history responses well below the client's 1 MiB advertised receive budget. */
 const HISTORY_RESPONSE_MAX_BYTES = 512 * 1024;
+/** Bounded in-memory queue: protects the host from unbounded queued text. */
+const MAX_QUEUED_TURNS_PER_SESSION = 20;
+const MAX_QUEUED_TURNS_TOTAL = 200;
+const MAX_QUEUED_TEXT_BYTES_TOTAL = 8 * 1024 * 1024;
+
 const SNAPSHOT_HISTORY_LIMIT = 100;
 const HISTORY_PAGE_MAX_ITEMS = 200;
 
@@ -309,9 +317,13 @@ export class HostService {
   readonly meta: MetaStore;
   readonly catalog: NativeSessionCatalog;
   readonly journal: EventJournal;
+  private shuttingDown = false;
   readonly blobs: BlobStore;
   readonly providers: ProviderStore;
   readonly skills: SkillRegistry;
+  readonly extensions: ExtensionRegistry;
+  readonly extensionSnapshots: ExtensionSnapshotStore;
+  private readonly executingDrivers = new Map<string, string>();
   hostId: string;
 
   private readonly subscriptions = new Map<string, Subscription>();
@@ -338,6 +350,9 @@ export class HostService {
       run: () => Promise<void>;
     }>
   >();
+  /// One drain per session: two concurrent drains could shift two entries and
+  /// start them in parallel.
+  private readonly draining = new Set<string>();
   private maintenanceTimer: NodeJS.Timeout | undefined;
   private readonly pendingApprovals = new Map<
     string,
@@ -367,10 +382,13 @@ export class HostService {
     this.skills = new SkillRegistry(config.dataDir, join(config.agentDir, ".."), config.dataDir.includes("test"));
     this.idempotency = new IdempotencyStore(config.dataDir);
     this.turnStore = new TurnStore(config.dataDir);
+    this.extensions = new ExtensionRegistry(config.extensions);
+    this.extensionSnapshots = new ExtensionSnapshotStore(config.dataDir);
     this.hostId = config.hostId || uuid();
   }
 
   async init(): Promise<{ removedLegacySecrets: number }> {
+    await this.extensions.initialize();
     await this.blobs.init();
     await this.journal.load();
     const hostPath = join(this.config.dataDir, "meta", "host.json");
@@ -394,6 +412,7 @@ export class HostService {
         ...(record.settledReason ? { settledReason: record.settledReason } : {})
       });
     }
+    await this.extensionSnapshots.recover(new Set((await this.meta.listSessions(true)).map(session => session.id)));
     // Provider keys are no longer persisted; older builds kept them under
     // data/providers/secrets. Remove leftovers so an upgraded host never leaves
     // a secret on disk. Only the count is reported, never names or contents.
@@ -411,6 +430,22 @@ export class HostService {
     this.maintenanceTimer.unref?.();
   }
 
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    this.stopMaintenance();
+    const turns = [...this.turns.values()];
+    await Promise.all(turns.filter(turn => ACTIVE_TURN_STATUSES.has(turn.status)).map(turn => this.stopTurn(turn.id, "interrupted")));
+    await Promise.all([...this.executingDrivers.entries()].map(async ([sessionId, id]) => {
+      try {
+        const turn = this.turns.get(id);
+        this.settleApprovalsForTurn(id);
+        await turn?.handle?.abort();
+        await turn?.handle?.wait();
+      } finally {
+        if (this.executingDrivers.get(sessionId) === id) this.executingDrivers.delete(sessionId);
+      }
+    }));
+  }
   stopMaintenance(): void {
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = undefined;
@@ -473,6 +508,7 @@ export class HostService {
           applyCeilingToPairedDevices: false
         },
         capabilities: {
+          extensionInventory: true, sessionExtensions: true, extensionManagement: false, extensionUI: false,
           attachments: true,
           imageOutput: true,
           skills: true,
@@ -483,7 +519,10 @@ export class HostService {
           directTransport: true,
           providerDiscovery: true,
           // Keys are supplied per turn by the client; nothing is stored on the host.
-          providerClientKeys: true
+          providerClientKeys: true,
+          // The driver has no AskTool request/answer bridge yet; do not claim
+          // bidirectional questions until it is implemented end to end.
+          inputRequests: false
         }
       };
     }
@@ -505,6 +544,7 @@ export class HostService {
         approvalDisconnectSeconds: 86400
       },
       capabilities: {
+        extensionInventory: true, sessionExtensions: true, extensionManagement: false, extensionUI: false,
         attachments: true,
         imageOutput: true,
         skills: true,
@@ -610,10 +650,19 @@ export class HostService {
           throw new HostError("INVALID_ARGUMENT", "project confirmation does not match");
         }
         // Contract §5.5: a project with an active session cannot be deleted.
-        if ([...this.turns.values()].some((turn) => ACTIVE_TURN_STATUSES.has(turn.status))) {
-          throw new HostError("SESSION_BUSY", "a session is running");
-        }
-        return { deleted: true, projectId: (await this.meta.deleteProject(projectId)).id };
+        // Only turns belonging to this project's sessions count; checking every
+        // turn in the host wrongly blocks deleting an idle project while another
+        // project is running.
+        const projectSessionIds = new Set(
+          (await this.meta.listSessions(true))
+            .filter((session) => session.projectId === projectId)
+            .map((session) => session.id)
+        );
+        return this.lockSessions([...projectSessionIds].sort(), async () => {
+          if ([...projectSessionIds].some(sessionId => this.sessionBusy(sessionId))) throw new HostError("SESSION_BUSY", "a session is running or cleaning up");
+          for (const sessionId of projectSessionIds) await this.extensionSnapshots.delete(sessionId);
+          return { deleted: true, projectId: (await this.meta.deleteProject(projectId)).id };
+        });
       }
       case "session/list":
         return this.listSessions(typeof params.includeArchived === "boolean" ? params.includeArchived : true);
@@ -659,7 +708,9 @@ export class HostService {
       case "approval/respond":
         return this.respondApproval(params, auth);
       case "input/respond":
-        return { resolved: true, alreadyResolved: false };
+        // AskTool is not wired to the production driver yet. Returning success
+        // here would claim an answer was delivered when nothing consumed it.
+        throw new HostError("CAPABILITY_UNAVAILABLE", "input requests are not supported by this host build");
       case "provider/list":
         return { providers: await this.providers.list(), revision: 1 };
       case "provider/create":
@@ -686,6 +737,17 @@ export class HostService {
       }
       case "provider/discover":
         return this.discoverProvider(params, auth);
+      case "extension/list":
+        if (Object.keys(params).length !== 0) throw new HostError("INVALID_ARGUMENT", "extension/list accepts no parameters");
+        return this.extensions.inventory(this.hostId);
+      case "session/extensions": {
+        if (Object.keys(params).some(key => key !== "sessionId")) throw new HostError("INVALID_ARGUMENT", "session/extensions only accepts sessionId");
+        const sessionId = str(params.sessionId, "sessionId");
+        return this.sessionLocks.run(sessionId, async () => {
+          await this.requireSession(sessionId);
+          return { hostId: this.hostId, sessionId, configRevision: this.extensions.configRevision, userLoadingEnabled: this.extensions.config.enabled, runningTurnId: this.activeTurnIdFor(sessionId), ...await this.extensionSnapshots.get(sessionId) };
+        });
+      }
       case "skill/list":
         return { skills: await this.skills.list() };
       case "skill/get":
@@ -718,12 +780,14 @@ export class HostService {
             str(params.sha256, "sha256")
           )
         };
-      case "attachment/read":
-        return this.blobs.read(
-          str(params.attachmentId, "attachmentId"),
-          typeof params.offset === "number" ? params.offset : 0,
-          typeof params.length === "number" ? params.length : 262144
-        );
+      case "attachment/read": {
+        const offset = params.offset === undefined ? 0 : params.offset;
+        const length = params.length === undefined ? 262_144 : params.length;
+        if (typeof offset !== "number" || typeof length !== "number") {
+          throw new HostError("INVALID_ARGUMENT", "offset and length must be numbers");
+        }
+        return this.blobs.read(str(params.attachmentId, "attachmentId"), offset, length);
+      }
       default:
         throw new HostError("INVALID_ARGUMENT", `unknown method: ${method}`);
     }
@@ -866,6 +930,8 @@ export class HostService {
   /// 当前运行或排队中的 turn id；契约 §3.4 要求会话摘要带 `activeTurnId`。
   /// 该字段是运行期状态，不在持久化的 SessionMeta 上，故每次序列化时按 `this.turns` 计算。
   private activeTurnIdFor(sessionId: string): string | null {
+    const executing = this.executingDrivers.get(sessionId);
+    if (executing) return executing;
     for (const turn of this.turns.values()) {
       if (turn.sessionId === sessionId && turn.status !== "queued" && ACTIVE_TURN_STATUSES.has(turn.status)) {
         return turn.id;
@@ -1128,7 +1194,12 @@ export class HostService {
     const sessionId = str(params.sessionId, "sessionId");
     const session = await this.requireSession(sessionId);
     const changes: Partial<SessionMeta> = { revision: session.revision + 1 };
-    if (params.mode === "agent" || params.mode === "plan") changes.mode = params.mode;
+    if (params.mode !== undefined) {
+      if (params.mode !== "agent" && params.mode !== "plan") {
+        throw new HostError("INVALID_ARGUMENT", "mode must be agent or plan", { field: "mode" });
+      }
+      changes.mode = params.mode;
+    }
     if (params.permissionMode === "ask" || params.permissionMode === "auto") changes.permissionMode = params.permissionMode;
     if (typeof params.providerId === "string") changes.providerId = params.providerId;
     if (typeof params.modelId === "string") changes.modelId = params.modelId;
@@ -1250,28 +1321,31 @@ export class HostService {
     });
   }
 
+  private lockSessions<T>(ids: string[], work: () => Promise<T>): Promise<T> {
+    const [first, ...rest] = ids;
+    return first === undefined ? work() : this.sessionLocks.run(first, () => this.lockSessions(rest, work));
+  }
+
   private async deleteSession(params: Record<string, unknown>) {
     const sessionId = str(params.sessionId, "sessionId");
     if (str(params.confirmSessionId, "confirmSessionId") !== sessionId) {
       throw new HostError("INVALID_ARGUMENT", "session confirmation does not match");
     }
-    const session = await this.requireSession(sessionId);
-    if (this.sessionBusy(sessionId)) {
-      throw new HostError("SESSION_BUSY", "session is running or has queued turns");
-    }
-    this.queuedStarts.delete(sessionId);
-    // Delete side effects in retry-safe order: media and the native file are
-    // removed while the session still exists, so a failure leaves a session that
-    // the same delete request can retry — instead of a tombstone whose media
-    // can never be cleaned up again.
-    await this.blobs.deleteSession(sessionId);
-    if (session.nativePath) {
-      const { rm } = await import("node:fs/promises");
-      await rm(session.nativePath, { force: true });
-    }
-    await this.meta.deleteSession(sessionId);
-    await this.emit("host", "session.deleted", { sessionId }, { sessionId });
-    return { deleted: true, sessionId };
+    return this.sessionLocks.run(sessionId, async () => {
+      const session = await this.requireSession(sessionId);
+      if (this.sessionBusy(sessionId)) throw new HostError("SESSION_BUSY", "session is running or has queued turns");
+      this.queuedStarts.delete(sessionId);
+      // Remove sidecars/media before the tombstone so a failed delete can be retried.
+      await this.extensionSnapshots.delete(sessionId);
+      await this.blobs.deleteSession(sessionId);
+      if (session.nativePath) {
+        const { rm } = await import("node:fs/promises");
+        await rm(session.nativePath, { force: true });
+      }
+      await this.meta.deleteSession(sessionId);
+      await this.emit("host", "session.deleted", { sessionId }, { sessionId });
+      return { deleted: true, sessionId };
+    });
   }
 
   private subscribe(params: Record<string, unknown>, _auth: AuthContext) {
@@ -1326,6 +1400,7 @@ export class HostService {
   }
 
   private async startTurn(params: Record<string, unknown>) {
+    if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
     const sessionId = str(params.sessionId, "sessionId");
     const input = obj(params.input);
     const text = typeof input.text === "string" ? input.text : "";
@@ -1342,9 +1417,22 @@ export class HostService {
     // Single in-process writer actor per session (contract §6.2): serialize
     // admission, reservation, and queue insertion under the session mutex.
     const plan = await this.sessionLocks.run(sessionId, async () => {
+      await this.requireSession(sessionId);
       if (this.sessionBusy(sessionId)) {
         if (admission === "reject_if_busy") {
           throw new HostError("SESSION_BUSY", "session already has a running or queued turn");
+        }
+        const queue = this.queuedStarts.get(sessionId) ?? [];
+        const queuedBytes = [...this.queuedStarts.values()]
+          .flat()
+          .reduce((total, entry) => total + Buffer.byteLength(entry.text, "utf8"), 0);
+        const queuedCount = [...this.queuedStarts.values()].reduce((total, entries) => total + entries.length, 0);
+        if (
+          queue.length >= MAX_QUEUED_TURNS_PER_SESSION ||
+          queuedCount >= MAX_QUEUED_TURNS_TOTAL ||
+          queuedBytes + Buffer.byteLength(text, "utf8") > MAX_QUEUED_TEXT_BYTES_TOTAL
+        ) {
+          throw new HostError("QUEUE_FULL", "queued turn limit reached; retry after the queue drains");
         }
         const queuedId = uuid();
         const queued: TurnState = {
@@ -1355,7 +1443,6 @@ export class HostService {
           settledAt: null
         };
         this.turns.set(queuedId, queued);
-        const queue = this.queuedStarts.get(sessionId) ?? [];
         queue.push({
           turnId: queuedId,
           text,
@@ -1383,7 +1470,22 @@ export class HostService {
     });
 
     if (plan.kind === "queued") {
-      await this.turnStore.upsert(this.toRecord(plan.turn));
+      try {
+        await this.turnStore.upsert(this.toRecord(plan.turn));
+      } catch (error) {
+        // Persisting the queued turn failed, so it must not remain executable in
+        // memory. Remove it under the same session lock used for admission.
+        await this.sessionLocks.run(sessionId, async () => {
+          this.turns.delete(plan.turn.id);
+          const queue = this.queuedStarts.get(sessionId);
+          if (queue) {
+            const filtered = queue.filter((entry) => entry.turnId !== plan.turn.id);
+            if (filtered.length === 0) this.queuedStarts.delete(sessionId);
+            else this.queuedStarts.set(sessionId, filtered);
+          }
+        });
+        throw error;
+      }
       return { turn: plan.turn };
     }
 
@@ -1420,6 +1522,13 @@ export class HostService {
     attachmentIds: string[],
     apiKey?: string
   ): Promise<TurnState> {
+    // A turn can be canceled while it sits between admission/dequeue and the
+    // actual driver start. Never start a turn that is already terminal.
+    const beforeStart = this.turns.get(turnId);
+    if (!beforeStart) throw new HostError("NOT_FOUND", "turn not found");
+    if (beforeStart.stopRequested || beforeStart.status === "canceled" || beforeStart.status === "interrupted") {
+      return beforeStart;
+    }
     // Resolve the provider first: the key check must fail before any session
     // file is created. Re-resolving here (rather than trusting startTurn's
     // pre-check) also covers a queued turn whose session was reconfigured while
@@ -1447,7 +1556,10 @@ export class HostService {
       const nativePath = session.nativePath;
       await this.sessionLocks.run(session.id, () => this.catalog.appendUserMessage(nativePath, text));
     }
-    const handle = this.driver.start({
+    this.executingDrivers.set(session.id, turnId);
+    let handle: ReturnType<AgentDriver["start"]>;
+    try {
+      handle = this.driver.start({
       turnId,
       sessionId: session.id,
       cwd: session.projectPath,
@@ -1468,6 +1580,7 @@ export class HostService {
       thinkingLevel: session.thinkingLevel ?? undefined,
       text,
       images: images as never,
+      extensions: { registry: this.extensions, hostId: this.hostId, publish: snapshot => this.publishExtensionSnapshot(session.id, turnId, snapshot) },
       requestApproval: async (toolName: string, toolInput: unknown) => {
         const currentSession = await this.requireSession(session.id);
         if (currentSession.permissionMode === "auto") return true;
@@ -1483,6 +1596,20 @@ export class HostService {
         this.turnEventChains.set(turnId, next);
       }
     });
+    } catch (error) {
+      if (this.executingDrivers.get(session.id) === turnId) this.executingDrivers.delete(session.id);
+      throw error;
+    }
+    const afterStart = this.turns.get(turnId);
+    if (!afterStart || afterStart.stopRequested || afterStart.status === "canceled" || afterStart.status === "interrupted") {
+      // The driver was created but the turn was canceled in the meantime. Abort
+      // it and keep the terminal state instead of reviving it as running.
+      this.settleApprovalsForTurn(turnId);
+      await handle.abort().catch(() => undefined);
+      if (this.executingDrivers.get(session.id) === turnId) this.executingDrivers.delete(session.id);
+      if (afterStart) return afterStart;
+      throw new HostError("NOT_FOUND", "turn not found");
+    }
     const turn: TurnState = {
       id: handle.turnId,
       sessionId: session.id,
@@ -1498,6 +1625,7 @@ export class HostService {
     const settled = handle.wait().then(async () => {
       await (this.turnEventChains.get(turn.id) ?? Promise.resolve());
       this.turnEventChains.delete(turn.id);
+      if (this.executingDrivers.get(session.id) === turn.id) this.executingDrivers.delete(session.id);
       const current = this.turns.get(turn.id);
       // A stop request drives the terminal state itself. Otherwise a resolved
       // wait is authoritative even when the driver omitted its terminal event:
@@ -1509,6 +1637,7 @@ export class HostService {
           payload: { turnId: turn.id }
         });
       }
+      if (!current?.stopRequested) void this.drainQueue(session.id);
     });
     // A short turn may finish before the RPC response is sent. Join only work
     // that is already queued; a turn still running settles later, not inline.
@@ -1592,24 +1721,38 @@ export class HostService {
   }
 
   private async drainQueue(sessionId: string): Promise<void> {
-    const next = await this.sessionLocks.run(sessionId, async () => {
-      if (this.activeTurnIdFor(sessionId)) return undefined;
-      const queue = this.queuedStarts.get(sessionId);
-      if (!queue || queue.length === 0) return undefined;
-      const item = queue.shift()!;
-      if (queue.length === 0) this.queuedStarts.delete(sessionId);
-      return item;
-    });
-    if (!next) return;
+    if (this.shuttingDown) return;
+    if (this.draining.has(sessionId)) return;
+    this.draining.add(sessionId);
     try {
-      await next.run();
-    } catch {
-      const queued = this.turns.get(next.turnId);
-      if (queued && ACTIVE_TURN_STATUSES.has(queued.status)) {
-        await this.settleTurn(next.turnId, "failed", "queue_start_failed");
+      const next = await this.sessionLocks.run(sessionId, async () => {
+        if (this.activeTurnIdFor(sessionId)) return undefined;
+        const queue = this.queuedStarts.get(sessionId);
+        if (!queue || queue.length === 0) return undefined;
+        const item = queue.shift()!;
+        if (queue.length === 0) this.queuedStarts.delete(sessionId);
+        // Reserve the execution slot before leaving the lock. The turn keeps its
+        // id but is from now on "running" for busy checks; a cancel that arrives
+        // before the driver starts must still be able to stop it.
+        const turn = this.turns.get(item.turnId);
+        if (!turn || turn.status !== "queued") return undefined;
+        turn.status = "running";
+        turn.stopRequested = false;
+        return item;
+      });
+      if (!next) return;
+      try {
+        await next.run();
+      } catch {
+        const queued = this.turns.get(next.turnId);
+        if (queued && ACTIVE_TURN_STATUSES.has(queued.status)) {
+          await this.settleTurn(next.turnId, "failed", "queue_start_failed");
+        }
       }
-      void this.drainQueue(sessionId);
+    } finally {
+      this.draining.delete(sessionId);
     }
+    void this.drainQueue(sessionId);
   }
 
   private async requestApproval(
@@ -1711,11 +1854,25 @@ export class HostService {
     }
   }
 
+  private publishExtensionSnapshot(sessionId: string, turnId: string, snapshot: ExtensionSnapshot): Promise<void> {
+    if (this.executingDrivers.get(sessionId) !== turnId) return Promise.resolve();
+    const previous = this.turnEventChains.get(turnId) ?? Promise.resolve();
+    const next = previous.then(() => this.sessionLocks.run(sessionId, async () => {
+      await this.requireSession(sessionId);
+      const turn = this.turns.get(turnId);
+      if (!turn || this.executingDrivers.get(sessionId) !== turnId || snapshot.turnId !== turnId || snapshot.sessionId !== sessionId || snapshot.hostId !== this.hostId) return;
+      const saved = await this.extensionSnapshots.put(snapshot);
+      if (saved) await this.emit("session", "session.extensions.updated", saved, { sessionId, turnId });
+    }));
+    this.turnEventChains.set(turnId, next.catch(() => undefined));
+    return next;
+  }
+
   private async handleAgentEvent(sessionId: string, turnId: string, event: AgentEvent) {
     // A user-requested stop aborts the execution, which surfaces here as
     // turn.failed. That is not a real failure: `stopTurn` owns the terminal state
     // and emits turn.interrupted, so swallow the abort-induced failure entirely.
-    if (event.kind === "turn.failed" && this.turns.get(turnId)?.stopRequested) {
+    if ((event.kind === "turn.failed" || event.kind === "turn.completed") && this.turns.get(turnId)?.stopRequested) {
       return;
     }
     let payload = event.payload;
@@ -1767,6 +1924,8 @@ export class HostService {
       this.removeLiveItem(turnId, payload);
     }
     if (event.kind === "turn.completed" || event.kind === "turn.failed") {
+      const existing = this.turns.get(turnId);
+      if (existing && !ACTIVE_TURN_STATUSES.has(existing.status)) return;
       // Settle before serialising so the payload carries the terminal status, and
       // drop any approval the turn was waiting on (contract §8.2).
       await this.settleTurn(turnId, event.kind === "turn.completed" ? "completed" : "failed");
@@ -1781,7 +1940,7 @@ export class HostService {
     await this.sessionLocks.run(sessionId, () =>
       this.emit("session", event.kind, payload, { sessionId, turnId })
     );
-    if (event.kind === "turn.completed" || event.kind === "turn.failed") {
+    if ((event.kind === "turn.completed" || event.kind === "turn.failed") && !this.executingDrivers.has(sessionId)) {
       void this.drainQueue(sessionId);
     }
   }
@@ -1822,12 +1981,14 @@ export class HostService {
     }
     turn.stopRequested = true;
     if (turn.handle) {
+      this.settleApprovalsForTurn(turnId);
       await turn.handle.abort();
       // Release any tool approval the execution is blocked on, otherwise its
       // `wait` never settles (deadlock). Then wait for it to actually stop; the
       // driver resolves `wait` once its terminal event has been routed.
       this.settleApprovalsForTurn(turnId);
       await turn.handle.wait().catch(() => undefined);
+      await (this.turnEventChains.get(turnId) ?? Promise.resolve());
     }
     // Stopping a running turn also cancels anything queued behind it — those turns never
     // start, so they must be settled explicitly (and reported) rather than left

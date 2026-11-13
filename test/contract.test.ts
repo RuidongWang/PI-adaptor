@@ -127,3 +127,28 @@ describe("pi-adaptor contract", () => {
     }
   });
 });
+
+describe("extensions frozen contract", () => {
+  it("validates disabled, partial failure and previous configuration fixtures against their method results", async () => {
+    const schema = JSON.parse(await readFile(fileURLToPath(schemaURL), "utf8")) as Schema;
+    const golden = JSON.parse(await readFile(fileURLToPath(goldenURL), "utf8")) as { extensionScenarios: unknown[] };
+    expect(golden.extensionScenarios).toHaveLength(3);
+    for (const [index, fixture] of golden.extensionScenarios.entries()) {
+      const validate = compileResponseForMethod(schema, index === 0 ? "result_extensionList" : "result_sessionExtensions");
+      expect(validate(fixture), JSON.stringify(validate.errors)).toBe(true);
+    }
+  });
+  it("requires every Snapshot field and rejects the extra snapshot wrapper", async () => {
+    const schema = JSON.parse(await readFile(fileURLToPath(schemaURL), "utf8")) as Schema;
+    const golden = JSON.parse(await readFile(fileURLToPath(goldenURL), "utf8")) as { events: Array<{ params: { event: { kind: string; payload: Record<string, unknown> } } }> };
+    const fixture = golden.events.find(value => value.params.event.kind === "session.extensions.updated")!.params.event;
+    const ajv = new Ajv2020({ strict: true, allErrors: true }); addFormats(ajv);
+    const validate = ajv.compile({ $schema: schema.$schema, $defs: schema.$defs, $ref: "#/$defs/extensionEvent" });
+    expect(validate(fixture)).toBe(true);
+    expect(validate({ ...fixture, payload: { snapshot: fixture.payload } })).toBe(false);
+    for (const field of Object.keys(fixture.payload)) {
+      const payload = { ...fixture.payload }; delete payload[field];
+      expect(validate({ ...fixture, payload }), `missing ${field}`).toBe(false);
+    }
+  });
+});

@@ -533,8 +533,10 @@ describe("idempotency scoping and expiration", () => {
     let fileContent = "";
     try {
       fileContent = await readFile(idempotencyPath, "utf8");
-    } catch {
-      // file might not even be written if rotate-token is memory-only
+    } catch (error) {
+      // Only a genuinely absent file is acceptable; permission/I/O errors must
+      // fail the test instead of silently passing the "no token" assertion.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     expect(fileContent).not.toContain(res.deviceToken);
   });
@@ -561,8 +563,8 @@ describe("idempotency scoping and expiration", () => {
     let fileContent = "";
     try {
       fileContent = await readFile(idempotencyPath, "utf8");
-    } catch {
-      // store may not have been written — nothing to leak
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     expect(fileContent).not.toContain(first.token);
     expect(fileContent).not.toContain("ppt2.");

@@ -1,3 +1,5 @@
+import { parseExtensionsConfig } from "./extensions/registry.js";
+import type { ExtensionsConfig } from "./extensions/types.js";
 import { chmod, mkdir, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -47,6 +49,7 @@ export type HostConfig = {
   hostVersion: string;
   piVersion: string;
   direct: DirectConfig;
+  extensions: ExtensionsConfig;
 };
 
 /**
@@ -64,6 +67,7 @@ export type HostConfigFile = {
   piVersion?: string;
   providerSeedFile?: string;
   direct?: DirectConfigFile;
+  extensions?: unknown;
 };
 
 /**
@@ -95,7 +99,16 @@ export const HOST_VERSION = readPackageVersion();
 function valueAfter(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index < 0) return undefined;
-  return args[index + 1];
+  const value = args[index + 1];
+  // Reject a missing value or another option where the value belongs. Otherwise
+  // `--home --pair` silently uses "--pair" as the data directory.
+  if (value === undefined || value.startsWith("-")) {
+    throw new Error(`missing value for ${name}`);
+  }
+  if (args.indexOf(name, index + 1) >= 0) {
+    throw new Error(`duplicate option: ${name}`);
+  }
+  return value;
 }
 
 function numberFromPort(raw: unknown, source: string): number {
@@ -287,7 +300,8 @@ export function parseHostConfig(
     hostId: valueAfter(args, "--host-id") ?? env.PI_ADAPTOR_HOST_ID ?? fileConfig.hostId ?? "",
     hostVersion: env.PI_ADAPTOR_VERSION ?? fileConfig.hostVersion ?? HOST_VERSION,
     piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.3.0",
-    direct: parseDirectConfig(args, env, fileConfig)
+    direct: parseDirectConfig(args, env, fileConfig),
+    extensions: parseExtensionsConfig(fileConfig.extensions)
   };
 }
 

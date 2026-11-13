@@ -11,6 +11,12 @@ export type IdempotencyRecord = {
   digest: string;
   result: unknown;
   createdAt: string;
+  /**
+   * `pending` is persisted before the side effect runs. If the process dies
+   * between the side effect and writing the result, a retry finds `pending` and
+   * must not execute again blindly.
+   */
+  state?: "pending" | "done";
 };
 
 type IdempotencyFile = { version: 1; records: IdempotencyRecord[] };
@@ -127,20 +133,40 @@ export class IdempotencyStore {
           await this.save(data);
           throw new HostError("IDEMPOTENCY_CONFLICT", "idempotency key reused with different request");
         }
+        if (existing.state === "pending") {
+          // The previous attempt may have run its side effect before the result
+          // was persisted. Never replay automatically; let the caller reconcile.
+          throw new HostError("CONFLICT", "previous attempt outcome is unknown; reconcile before retrying");
+        }
         return existing.result as T;
       }
       // Execute outside the store's serialisation is unsafe: two concurrent
       // identical requests must not both run. The store lock is the admission
       // point, so `work` runs while holding it.
-      const result = await work();
-      data.records.push({
+      const pending: IdempotencyRecord = {
         key,
         ...(deviceId ? { deviceId } : {}),
         method,
         digest,
-        result: persistable(result),
-        createdAt: now.toISOString()
-      });
+        result: null,
+        createdAt: now.toISOString(),
+        state: "pending"
+      };
+      data.records.push(pending);
+      // Persist the reservation before running the side effect. A crash after
+      // this point leaves a tombstone that blocks silent double execution.
+      await this.save(data);
+      let result: T;
+      try {
+        result = await work();
+      } catch (error) {
+        // A definite failure means the caller may retry; drop the reservation.
+        data.records = data.records.filter((record) => record !== pending);
+        await this.save(data).catch(() => undefined);
+        throw error;
+      }
+      pending.result = persistable(result);
+      pending.state = "done";
       await this.save(data);
       return result;
     });

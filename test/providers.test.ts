@@ -74,9 +74,11 @@ describe("provider store", () => {
           thinkingLevels: [], defaultThinkingLevel: null, supportsImages: true }
       ]
     }, new Date("2026-01-01T00:00:00Z"));
+    const updateSecret = "sk-test-update-secret";
     const updated = await store.update(created.id, {
       name: "Updated", vendorKey: "original", type: "openai_compatible",
       protocol: "openai_compatible", baseUrl: "https://example.com/v2", authKind: "api_key",
+      apiKey: updateSecret,
       models: [
         { id: "next", displayName: "Next", contextWindow: 300_000, maxTokens: 24_000,
           thinkingLevels: ["off", "high"], defaultThinkingLevel: "high", supportsImages: true },
@@ -96,7 +98,7 @@ describe("provider store", () => {
     expect(updated.apiKey).toBeUndefined();
     expect(updated.keyStorage).toBe("client");
     // An update carrying a key still leaves nothing on disk.
-    expect(await readFile(join(root, "providers", "providers.json"), "utf8")).not.toContain("sk-test-update-secret");
+    expect(await readFile(join(root, "providers", "providers.json"), "utf8")).not.toContain(updateSecret);
     await expect(readdir(join(root, "providers", "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
   });
   it("rejects invalid auth combinations", async () => {
