@@ -113,7 +113,8 @@ export class IdempotencyStore {
     digest: string,
     work: () => Promise<T>,
     deviceId?: string,
-    now = new Date()
+    now = new Date(),
+    recoverPending?: () => Promise<T | undefined>
   ): Promise<T> {
     return this.serialized(async () => {
       const data = await this.load();
@@ -136,7 +137,14 @@ export class IdempotencyStore {
         if (existing.state === "pending") {
           // The previous attempt may have run its side effect before the result
           // was persisted. Never replay automatically; let the caller reconcile.
-          throw new HostError("CONFLICT", "previous attempt outcome is unknown; reconcile before retrying");
+          const committed = await recoverPending?.();
+          if (committed === undefined) {
+            throw new HostError("CONFLICT", "previous attempt outcome is unknown; reconcile before retrying");
+          }
+          existing.result = persistable(committed);
+          existing.state = "done";
+          await this.save(data);
+          return committed;
         }
         return existing.result as T;
       }
@@ -160,9 +168,12 @@ export class IdempotencyStore {
       try {
         result = await work();
       } catch (error) {
-        // A definite failure means the caller may retry; drop the reservation.
-        data.records = data.records.filter((record) => record !== pending);
-        await this.save(data).catch(() => undefined);
+        // Business rejections may be retried. An unexpected storage or runtime
+        // failure can happen after the mutation committed, so keep its reservation.
+        if (error instanceof HostError && error.code !== "INTERNAL") {
+          data.records = data.records.filter((record) => record !== pending);
+          await this.save(data).catch(() => undefined);
+        }
         throw error;
       }
       pending.result = persistable(result);

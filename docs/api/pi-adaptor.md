@@ -333,7 +333,7 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 {"text":"排队中的指令正文","attachmentCount":1}
 ```
 
-`text` 是入队时的指令正文，`attachmentCount` 是入队时声明的附件数量。二者不出现在 `turn/start` 响应、`turn/get`、事件或幂等结果中；Host 重启后队列消失（对应 turn 变为 `uncertain`），正文不可恢复。
+`text` 是入队指令的 UTF-8 预览，超过 1 KiB 时标记省略。实际执行仍使用完整指令。`attachmentCount` 是入队时声明的附件数量。二者仅在恢复快照返回。Host 重启后队列消失，对应 turn 变为 `uncertain`。恢复快照中的流式条目也返回有界预览。
 
 ### 3.7 Attachment
 
@@ -511,6 +511,12 @@ Host 对每个会话只允许一个 in-process writer actor。actor 写入顺序
 
 结果：`{"items":[],"hasMore":false,"revision":12}`。
 
+若历史项单独超出响应预算，Host 返回正文预览；存在 `textByteLength` 时，该值是原文的 UTF-8 字节数。
+读取原文时发送 `{"sessionId":"session-id","textRange":{"itemId":"item-id","offset":0}}`，不可同时传分页参数。
+原文响应沿用上述字段（`items` 为空、`hasMore` 为 false），增加
+`textChunk: {dataBase64, totalBytes}`。每块至多 64 KiB，按解码后的字节数推进 `offset`。
+收齐后将完整字节串解码为 UTF-8。条目不存在返回 `NOT_FOUND`，非法偏移返回 `INVALID_ARGUMENT`。
+
 ### 6.6 `session/configure`
 
 请求：
@@ -635,6 +641,8 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 ## 8. Turn、审批与输入
 
 ### 8.1 `turn/start`
+
+对需要密钥的模型服务，客户端在同一次请求中发送 `apiKey` 和 `providerBinding: {providerId, baseUrl}`。绑定取自本机凭证对应的服务和保存密钥时的地址。Host 在启动或入队前核对绑定。配置变化返回 `CONFLICT`，缺少绑定时提示升级客户端。自动生成会话标题使用相同的密钥绑定。
 
 ```json
 {
@@ -925,7 +933,7 @@ Git 来源只允许公开 HTTPS URL；拒绝私网/回环/链路本地目标和�
 5. 旧 v1 Host 不满足本契约；iOS 必须依据子协议或握手失败给出明确升级提示。
 6. Host 记录、Keychain account 与 iOS SQLite 复合键必须包含协议大版本；v1 与 v2 Host 不得共享事件游标、缓存主键或设备令牌。
 7. Host 进程重启后必须更换事件 `epoch`；未完成 turn 先确认/终止旧进程组。能证明已停止且未产生后续输出时标记 `interrupted`，否则标记 `uncertain` 并带 `settledReason:"agent_restarted_unconfirmed"`；不得自动续跑。
-8. Host 不持久化 provider API key（本版本起）：`create/update/seed` 的 `apiKey` 只校验后丢弃；`turn/start` 必须携带 transient `apiKey`（会话 provider `authKind==="api_key"` 时），否则返回 `PROVIDER_SECRET_MISSING`。旧客户端不传该字段，服务端与客户端必须一起升级；`initialize.capabilities.providerClientKeys=true` 供新客户端识别。升级启动时会一次性删除遗留的 `data/providers/secrets/`（只记录 `PI_HOST_PROVIDER_SECRETS_REMOVED {"count":N}`）。
+8. Host 不持久化 provider API key。`create/update/seed` 只校验密钥。需要密钥的服务要求 `turn/start` 同时携带临时 `apiKey` 和 `providerBinding`，缺少密钥返回 `PROVIDER_SECRET_MISSING`。服务端和客户端需配套升级。Host 保留 `initialize.capabilities.providerClientKeys=true`。启动时清理遗留的 `data/providers/secrets/`，日志只记录清理数量。
 9. 幂等 `context.idempotencyKey` 的 digest 对 `apiKey`（含嵌套）脱敏后再哈希；不同密钥、其余参数相同的重试视为同一请求。升级前已写入的旧 digest 不做回写清洗（无法还原），只保证新写入不再含密钥派生值。
 
 ## 14. 验收标准映射

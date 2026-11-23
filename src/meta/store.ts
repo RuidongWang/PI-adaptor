@@ -132,6 +132,22 @@ export class MetaStore {
     return (await this.load()).sessions.filter((session) => !session.deletedAt && (includeArchived || !session.archived));
   }
 
+  async importDiscoveredSessions(sessions: SessionMeta[]): Promise<void> {
+    if (sessions.length === 0) return;
+    await this.serialized(async () => {
+      const data = await this.load();
+      const known = new Set(data.sessions.map((session) => session.id));
+      const previousCount = data.sessions.length;
+      for (const session of sessions) {
+        if (known.has(session.id)) continue;
+        // Deleted rows are also known. A stale filesystem scan cannot revive one.
+        known.add(session.id);
+        data.sessions.push(session);
+      }
+      if (data.sessions.length !== previousCount) await this.save(data);
+    });
+  }
+
   async upsertSession(session: SessionMeta): Promise<SessionMeta> {
     return this.serialized(async () => {
       const data = await this.load();
@@ -149,14 +165,15 @@ export class MetaStore {
 
   async updateSession(
     sessionId: string,
-    changes: Partial<Omit<SessionMeta, "id" | "createdAt">>,
-    now = new Date()
+    changes: Partial<Omit<SessionMeta, "id" | "createdAt" | "revision">>,
+    { incrementRevision = false, now = new Date() } = {}
   ): Promise<SessionMeta> {
     return this.serialized(async () => {
       const data = await this.load();
-      const session = data.sessions.find((entry) => entry.id === sessionId);
+      const session = data.sessions.find((entry) => entry.id === sessionId && !entry.deletedAt);
       if (!session) throw new HostError("NOT_FOUND", "session not found");
       Object.assign(session, changes, { updatedAt: now.toISOString() });
+      if (incrementRevision) session.revision += 1;
       await this.save(data);
       return session;
     });

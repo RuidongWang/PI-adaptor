@@ -1,4 +1,5 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -60,6 +61,10 @@ const IDEMPOTENT_METHODS = new Set([
 
 /** Keep history responses well below the client's 1 MiB advertised receive budget. */
 const HISTORY_RESPONSE_MAX_BYTES = 512 * 1024;
+const HISTORY_TEXT_PREVIEW_BYTES = 8 * 1024;
+const HISTORY_TEXT_CHUNK_BYTES = 64 * 1024;
+const SNAPSHOT_QUEUE_TEXT_BYTES = 1024;
+const SNAPSHOT_ACTIVE_ITEMS_BYTES = 128 * 1024;
 /** Bounded in-memory queue: protects the host from unbounded queued text. */
 const MAX_QUEUED_TURNS_PER_SESSION = 20;
 const MAX_QUEUED_TURNS_TOTAL = 200;
@@ -78,6 +83,13 @@ type LiveItem = {
   toolName?: string | undefined;
   status: string;
 };
+
+type TurnProvider = Awaited<ReturnType<ProviderStore["list"]>>[number];
+
+function providerCredentialScope(provider: TurnProvider | undefined): string | undefined {
+  if (!provider) return undefined;
+  return JSON.stringify([provider.id, provider.baseUrl, provider.protocol, provider.authKind]);
+}
 
 export type AuthContext = { device: DeviceRecord };
 export type EventSink = (event: HostEvent) => void;
@@ -221,6 +233,15 @@ function imageExtension(mimeType: string): string {
   return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
 }
 
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (part as { text?: unknown } | null)?.text)
+    .filter((text): text is string => typeof text === "string")
+    .join("");
+}
+
 async function projectContent(
   sessionId: string,
   itemId: string,
@@ -269,10 +290,7 @@ async function projectContent(
     }
   }
   return {
-    text: projected
-      .map((part) => (part as { text?: string }).text)
-      .filter((text): text is string => typeof text === "string")
-      .join(""),
+    text: messageText(projected),
     attachments,
     content: projected
   };
@@ -282,7 +300,7 @@ async function itemFromEntry(
   entry: SessionEntry,
   sessionId: string,
   blobs: BlobStore
-): Promise<Record<string, unknown> | null> {
+) {
   if (entry.type !== "message") return null;
   const message = entry.message as {
     role?: string;
@@ -309,6 +327,25 @@ async function itemFromEntry(
     toolName: tool ? (message.toolName ?? null) : null,
     attachments: projected.attachments,
     content: { ...message, content: projected.content }
+  };
+}
+
+function textPreview(text: string, maxBytes: number): string {
+  const prefix = Buffer.from(text.slice(0, maxBytes + 1), "utf8");
+  if (prefix.length <= maxBytes) return text;
+  let end = maxBytes;
+  // If the cut is in the middle of a UTF-8 character, move back to its start.
+  while ((prefix[end]! & 0xc0) === 0x80) end--;
+  return prefix.subarray(0, end).toString("utf8") + "\n…";
+}
+
+function historyItemPreview(item: NonNullable<Awaited<ReturnType<typeof itemFromEntry>>>): Record<string, unknown> {
+  const text = textPreview(item.text, HISTORY_TEXT_PREVIEW_BYTES);
+  return {
+    ...item,
+    text,
+    content: { role: item.role, timestamp: item.content.timestamp },
+    ...(text !== item.text ? { textByteLength: Buffer.byteLength(item.text, "utf8") } : {})
   };
 }
 
@@ -345,8 +382,6 @@ export class HostService {
       /** Snapshot-only prompt summary so a reattach can render the queued instruction. */
       text: string;
       attachmentCount: number;
-      /** Transient client key; lives in memory only and dies with the queue entry. */
-      apiKey?: string;
       run: () => Promise<void>;
     }>
   >();
@@ -587,6 +622,7 @@ export class HostService {
     if (IDEMPOTENT_METHODS.has(method)) {
       const key = idempotencyKeyFrom(params);
       if (key) {
+        if (method === "session/create") return this.createSessionWithKey(params, auth.device.deviceId, key);
         return this.idempotency.run(
           key,
           method,
@@ -634,7 +670,7 @@ export class HostService {
       case "project/browse":
         return this.browseProject(typeof params.path === "string" ? params.path : undefined);
       case "project/register": {
-        const path = resolve(str(params.path, "path"));
+        const path = await this.projectDirectory(str(params.path, "path"));
         const label = typeof params.label === "string" ? params.label : path.split("/").pop() ?? path;
         return { project: await this.meta.registerProject(path, label) };
       }
@@ -908,7 +944,7 @@ export class HostService {
   }
 
   private async browseProject(path?: string) {
-    const target = resolve(path ?? process.env.HOME ?? "/");
+    const target = await this.projectDirectory(path ?? process.env.HOME ?? "/");
     const entries = await readdir(target, { withFileTypes: true });
     return {
       path: target,
@@ -919,6 +955,26 @@ export class HostService {
         readable: true
       }))
     };
+  }
+
+  private async projectDirectory(path: string): Promise<string> {
+    const target = resolve(path);
+    try {
+      if (!(await stat(target)).isDirectory()) {
+        throw new HostError("INVALID_ARGUMENT", "project path is not a directory", { field: "path" });
+      }
+      await access(target, constants.R_OK | constants.X_OK);
+      return target;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        throw new HostError("NOT_FOUND", "project directory does not exist", { field: "path" });
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        throw new HostError("FORBIDDEN", "project directory is not accessible", { field: "path" });
+      }
+      throw error;
+    }
   }
 
   private async requireSession(sessionId: string): Promise<SessionMeta> {
@@ -954,29 +1010,23 @@ export class HostService {
   private async listSessions(includeArchived: boolean) {
     const native = await this.catalog.scan();
     const projects = await this.meta.listProjects(true);
-    const existing = new Map((await this.meta.listSessions(true)).map((session) => [session.id, session]));
-    for (const item of native) {
-      const meta =
-        existing.get(item.id) ??
-        ({
-          id: item.id,
-          title: item.title,
-          projectId: projects.find((project) => project.path === item.cwd)?.id ?? null,
-          projectPath: item.cwd,
-          mode: "agent",
-          permissionMode: "ask",
-          providerId: null,
-          modelId: null,
-          thinkingLevel: null,
-          revision: 1,
-          archived: false,
-          createdAt: item.createdAt,
-          updatedAt: item.updatedAt,
-          nativePath: item.path,
-          readOnlyReason: item.readOnlyReason
-        } satisfies SessionMeta);
-      await this.meta.upsertSession(meta);
-    }
+    await this.meta.importDiscoveredSessions(native.map((item): SessionMeta => ({
+      id: item.id,
+      title: item.title,
+      projectId: projects.find((project) => project.path === item.cwd)?.id ?? null,
+      projectPath: item.cwd,
+      mode: "agent",
+      permissionMode: "ask",
+      providerId: null,
+      modelId: null,
+      thinkingLevel: null,
+      revision: 1,
+      archived: false,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      nativePath: item.path,
+      readOnlyReason: item.readOnlyReason
+    })));
     const sessions = await this.meta.listSessions(includeArchived);
     return {
       sessions: sessions.filter((session) => !session.deletedAt).map((session) => this.summarize(session)),
@@ -995,10 +1045,29 @@ export class HostService {
     };
   }
 
-  private async createSession(params: Record<string, unknown>): Promise<SessionMeta> {
+  private async createSessionWithKey(params: Record<string, unknown>, deviceId: string, key: string) {
+    const digest = requestDigest(params);
+    // A retry can find the committed session even if the event or response never made it out.
+    const id = sha256(JSON.stringify(["session/create", deviceId, key, digest]));
+    return this.idempotency.run(
+      key, "session/create", digest,
+      async () => ({ session: this.summarize(await this.createSession(params, id)) }),
+      deviceId, undefined,
+      async () => {
+        const session = await this.meta.getSession(id);
+        return session && !session.deletedAt ? { session: this.summarize(session) } : undefined;
+      }
+    );
+  }
+
+  private async createSession(params: Record<string, unknown>, id = uuid()): Promise<SessionMeta> {
+    const existing = await this.meta.getSession(id);
+    if (existing) {
+      if (existing.deletedAt) throw new HostError("CONFLICT", "the created session was deleted");
+      return existing;
+    }
     const projectId = typeof params.projectId === "string" ? params.projectId : null;
     const project = projectId ? await this.meta.getProject(projectId) : null;
-    const id = uuid();
     const now = new Date().toISOString();
     const session: SessionMeta = {
       id,
@@ -1050,18 +1119,7 @@ export class HostService {
       }));
     const summary = this.summarize(session);
     const activeTurn = summary.activeTurnId ? this.turns.get(summary.activeTurnId) ?? null : null;
-    const activeItems = activeTurn
-      ? [...(this.liveItems.get(activeTurn.id)?.values() ?? [])].map((item) => ({
-          id: item.itemId,
-          itemType: item.itemType,
-          kind: item.kind,
-          role: item.role ?? null,
-          text: item.text,
-          status: item.status,
-          turnId: activeTurn.id,
-          toolName: item.toolName ?? null
-        }))
-      : [];
+    const activeItems = activeTurn ? this.activeItemPreviews(activeTurn.id) : [];
     const queuedTurns = (this.queuedStarts.get(sessionId) ?? []).flatMap((entry) => {
       const turn = this.turns.get(entry.turnId);
       if (!turn) return [];
@@ -1071,7 +1129,7 @@ export class HostService {
       return [
         {
           ...this.publicTurn(turn),
-          text: entry.text,
+          text: textPreview(entry.text, SNAPSHOT_QUEUE_TEXT_BYTES),
           attachmentCount: entry.attachmentCount
         }
       ];
@@ -1115,11 +1173,32 @@ export class HostService {
     return result;
   }
 
+  private activeItemPreviews(turnId: string) {
+    const previews = [];
+    let bytes = 2;
+    for (const item of [...(this.liveItems.get(turnId)?.values() ?? [])].reverse()) {
+      const preview = {
+        id: item.itemId,
+        itemType: item.itemType,
+        kind: item.kind,
+        role: item.role ?? null,
+        text: textPreview(item.text, HISTORY_TEXT_PREVIEW_BYTES),
+        status: item.status,
+        turnId,
+        toolName: item.toolName ?? null
+      };
+      const size = Buffer.byteLength(JSON.stringify(preview), "utf8") + 1;
+      if (bytes + size > SNAPSHOT_ACTIVE_ITEMS_BYTES) continue;
+      previews.push(preview);
+      bytes += size;
+    }
+    return previews.reverse();
+  }
+
   /**
    * Select a contiguous suffix before a stable native item id. Project only the
-   * selected page, never the full history; neither message bodies nor source
-   * files are truncated. Byte limits apply to the entire result, including live
-   * snapshot state, with ample headroom for the JSON-RPC envelope.
+   * selected page. If a single item cannot fit, send a preview and keep the
+   * original available through session/history textRange.
    */
   private async historyPage(
     sessionId: string,
@@ -1145,9 +1224,14 @@ export class HostService {
     let bytes = baseBytes;
     let start = end;
     while (start > 0 && items.length < limit) {
-      const item = await itemFromEntry(messages[start - 1]!, sessionId, this.blobs);
-      if (!item) break;
-      const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (items.length > 0 ? 1 : 0);
+      const projected = await itemFromEntry(messages[start - 1]!, sessionId, this.blobs);
+      if (!projected) break;
+      let item: Record<string, unknown> = projected;
+      let itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (items.length > 0 ? 1 : 0);
+      if (bytes + itemBytes > HISTORY_RESPONSE_MAX_BYTES && items.length === 0) {
+        item = historyItemPreview(projected);
+        itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8");
+      }
       if (bytes + itemBytes > HISTORY_RESPONSE_MAX_BYTES) {
         if (items.length === 0) {
           throw new HostError("PAYLOAD_TOO_LARGE", "history item exceeds the response budget", {
@@ -1166,6 +1250,32 @@ export class HostService {
   }
 
   private async history(sessionId: string, params: Record<string, unknown> = {}) {
+    const range = params.textRange === undefined ? undefined : obj(params.textRange);
+    if (range) {
+      if (params.beforeItemId !== undefined || params.limit !== undefined) {
+        throw new HostError("INVALID_ARGUMENT", "textRange cannot be used with history pagination");
+      }
+      const itemId = str(range.itemId, "textRange.itemId");
+      const offset = range.offset;
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) {
+        throw new HostError("INVALID_ARGUMENT", "textRange.offset must be a nonnegative integer");
+      }
+      return this.sessionLocks.run(sessionId, async () => {
+        const session = await this.requireSession(sessionId);
+        const entries = session.nativePath ? await this.catalog.history(session.nativePath) : [];
+        const item = entries.find((entry) => entry.type === "message" && entry.id === itemId);
+        if (!item || item.type !== "message") throw new HostError("NOT_FOUND", "history item no longer exists");
+        const body = Buffer.from(messageText((item.message as { content?: unknown }).content), "utf8");
+        if (offset > body.length) throw new HostError("INVALID_ARGUMENT", "textRange.offset exceeds the body length");
+        return {
+          items: [], hasMore: false, revision: session.revision,
+          textChunk: {
+            dataBase64: body.subarray(offset, offset + HISTORY_TEXT_CHUNK_BYTES).toString("base64"),
+            totalBytes: body.length
+          }
+        };
+      });
+    }
     const limit = params.limit === undefined ? SNAPSHOT_HISTORY_LIMIT : params.limit;
     if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > HISTORY_PAGE_MAX_ITEMS) {
       throw new HostError("INVALID_ARGUMENT", "history limit must be an integer from 1 to 200", { field: "limit" });
@@ -1192,8 +1302,7 @@ export class HostService {
 
   private async configureSession(params: Record<string, unknown>) {
     const sessionId = str(params.sessionId, "sessionId");
-    const session = await this.requireSession(sessionId);
-    const changes: Partial<SessionMeta> = { revision: session.revision + 1 };
+    const changes: Partial<SessionMeta> = {};
     if (params.mode !== undefined) {
       if (params.mode !== "agent" && params.mode !== "plan") {
         throw new HostError("INVALID_ARGUMENT", "mode must be agent or plan", { field: "mode" });
@@ -1204,9 +1313,7 @@ export class HostService {
     if (typeof params.providerId === "string") changes.providerId = params.providerId;
     if (typeof params.modelId === "string") changes.modelId = params.modelId;
     if (typeof params.thinkingLevel === "string") changes.thinkingLevel = params.thinkingLevel;
-    const updated = await this.meta.updateSession(sessionId, changes);
-    await this.emit("host", "session.changed", { session: updated }, { sessionId });
-    return updated;
+    return this.reviseSession(sessionId, changes);
   }
 
   /**
@@ -1232,9 +1339,7 @@ export class HostService {
     if (!provider) throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
 
     const apiKey = transientApiKey(params);
-    if (provider.authKind !== "none" && !apiKey) {
-      throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
-    }
+    this.assertProviderKey(provider, apiKey, params.providerBinding);
     const api = providerApi(provider.protocol);
     const declared = provider.models.find((model) => model.id === modelId);
     const runtime = await ModelRuntime.create({
@@ -1244,7 +1349,7 @@ export class HostService {
     runtime.registerProvider(provider.id, {
       name: provider.name,
       baseUrl: provider.baseUrl,
-      apiKey: apiKey ?? "none",
+      apiKey: provider.authKind === "api_key" ? apiKey! : "none",
       api,
       models: [{
         id: modelId,
@@ -1284,22 +1389,27 @@ export class HostService {
   private async renameSession(params: Record<string, unknown>) {
     const sessionId = str(params.sessionId, "sessionId");
     const title = str(params.title, "title");
-    const session = await this.requireSession(sessionId);
-    if (session.nativePath) await this.catalog.appendSessionInfo(session.nativePath, title);
-    const updated = await this.meta.updateSession(sessionId, { title, revision: session.revision + 1 });
-    await this.emit("host", "session.changed", { session: updated }, { sessionId });
-    return updated;
+    return this.reviseSession(sessionId, { title }, async (session) => {
+      if (session.nativePath) await this.catalog.appendSessionInfo(session.nativePath, title);
+    });
   }
 
   private async archiveSession(params: Record<string, unknown>) {
     const sessionId = str(params.sessionId, "sessionId");
-    const session = await this.requireSession(sessionId);
-    const updated = await this.meta.updateSession(sessionId, {
-      archived: params.archived === true,
-      revision: session.revision + 1
+    return this.reviseSession(sessionId, { archived: params.archived === true });
+  }
+
+  private async reviseSession(
+    sessionId: string,
+    changes: Partial<Omit<SessionMeta, "id" | "createdAt" | "revision">>,
+    beforeSave?: (session: SessionMeta) => Promise<void>
+  ): Promise<SessionMeta> {
+    return this.sessionLocks.run(sessionId, async () => {
+      if (beforeSave) await beforeSave(await this.requireSession(sessionId));
+      const updated = await this.meta.updateSession(sessionId, changes, { incrementRevision: true });
+      await this.emit("host", "session.changed", { session: updated }, { sessionId });
+      return updated;
     });
-    await this.emit("host", "session.changed", { session: updated }, { sessionId });
-    return updated;
   }
 
   private async branchSession(params: Record<string, unknown>) {
@@ -1409,15 +1519,13 @@ export class HostService {
     if (attachments.length > 10) throw new HostError("ATTACHMENT_INVALID", "too many images");
     const admission = params.admission === "queue" ? "queue" : "reject_if_busy";
     const apiKey = transientApiKey(params);
-    const session = await this.requireSession(sessionId);
-    if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
-    // Fail before any placeholder/queue entry exists: the client must learn that
-    // it has to supply its key, not watch a queued turn that can never run.
-    await this.assertProviderKey(session, apiKey);
     // Single in-process writer actor per session (contract §6.2): serialize
     // admission, reservation, and queue insertion under the session mutex.
     const plan = await this.sessionLocks.run(sessionId, async () => {
-      await this.requireSession(sessionId);
+      const session = await this.requireSession(sessionId);
+      if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
+      const provider = await this.sessionProvider(session);
+      this.assertProviderKey(provider, apiKey, params.providerBinding);
       if (this.sessionBusy(sessionId)) {
         if (admission === "reject_if_busy") {
           throw new HostError("SESSION_BUSY", "session already has a running or queued turn");
@@ -1442,19 +1550,33 @@ export class HostService {
           createdAt: new Date().toISOString(),
           settledAt: null
         };
+        const keyScope = providerCredentialScope(provider);
         this.turns.set(queuedId, queued);
         queue.push({
           turnId: queuedId,
           text,
           attachmentCount: attachments.length,
-          ...(apiKey ? { apiKey } : {}),
           run: async () => {
             const fresh = await this.requireSession(sessionId);
-            if (fresh.readOnlyReason) return;
-            await this.launchTurn(fresh, queuedId, text, attachments, apiKey);
+            if (fresh.readOnlyReason) throw new HostError("SESSION_READ_ONLY", fresh.readOnlyReason);
+            const currentProvider = await this.sessionProvider(fresh);
+            // The key is scoped to the service selected at admission, even if
+            // the same provider ID was edited to point at a different endpoint.
+            if (apiKey && providerCredentialScope(currentProvider) !== keyScope) {
+              throw new HostError("CONFLICT", "Model service changed while queued. Review the service and resend.", { field: "providerId" });
+            }
+            this.assertProviderKey(currentProvider, apiKey, params.providerBinding);
+            await this.launchTurn(fresh, queuedId, text, attachments, currentProvider, apiKey);
           }
         });
         this.queuedStarts.set(sessionId, queue);
+        try {
+          await this.persistTurnBeforeStart(queued);
+        } catch (error) {
+          this.turns.delete(queuedId);
+          this.removeQueuedStart(sessionId, queuedId);
+          throw error;
+        }
         return { kind: "queued" as const, turn: queued };
       }
       const turnId = uuid();
@@ -1466,37 +1588,31 @@ export class HostService {
         settledAt: null
       };
       this.turns.set(turnId, placeholder);
-      return { kind: "running" as const, turnId };
+      return { kind: "running" as const, turnId, session, provider };
     });
 
     if (plan.kind === "queued") {
-      try {
-        await this.turnStore.upsert(this.toRecord(plan.turn));
-      } catch (error) {
-        // Persisting the queued turn failed, so it must not remain executable in
-        // memory. Remove it under the same session lock used for admission.
-        await this.sessionLocks.run(sessionId, async () => {
-          this.turns.delete(plan.turn.id);
-          const queue = this.queuedStarts.get(sessionId);
-          if (queue) {
-            const filtered = queue.filter((entry) => entry.turnId !== plan.turn.id);
-            if (filtered.length === 0) this.queuedStarts.delete(sessionId);
-            else this.queuedStarts.set(sessionId, filtered);
-          }
-        });
-        throw error;
-      }
       return { turn: plan.turn };
     }
 
     try {
-      const turn = await this.launchTurn(session, plan.turnId, text, attachments, apiKey);
+      const turn = await this.launchTurn(plan.session, plan.turnId, text, attachments, plan.provider, apiKey);
       return { turn };
     } catch (error) {
-      this.turns.delete(plan.turnId);
+      if (!this.turns.get(plan.turnId)?.stopRequested) {
+        await this.settleTurn(plan.turnId, "failed", "turn_start_failed").catch(() => undefined);
+      }
       void this.drainQueue(sessionId);
       throw error;
     }
+  }
+
+  private removeQueuedStart(sessionId: string, turnId: string): void {
+    const queue = this.queuedStarts.get(sessionId);
+    if (!queue) return;
+    const remaining = queue.filter((entry) => entry.turnId !== turnId);
+    if (remaining.length === 0) this.queuedStarts.delete(sessionId);
+    else this.queuedStarts.set(sessionId, remaining);
   }
 
   private async sessionProvider(session: SessionMeta) {
@@ -1509,10 +1625,31 @@ export class HostService {
    * A provider with `authKind:"api_key"` requires the transient per-turn key:
    * the host stores nothing. Providers with `authKind:"none"` ignore the field.
    */
-  private async assertProviderKey(session: SessionMeta, apiKey: string | undefined): Promise<void> {
-    const provider = await this.sessionProvider(session);
-    if (provider?.authKind !== "api_key" || apiKey) return;
-    throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
+  private assertProviderKey(provider: TurnProvider | undefined, apiKey: string | undefined, rawBinding: unknown): void {
+    if (rawBinding !== undefined) {
+      const binding = obj(rawBinding);
+      const providerId = str(binding.providerId, "providerBinding.providerId");
+      const baseUrl = str(binding.baseUrl, "providerBinding.baseUrl");
+      if (provider?.id !== providerId || provider.baseUrl !== baseUrl) {
+        throw new HostError("CONFLICT", "Model service or endpoint changed. Review its settings and retry.", { field: "providerBinding" });
+      }
+    }
+    if (provider?.authKind !== "api_key") return;
+    if (!apiKey) {
+      throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
+    }
+    if (rawBinding === undefined) {
+      throw new HostError("INVALID_ARGUMENT", "An API key requires a provider binding. Update the client and retry.", { field: "providerBinding" });
+    }
+  }
+
+  private async persistTurnBeforeStart(turn: TurnState): Promise<void> {
+    try {
+      await this.turnStore.upsert(this.toRecord(turn));
+    } catch {
+      // No provider or tool work has started. The caller can retry this request.
+      throw new HostError("CAPABILITY_UNAVAILABLE", "Unable to save the turn before starting. Retry when Host storage is available.");
+    }
   }
 
   private async launchTurn(
@@ -1520,51 +1657,41 @@ export class HostService {
     turnId: string,
     text: string,
     attachmentIds: string[],
+    provider: TurnProvider | undefined,
     apiKey?: string
   ): Promise<TurnState> {
     // A turn can be canceled while it sits between admission/dequeue and the
     // actual driver start. Never start a turn that is already terminal.
-    const beforeStart = this.turns.get(turnId);
-    if (!beforeStart) throw new HostError("NOT_FOUND", "turn not found");
-    if (beforeStart.stopRequested || beforeStart.status === "canceled" || beforeStart.status === "interrupted") {
-      return beforeStart;
-    }
-    // Resolve the provider first: the key check must fail before any session
-    // file is created. Re-resolving here (rather than trusting startTurn's
-    // pre-check) also covers a queued turn whose session was reconfigured while
-    // it waited.
-    const provider = await this.sessionProvider(session);
-    if (provider?.authKind === "api_key" && !apiKey) {
-      throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
-    }
-    if (!session.nativePath) {
-      const sessionDir = join(this.config.dataDir, "sessions");
-      session.nativePath = await this.sessionLocks.run(session.id, () =>
-        this.catalog.createFile(session.projectPath, sessionDir, session.id)
-      );
-      await this.meta.updateSession(session.id, { nativePath: session.nativePath });
-    }
+    const turn = this.getTurn(turnId);
+    if (turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return turn;
     const images = [];
     for (const id of attachmentIds) {
-      const read = await this.blobs.read(id, 0, 20 * 1024 * 1024);
-      if (read.attachment.sessionId !== session.id || read.attachment.state !== "ready") {
-        throw new HostError("ATTACHMENT_INVALID", "attachment does not belong to session");
+      const { dataBase64, mimeType } = await this.blobs.readForTurn(id, session.id);
+      images.push({ type: "image", data: dataBase64, mimeType });
+    }
+    // Order the reservation, possible native prompt write, and cancellation.
+    const nativePath = await this.sessionLocks.run(session.id, async () => {
+      if (turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return;
+      await this.persistTurnBeforeStart(turn);
+      if (turn.stopRequested) return;
+      let path = session.nativePath;
+      if (!path) {
+        path = await this.catalog.createFile(session.projectPath, join(this.config.dataDir, "sessions"), session.id);
+        await this.meta.updateSession(session.id, { nativePath: path });
       }
-      images.push({ type: "image", data: read.dataBase64, mimeType: read.attachment.mimeType });
-    }
-    if (!this.driver.appendsPrompt && text) {
-      const nativePath = session.nativePath;
-      await this.sessionLocks.run(session.id, () => this.catalog.appendUserMessage(nativePath, text));
-    }
-    this.executingDrivers.set(session.id, turnId);
-    let handle: ReturnType<AgentDriver["start"]>;
-    try {
-      handle = this.driver.start({
+      if (!turn.stopRequested && !this.driver.appendsPrompt && text) {
+        await this.catalog.appendUserMessage(path, text);
+      }
+      return path;
+    });
+    if (!nativePath || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return turn;
+
+    const handle = this.driver.start({
       turnId,
       sessionId: session.id,
       cwd: session.projectPath,
       sessionDir: join(this.config.dataDir, "sessions"),
-      sessionFile: session.nativePath,
+      sessionFile: nativePath,
       provider: provider
         ? {
             id: provider.id,
@@ -1596,32 +1723,8 @@ export class HostService {
         this.turnEventChains.set(turnId, next);
       }
     });
-    } catch (error) {
-      if (this.executingDrivers.get(session.id) === turnId) this.executingDrivers.delete(session.id);
-      throw error;
-    }
-    const afterStart = this.turns.get(turnId);
-    if (!afterStart || afterStart.stopRequested || afterStart.status === "canceled" || afterStart.status === "interrupted") {
-      // The driver was created but the turn was canceled in the meantime. Abort
-      // it and keep the terminal state instead of reviving it as running.
-      this.settleApprovalsForTurn(turnId);
-      await handle.abort().catch(() => undefined);
-      if (this.executingDrivers.get(session.id) === turnId) this.executingDrivers.delete(session.id);
-      if (afterStart) return afterStart;
-      throw new HostError("NOT_FOUND", "turn not found");
-    }
-    const turn: TurnState = {
-      id: handle.turnId,
-      sessionId: session.id,
-      status: "running",
-      createdAt: new Date().toISOString(),
-      settledAt: null,
-      handle
-    };
-    this.turns.set(handle.turnId, turn);
-    // Persist before observing completion, so terminal storage remains ordered
-    // after the initial running record even for a synchronously finishing driver.
-    await this.turnStore.upsert(this.toRecord(turn));
+    turn.handle = handle;
+    this.executingDrivers.set(session.id, turnId);
     const settled = handle.wait().then(async () => {
       await (this.turnEventChains.get(turn.id) ?? Promise.resolve());
       this.turnEventChains.delete(turn.id);
@@ -1645,7 +1748,7 @@ export class HostService {
       settled,
       this.sessionLocks.run(session.id, async () => undefined)
     ]);
-    return this.turns.get(handle.turnId) ?? turn;
+    return turn;
   }
 
   private toRecord(turn: TurnState): TurnRecord {
@@ -1743,10 +1846,14 @@ export class HostService {
       if (!next) return;
       try {
         await next.run();
-      } catch {
+      } catch (error) {
         const queued = this.turns.get(next.turnId);
-        if (queued && ACTIVE_TURN_STATUSES.has(queued.status)) {
-          await this.settleTurn(next.turnId, "failed", "queue_start_failed");
+        if (queued && !queued.stopRequested && ACTIVE_TURN_STATUSES.has(queued.status)) {
+          await this.settleTurn(next.turnId, "failed", "queue_start_failed").catch(() => undefined);
+          await this.sessionLocks.run(sessionId, () => this.emit("session", "turn.failed", {
+            turn: this.publicTurn(queued),
+            error: error instanceof HostError ? error.message : "Queued turn could not start."
+          }, { sessionId, turnId: next.turnId })).catch(() => undefined);
         }
       }
     } finally {
@@ -1959,15 +2066,7 @@ export class HostService {
       return { turn: this.publicTurn(turn) };
     }
     if (turn.status === "queued") {
-      const queue = this.queuedStarts.get(turn.sessionId);
-      if (queue) {
-        const filtered = queue.filter((entry) => entry.turnId !== turnId);
-        if (filtered.length === 0) {
-          this.queuedStarts.delete(turn.sessionId);
-        } else {
-          this.queuedStarts.set(turn.sessionId, filtered);
-        }
-      }
+      this.removeQueuedStart(turn.sessionId, turnId);
       await this.settleTurn(turnId, "canceled");
       await this.sessionLocks.run(turn.sessionId, () =>
         this.emit(

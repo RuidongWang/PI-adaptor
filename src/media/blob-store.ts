@@ -93,6 +93,28 @@ export class BlobStore {
     return join(this.blobs, hash);
   }
 
+  private async readyAttachment(id: string): Promise<AttachmentRecord> {
+    const record = (await this.load()).attachments.find((entry) => entry.id === id && entry.state === "ready");
+    if (!record || !isSha256Hex(record.sha256)) throw new HostError("NOT_FOUND", "attachment not found");
+    return record;
+  }
+
+  async readForTurn(id: string, sessionId: string): Promise<{ mimeType: AttachmentRecord["mimeType"]; dataBase64: string }> {
+    const record = await this.readyAttachment(id);
+    if (record.sessionId !== sessionId) {
+      throw new HostError("ATTACHMENT_INVALID", "attachment does not belong to session");
+    }
+    const path = this.blobPath(record.sha256);
+    const checkSize = (size: number) => size === record.byteLength && size > 0 && size <= MAX_IMAGE_BYTES;
+    if (!checkSize((await stat(path)).size)) throw new HostError("ATTACHMENT_INVALID", "attachment length changed");
+    const bytes = await readFile(path);
+    if (!checkSize(bytes.length) || createHash("sha256").update(bytes).digest("hex") !== record.sha256) {
+      throw new HostError("ATTACHMENT_INVALID", "attachment checksum mismatch");
+    }
+    // Turn assembly uses the complete image. The RPC reader below still limits each frame.
+    return { mimeType: record.mimeType, dataBase64: bytes.toString("base64") };
+  }
+
   async create(
     input: {
       sessionId: string;
@@ -231,9 +253,7 @@ export class BlobStore {
     dataBase64: string;
     eof: boolean;
   }> {
-    const record = (await this.load()).attachments.find((entry) => entry.id === id && entry.state === "ready");
-    if (!record) throw new HostError("NOT_FOUND", "attachment not found");
-    if (!isSha256Hex(record.sha256)) throw new HostError("NOT_FOUND", "attachment not found");
+    const record = await this.readyAttachment(id);
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new HostError("INVALID_ARGUMENT", "offset must be a non-negative safe integer");
     }

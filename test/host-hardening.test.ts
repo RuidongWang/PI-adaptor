@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import type { AgentDriver, AgentTurnHandle, AgentTurnRequest } from "../src/agen
 import { DeterministicAgentDriver } from "../src/agent/driver.js";
 import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
 import { HostService } from "../src/server/host-service.js";
+import type { TurnStore } from "../src/server/turn-store.js";
 import { EventJournal } from "../src/events/journal.js";
 import { SkillRegistry } from "../src/skills/registry.js";
 import type { AuthContext } from "../src/server/host-service.js";
@@ -48,6 +49,8 @@ class ControlledDriver implements AgentDriver {
 
 /** Transient provider key used by the key-handling tests; must never hit disk. */
 const TEST_TRANSIENT_KEY = "sk-test-transient-key";
+const TEST_PROVIDER_URL = "https://example.com/v1";
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgQIAqP2mVwAAAABJRU5ErkJggg==";
 
 async function createTestProvider(
   service: HostService,
@@ -63,7 +66,7 @@ async function createTestProvider(
         vendorKey,
         type: "openai_compatible",
         protocol: "openai_compatible",
-        baseUrl: "https://example.com/v1",
+        baseUrl: TEST_PROVIDER_URL,
         authKind,
         ...(authKind === "api_key" ? { apiKey: TEST_TRANSIENT_KEY } : {}),
         models: [
@@ -86,7 +89,7 @@ async function createTestProvider(
 
 /** Upload a tiny ready attachment through the real attachment path. */
 async function uploadPng(service: HostService, auth: AuthContext, sessionId: string): Promise<string> {
-  const bytes = Buffer.from("fake-png-bytes");
+  const bytes = Buffer.from(PNG_BASE64, "base64");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   const created = (await service.handle(
     "attachment/create",
@@ -155,7 +158,8 @@ async function setup(
   )) as {
     session: { id: string };
   };
-  return { root, config, service, auth, sessionId: session.session.id, providerId };
+  const providerBinding = providerId ? { providerId, baseUrl: TEST_PROVIDER_URL } : undefined;
+  return { root, config, service, auth, sessionId: session.session.id, providerId, providerBinding };
 }
 
 const tick = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -210,6 +214,22 @@ describe("event journal retention", () => {
 });
 
 describe("write idempotency", () => {
+  it("recovers the same session when creation commits before an event write fails", async () => {
+    const { service, auth, config } = await setup(new ControlledDriver());
+    const params = { title: "committed session", context: { idempotencyKey: "create-commit-test" } };
+    vi.spyOn(service.journal, "append").mockRejectedValueOnce(new Error("journal unavailable"));
+
+    await expect(service.handle("session/create", params, auth)).rejects.toThrow("journal unavailable");
+    const committed = (await service.meta.listSessions()).find(session => session.title === params.title);
+    expect(committed).toBeDefined();
+    const restarted = new HostService(config, new ControlledDriver());
+    await restarted.init();
+    await expect(restarted.handle("session/create", params, auth))
+      .resolves.toMatchObject({ session: { id: committed!.id } });
+    const sessions = await restarted.meta.listSessions();
+    expect(sessions.filter((session) => session.title === params.title)).toHaveLength(1);
+  });
+
   it("returns the first result for a repeated key and rejects a changed request", async () => {
     const { service, auth, sessionId } = await setup(new DeterministicAgentDriver());
     const first = (await service.handle(
@@ -234,6 +254,54 @@ describe("write idempotency", () => {
 });
 
 describe("session single-writer admission", () => {
+  it("registers only directories that still exist and are accessible", async () => {
+    const { root, service, auth } = await setup(new ControlledDriver());
+    const missing = join(root, "missing");
+    const file = join(root, "file");
+    await writeFile(file, "test");
+    await expect(service.handle("project/register", { path: missing }, auth))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(service.handle("project/register", { path: file }, auth))
+      .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    await expect(service.handle("project/register", { path: join(root, "project") + "/." }, auth))
+      .resolves.toMatchObject({ project: { path: join(root, "project") } });
+    expect(await service.meta.listProjects()).toHaveLength(1);
+  });
+
+  it("starts a turn with the complete uploaded image after checksum verification", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver);
+    const attachmentId = await uploadPng(service, auth, sessionId);
+    const { turn } = await service.handle("turn/start", {
+      sessionId, input: { text: "", attachments: [attachmentId] }
+    }, auth) as { turn: { id: string } };
+    expect(driver.requestFor(turn.id)?.images).toEqual([
+      { type: "image", data: PNG_BASE64, mimeType: "image/png" }
+    ]);
+    await service.shutdown();
+  });
+
+  it("releases the turn slot and accepts the same request after a failed reservation write", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver);
+    const start = vi.spyOn(driver, "start");
+    const store = Reflect.get(service, "turnStore") as TurnStore;
+    vi.spyOn(store, "upsert").mockRejectedValueOnce(new Error("disk full"));
+    const params = {
+      sessionId,
+      input: { text: "retry this message" },
+      context: { idempotencyKey: "turn-write-retry-test" }
+    };
+
+    await expect(service.handle("turn/start", params, auth)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+    expect(start).not.toHaveBeenCalled();
+    await expect(service.handle("session/get", { sessionId }, auth))
+      .resolves.toMatchObject({ session: { activeTurnId: null, nativePath: null } });
+    await expect(service.handle("turn/start", params, auth)).resolves.toMatchObject({ turn: { status: "running" } });
+    expect(start).toHaveBeenCalledTimes(1);
+    await service.shutdown();
+  });
+
   it("rejects a second turn while busy and accepts it when queued", async () => {
     const { service, auth, sessionId } = await setup(new ControlledDriver());
     await service.handle("turn/start", { sessionId, input: { text: "one" } }, auth);
@@ -649,6 +717,102 @@ describe("approval revision enforcement", () => {
 });
 
 describe("session history pagination", () => {
+  it("restores a bounded snapshot while keeping the full queued instruction for execution", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver);
+    const first = await service.handle("turn/start", { sessionId, input: { text: "first" } }, auth) as {
+      turn: { id: string }
+    };
+    const queuedText = "q".repeat(1023) + "会话".repeat(100_000);
+    const queued = await service.handle("turn/start", {
+      sessionId, admission: "queue", input: { text: queuedText }
+    }, auth) as { turn: { id: string; status: string } };
+    expect(queued.turn.status).toBe("queued");
+    driver.requestFor(first.turn.id)!.onEvent({
+      kind: "item.delta", payload: { itemId: "streaming-fixture", delta: "s".repeat(600 * 1024) }
+    });
+
+    await vi.waitFor(async () => {
+      const result = await service.handle("session/attach", { sessionId }, auth) as {
+        snapshot: { activeItems: Array<{ text: string }>; queuedTurns: Array<{ id: string; text: string }> }
+      };
+      expect(result.snapshot.activeItems[0]?.text).toMatch(/^s+\n…$/);
+      expect(result.snapshot.queuedTurns).toMatchObject([{ id: queued.turn.id, text: "q".repeat(1023) + "\n…" }]);
+      expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(512 * 1024);
+    });
+    driver.finishWithoutTerminalEvent(first.turn.id);
+    await vi.waitFor(() => expect(driver.requestFor(queued.turn.id)?.text).toBe(queuedText));
+    await service.shutdown();
+  });
+
+  it("assigns distinct revisions to concurrent session changes", async () => {
+    const { service, auth, sessionId } = await setup(new ControlledDriver());
+    const changes = await Promise.all([
+      service.handle("session/rename", { sessionId, title: "renamed" }, auth),
+      service.handle("session/configure", { sessionId, mode: "plan" }, auth),
+      service.handle("session/archive", { sessionId, archived: true }, auth)
+    ]) as Array<{ session: { revision: number } }>;
+    expect(changes.map(result => result.session.revision).sort()).toEqual([2, 3, 4]);
+    await expect(service.meta.getSession(sessionId))
+      .resolves.toMatchObject({ revision: 4, title: "renamed", mode: "plan", archived: true });
+  });
+
+  it("keeps a concurrently saved config during a native session list refresh", async () => {
+    const { service, auth, config, sessionId } = await setup(new ControlledDriver());
+    const session = (await service.meta.getSession(sessionId))!;
+    const nativePath = await service.catalog.createFile(session.projectPath, join(config.dataDir, "sessions"), sessionId);
+    await service.meta.updateSession(sessionId, { nativePath });
+
+    const listSessions = service.meta.listSessions.bind(service.meta);
+    vi.spyOn(service.meta, "listSessions").mockImplementationOnce(async (...args) => {
+      const snapshot = await listSessions(...args);
+      await service.handle("session/configure", { sessionId, mode: "plan" }, auth);
+      return snapshot;
+    });
+    await service.handle("session/list", {}, auth);
+
+    await expect(service.handle("session/get", { sessionId }, auth))
+      .resolves.toMatchObject({ session: { mode: "plan", revision: 2 } });
+  });
+
+  it("keeps a large history item readable and returns its full UTF-8 text in chunks", async () => {
+    const { service, auth, config, sessionId } = await setup(new ControlledDriver());
+    const session = (await service.meta.getSession(sessionId))!;
+    const nativePath = await service.catalog.createFile(session.projectPath, join(config.dataDir, "sessions"), sessionId);
+    const text = "a".repeat(65_535) + "🧪" + "你好".repeat(40_000);
+    const timestamp = new Date().toISOString();
+    const entries = [
+      { type: "message", id: "older", parentId: null, timestamp, message: { role: "user", content: "earlier", timestamp: Date.now() } },
+      { type: "message", id: "large", parentId: "older", timestamp, message: { role: "user", content: text, timestamp: Date.now() } }
+    ];
+    await appendFile(nativePath, entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    await service.meta.updateSession(sessionId, { nativePath });
+
+    const attached = await service.handle("session/attach", { sessionId }, auth) as {
+      snapshot: { items: { id: string; text: string; textByteLength?: number }[] }
+    };
+    const item = attached.snapshot.items.at(-1)!;
+    const fullBytes = Buffer.byteLength(text);
+    expect(item).toMatchObject({ id: "large", textByteLength: fullBytes });
+    expect(Buffer.byteLength(item.text)).toBeLessThan(10 * 1024);
+    await expect(service.handle("session/history", { sessionId, beforeItemId: "large" }, auth))
+      .resolves.toMatchObject({ items: [{ id: "older", text: "earlier" }] });
+
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < fullBytes;) {
+      const result = await service.handle("session/history", { sessionId, textRange: { itemId: item.id, offset } }, auth) as {
+        textChunk: { dataBase64: string; totalBytes: number }
+      };
+      const chunk = Buffer.from(result.textChunk.dataBase64, "base64");
+      expect(result.textChunk.totalBytes).toBe(fullBytes);
+      expect(chunk.length).toBeGreaterThan(0);
+      expect(chunk.length).toBeLessThanOrEqual(64 * 1024);
+      chunks.push(chunk);
+      offset += chunk.length;
+    }
+    expect(Buffer.concat(chunks).toString("utf8")).toBe(text);
+  });
+
   it("returns exactly the items before the cursor instead of any shorter page", async () => {
     const { service, auth, sessionId } = await setup(new DeterministicAgentDriver());
     for (let i = 1; i <= 5; i++) {
@@ -707,6 +871,57 @@ describe("session history pagination", () => {
 });
 
 describe("transient provider keys", () => {
+  it("rejects stale or missing credential bindings before starting a turn", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId, providerBinding } = await setup(driver, { provider: "api_key" });
+    const providerId = await createTestProvider(service, auth, "api_key", "destination");
+    await service.handle("session/configure", { sessionId, providerId }, auth);
+    const start = vi.spyOn(driver, "start");
+    const params = { sessionId, apiKey: TEST_TRANSIENT_KEY, input: { text: "fixture" } };
+    await expect(service.handle("turn/start", { ...params, providerBinding }, auth))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(service.handle("turn/start", {
+      ...params, providerBinding: { providerId, baseUrl: TEST_PROVIDER_URL + "/old" }
+    }, auth)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(service.handle("turn/start", params, auth))
+      .rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(start).not.toHaveBeenCalled();
+    await service.handle("turn/start", {
+      ...params, providerBinding: { providerId, baseUrl: TEST_PROVIDER_URL }
+    }, auth);
+    expect(start).toHaveBeenCalledTimes(1);
+    await service.shutdown();
+  });
+
+  it("never launches a queued turn with the previous provider's key after a provider change", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId, providerId, providerBinding } = await setup(driver, { provider: "api_key" });
+    const nextProviderId = await createTestProvider(service, auth, "api_key", "mock-second");
+    expect(nextProviderId).not.toBe(providerId);
+    const first = await service.handle("turn/start", {
+      sessionId, input: { text: "first" }, apiKey: TEST_TRANSIENT_KEY, providerBinding
+    }, auth) as { turn: { id: string } };
+    const queued = await service.handle("turn/start", {
+      sessionId, input: { text: "queued" }, apiKey: TEST_TRANSIENT_KEY, providerBinding, admission: "queue"
+    }, auth) as { turn: { id: string; status: string } };
+    expect(queued.turn.status).toBe("queued");
+    const subscription = await service.handle("events/subscribe", { scope: "session", sessionId }, auth) as {
+      subscriptionId: string
+    };
+    const sink = vi.fn();
+    service.setSubscriptionSink(subscription.subscriptionId, sink);
+
+    await service.handle("session/configure", { sessionId, providerId: nextProviderId, modelId: "mock-model" }, auth);
+    driver.finishWithoutTerminalEvent(first.turn.id);
+    await waitForTurnStatus(service, auth, queued.turn.id, "failed");
+    expect(driver.requestFor(queued.turn.id)).toBeUndefined();
+    await vi.waitFor(() => expect(sink).toHaveBeenCalledWith(expect.objectContaining({
+      turnId: queued.turn.id, kind: "turn.failed",
+      payload: expect.objectContaining({ turn: expect.objectContaining({ settledReason: "queue_start_failed" }) })
+    })));
+    await service.shutdown();
+  });
+
   it("rejects a turn for an api_key provider without a key and leaves no turn behind", async () => {
     const { service, auth, sessionId } = await setup(new DeterministicAgentDriver(), { provider: "api_key" });
     const subscription = (await service.handle(
@@ -734,10 +949,10 @@ describe("transient provider keys", () => {
 
   it("passes the transient key to the driver and never writes it to disk", async () => {
     const driver = new ControlledDriver();
-    const { service, auth, sessionId, config } = await setup(driver, { provider: "api_key" });
+    const { service, auth, sessionId, config, providerBinding } = await setup(driver, { provider: "api_key" });
     const started = (await service.handle(
       "turn/start",
-      { sessionId, apiKey: TEST_TRANSIENT_KEY, input: { text: "hello" } },
+      { sessionId, apiKey: TEST_TRANSIENT_KEY, providerBinding, input: { text: "hello" } },
       auth
     )) as { turn: { id: string; status: string } };
     expect(started.turn.status).toBe("running");
@@ -769,7 +984,7 @@ describe("transient provider keys", () => {
   });
 
   it("does not persist a key-derived digest for an idempotent turn", async () => {
-    const { service, auth, sessionId, config } = await setup(new ControlledDriver(), { provider: "api_key" });
+    const { service, auth, sessionId, config, providerBinding } = await setup(new ControlledDriver(), { provider: "api_key" });
     const firstKey = "sk-first-transient-key";
     const secondKey = "sk-second-transient-key";
     const first = (await service.handle(
@@ -777,6 +992,7 @@ describe("transient provider keys", () => {
       {
         sessionId,
         apiKey: firstKey,
+        providerBinding,
         input: { text: "hi" },
         context: { requestId: "r1", idempotencyKey: "redacted-k1" }
       },
@@ -789,6 +1005,7 @@ describe("transient provider keys", () => {
       {
         sessionId,
         apiKey: secondKey,
+        providerBinding,
         input: { text: "hi" },
         context: { requestId: "r2", idempotencyKey: "redacted-k1" }
       },
@@ -808,10 +1025,10 @@ describe("transient provider keys", () => {
 describe("queued turn snapshot", () => {
   it("returns queued text and attachment count in the snapshot only, and drops them on cancel", async () => {
     const driver = new ControlledDriver();
-    const { service, auth, sessionId, config } = await setup(driver, { provider: "api_key" });
+    const { service, auth, sessionId, config, providerBinding } = await setup(driver, { provider: "api_key" });
     await service.handle(
       "turn/start",
-      { sessionId, apiKey: TEST_TRANSIENT_KEY, input: { text: "first" } },
+      { sessionId, apiKey: TEST_TRANSIENT_KEY, providerBinding, input: { text: "first" } },
       auth
     );
     const attachmentId = await uploadPng(service, auth, sessionId);
@@ -821,6 +1038,7 @@ describe("queued turn snapshot", () => {
         sessionId,
         admission: "queue",
         apiKey: TEST_TRANSIENT_KEY,
+        providerBinding,
         input: { text: "queue-one", attachments: [attachmentId] }
       },
       auth

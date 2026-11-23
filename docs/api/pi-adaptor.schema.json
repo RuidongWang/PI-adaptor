@@ -839,6 +839,10 @@
           },
           "maxItems": 10
         },
+        "textByteLength": {
+          "type": "integer",
+          "minimum": 1
+        },
         "content": {
           "$ref": "#/$defs/unknownObject"
         }
@@ -3371,12 +3375,30 @@
         },
         "limit": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 200
+        },
+        "textRange": {
+          "type": "object",
+          "properties": {
+            "itemId": { "$ref": "#/$defs/id" },
+            "offset": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["itemId", "offset"],
+          "additionalProperties": false
         }
       },
       "required": [
         "sessionId"
       ],
+      "dependentSchemas": {
+        "textRange": {
+          "properties": {
+            "beforeItemId": false,
+            "limit": false
+          }
+        }
+      },
       "additionalProperties": false
     },
     "result_sessionHistory": {
@@ -3394,6 +3416,15 @@
         "revision": {
           "type": "integer",
           "minimum": 0
+        },
+        "textChunk": {
+          "type": "object",
+          "properties": {
+            "dataBase64": { "type": "string", "maxLength": 87384 },
+            "totalBytes": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["dataBase64", "totalBytes"],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3692,6 +3723,15 @@
           "minLength": 1,
           "maxLength": 16384,
           "pattern": "^[^\\r\\n]*$"
+        },
+        "providerBinding": {
+          "type": "object",
+          "properties": {
+            "providerId": { "$ref": "#/$defs/id" },
+            "baseUrl": { "type": "string", "minLength": 1 }
+          },
+          "required": ["providerId", "baseUrl"],
+          "additionalProperties": false
         },
         "input": {
           "type": "object",
