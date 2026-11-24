@@ -32,6 +32,16 @@ describe("extensions snapshot store", () => {
     await writeFile(store.path("session"), JSON.stringify({ version: 1, sessionId: "session", latestAttempt: { id: "x" }, previousCompleted: null }));
     await expect(store.get("session")).rejects.toMatchObject({ code: "INTERNAL" });
   });
+  it("recovers healthy sessions while preserving a corrupt sidecar", async () => {
+    const store = await setup();
+    await store.put(snapshot());
+    await store.put({ ...snapshot(), sessionId: "healthy" });
+    await writeFile(store.path("session"), "{broken");
+    await store.recover(new Set(["session", "healthy"]));
+    expect((await store.get("healthy")).latestAttempt?.phase).toBe("failed");
+    expect(await readFile(store.path("session"), "utf8")).toBe("{broken");
+    await expect(store.get("session")).rejects.toMatchObject({ code: "INTERNAL" });
+  });
   it("bounds diagnostics, tool names and the whole snapshot with explicit truncation", async () => {
     const store = await setup(), value = snapshot("large", 1, "ready");
     value.entries = Array.from({ length: 100 }, (_, index) => ({ id: String(index), name: "fixture", configuredVersion: null, loadState: "loaded", skipReason: null, registeredTools: Array.from({ length: 201 }, (_, n) => `${n}${"x".repeat(256)}`), activeTools: [], registeredCommands: [], mobileInvocable: false, diagnostics: Array.from({ length: 30 }, () => diagnostic("load", "FIXTURE", "x".repeat(2000))) }));

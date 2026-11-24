@@ -40,11 +40,17 @@ export async function writeJsonFileAtomic(
   // The rename committed the new value. A directory-sync failure after this
   // point means durability is uncertain, not that the write failed outright;
   // surface that distinct state to the caller.
-  const dir = await open(dirname(path), "r");
   try {
-    await dir.sync();
+    await syncDirectory(dirname(path));
   } catch (error) {
     throw new JsonCommitUncertainError(path, error);
+  }
+}
+
+export async function syncDirectory(path: string): Promise<void> {
+  const dir = await open(path, "r");
+  try {
+    await dir.sync();
   } finally {
     await dir.close();
   }

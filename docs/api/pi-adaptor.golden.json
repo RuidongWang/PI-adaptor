@@ -335,11 +335,23 @@
       "params": {
         "approvalId": "x",
         "decision": "allow-once",
+        "inputDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "context": {
           "requestId": "x",
           "idempotencyKey": "x",
           "expectedRevision": 0
         }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "approval/read",
+      "params": {
+        "sessionId": "x",
+        "approvalId": "x",
+        "revision": 0,
+        "offset": 4096
       }
     },
     {
@@ -1225,6 +1237,14 @@
         "resolved": false,
         "alreadyResolved": false,
         "effectivePermissionMode": "ask"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "dataBase64": "fQ==",
+        "totalBytes": 4097
       }
     },
     {

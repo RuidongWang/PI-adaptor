@@ -4,8 +4,9 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { HostError } from "../errors.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import { uuid } from "../util/id.js";
-import { assertPublicHttpsEndpoint } from "../security/endpoint.js";
-import { spawn as spawnProcess } from "node:child_process";
+import { endpointHostname, parseEndpoint, resolveEndpointAddresses } from "../security/endpoint.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { KeyedMutex } from "../util/keyed-mutex.js";
 
 export type SkillSource = {
@@ -100,30 +101,32 @@ async function assertWithinResourceLimits(root: string): Promise<void> {
   await visit(root, 0);
 }
 
-function runGit(args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<number> {
-  return new Promise<number>((resolveCode, reject) => {
-    const child = spawnProcess("git", args, { stdio: "ignore" });
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill("SIGKILL");
-      reject(new HostError("SKILL_SOURCE_UNAVAILABLE", "git operation timed out"));
-    }, timeoutMs);
-    timer.unref?.();
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
+const execFileAsync = promisify(execFile);
+
+async function runGit(args: string[], failure: string, networkDir?: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", args, {
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      ...(networkDir ? {
+        cwd: networkDir,
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_TERMINAL_PROMPT: "0",
+          NO_PROXY: "*",
+          no_proxy: "*"
+        }
+      } : {})
     });
-    child.on("exit", (value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolveCode(value ?? 1);
-    });
-  });
+    return stdout.trim();
+  } catch (error) {
+    if ((error as { killed?: boolean }).killed) {
+      throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git operation timed out");
+    }
+    throw new HostError("SKILL_SOURCE_UNAVAILABLE", failure);
+  }
 }
 
 /**
@@ -182,6 +185,10 @@ export class SkillRegistry {
     return (await this.load()).skills;
   }
 
+  async activeSkills(): Promise<Array<{ name: string; filePath: string }>> {
+    return (await this.list()).map((skill) => ({ name: skill.name, filePath: join(skill.path, "SKILL.md") }));
+  }
+
   async get(id: string): Promise<{ skill: SkillRecord; instructions: string }> {
     const skill = (await this.load()).skills.find((entry) => entry.id === id);
     if (!skill) throw new HostError("NOT_FOUND", "skill not found");
@@ -201,25 +208,45 @@ export class SkillRegistry {
       return { path };
     }
     if (!source.url) throw new HostError("INVALID_ARGUMENT", "git source requires url");
-    await assertPublicHttpsEndpoint(source.url, { allowPrivateHosts: this.allowPrivateHosts });
+    const policy = { allowPrivateHosts: this.allowPrivateHosts, allowLoopback: false };
+    const url = parseEndpoint(source.url, policy);
+    const hostname = endpointHostname(url);
+    const addresses = await resolveEndpointAddresses(hostname, policy);
     const temp = join(this.root, `.clone-${uuid()}`);
     await mkdir(temp, { recursive: true, mode: 0o700 });
     try {
       // Refuse HTTP redirects: the initial URL passed the SSRF policy, but a
       // redirect could point at a private destination the policy never saw.
-      const args = ["-c", "http.followRedirects=false", "clone", "--depth", "1"];
-      if (source.ref && source.refType !== "commit") args.push("--branch", source.ref);
-      args.push(source.url, temp);
-      const code = await runGit(args);
-      if (code !== 0) {
-        throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git clone failed");
-      }
-      if (source.ref && source.refType === "commit") {
-        const checkoutCode = await runGit(["-C", temp, "checkout", source.ref!]);
-        if (checkoutCode !== 0) {
-          throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git checkout failed");
+      const pinnedAddresses = addresses.map(({ address, family }) => family === 6 ? `[${address}]` : address).join(",");
+      const remoteOptions = ["-c", "http.followRedirects=false", "-c", "http.proxy="];
+      if (!addresses.some(({ address }) => address === hostname)) {
+        if (!this.allowPrivateHosts) {
+          const settings = await runGit(["help", "--config"], "git configuration inspection failed", temp);
+          if (!settings.split("\n").includes("http.curloptResolve")) {
+            throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git must support pinned HTTPS address resolution");
+          }
         }
+        remoteOptions.push("-c", `http.curloptResolve=${hostname}:${url.port || "443"}:${pinnedAddresses}`);
       }
+      if (source.refType === "commit") {
+        const commit = typeof source.ref === "string" ? source.ref.toLowerCase() : "";
+        if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit)) {
+          throw new HostError("INVALID_ARGUMENT", "git commit source requires a full commit hash");
+        }
+        const objectFormat = commit.length === 40 ? "sha1" : "sha256";
+        await runGit(["-C", temp, "init", `--object-format=${objectFormat}`], "git init failed");
+        await runGit([...remoteOptions, "-C", temp, "fetch", "--depth", "1", "--", url.href, commit], "git fetch failed", temp);
+        await runGit(["-C", temp, "checkout", "--detach", "FETCH_HEAD"], "git checkout failed");
+        const actual = await runGit(["-C", temp, "rev-parse", "--verify", "HEAD"], "git commit verification failed");
+        if (actual !== commit) {
+          throw new HostError("SKILL_SOURCE_UNAVAILABLE", "git checkout did not match the requested commit");
+        }
+      } else {
+        const args = [...remoteOptions, "clone", "--depth", "1"];
+        if (source.ref) args.push("--branch", source.ref);
+        await runGit([...args, "--", url.href, temp], "git clone failed", temp);
+      }
+      await rm(join(temp, ".git"), { recursive: true, force: true });
       const path = await realpath(resolve(temp, source.subdir ?? ""));
       const rel = relative(await realpath(temp), path);
       if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
@@ -317,9 +344,9 @@ export class SkillRegistry {
       const data = await this.load();
       const index = data.skills.findIndex((entry) => entry.id === id);
       if (index < 0) throw new HostError("NOT_FOUND", "skill not found");
-      const [skill] = data.skills.splice(index, 1);
+      data.skills.splice(index, 1);
       await this.save(data);
-      if (skill) await rm(join(this.root, skill.name), { recursive: true, force: true });
+      // An active turn may still read auxiliary files from this immutable version.
       return true;
     });
   }

@@ -888,6 +888,11 @@
         "title": {
           "type": "string"
         },
+        "inputByteLength": {
+          "type": "integer",
+          "exclusiveMinimum": 4096,
+          "maximum": 16777216
+        },
         "expiresAt": {
           "type": [
             "string",
@@ -3876,6 +3881,10 @@
         "permissionMode": {
           "$ref": "#/$defs/permissionMode"
         },
+        "inputDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "context": {
           "$ref": "#/$defs/revisionContext"
         }
@@ -3905,6 +3914,26 @@
         "alreadyResolved",
         "effectivePermissionMode"
       ],
+      "additionalProperties": false
+    },
+    "params_approvalRead": {
+      "type": "object",
+      "properties": {
+        "sessionId": { "$ref": "#/$defs/id" },
+        "approvalId": { "$ref": "#/$defs/id" },
+        "revision": { "type": "integer", "minimum": 0 },
+        "offset": { "type": "integer", "minimum": 0, "maximum": 16777215 }
+      },
+      "required": ["sessionId", "approvalId", "revision", "offset"],
+      "additionalProperties": false
+    },
+    "result_approvalRead": {
+      "type": "object",
+      "properties": {
+        "dataBase64": { "type": "string", "minLength": 4, "maxLength": 87384 },
+        "totalBytes": { "type": "integer", "exclusiveMinimum": 4096, "maximum": 16777216 }
+      },
+      "required": ["dataBase64", "totalBytes"],
       "additionalProperties": false
     },
     "params_inputRespond": {
@@ -5218,6 +5247,17 @@
         },
         {
           "type": "object",
+          "required": ["jsonrpc", "id", "method", "params"],
+          "additionalProperties": false,
+          "properties": {
+            "jsonrpc": { "$ref": "#/$defs/jsonRpc" },
+            "id": { "$ref": "#/$defs/requestId" },
+            "method": { "const": "approval/read" },
+            "params": { "$ref": "#/$defs/params_approvalRead" }
+          }
+        },
+        {
+          "type": "object",
           "required": [
             "jsonrpc",
             "id",
@@ -5716,6 +5756,9 @@
             },
             {
               "$ref": "#/$defs/result_approvalRespond"
+            },
+            {
+              "$ref": "#/$defs/result_approvalRead"
             },
             {
               "$ref": "#/$defs/result_inputRespond"

@@ -48,7 +48,7 @@ describe("provider seed", () => {
 
   it("creates providers then idempotently updates on re-seed without persisting keys", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-seed-"));
-    const store = new ProviderStore(root, true);
+    const store = new ProviderStore(root, { allowPrivateHosts: true });
 
     const first = await applyProviderSeed(store, parseProviderSeed({ providers: [ENTRY] }));
     expect(first).toEqual({ created: 1, updated: 0 });

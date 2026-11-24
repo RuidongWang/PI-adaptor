@@ -1,11 +1,39 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { BlobStore, MAX_IMAGE_BYTES } from "../src/media/blob-store.js";
+import { JsonCommitUncertainError } from "../src/util/json-file.js";
 
 describe("blob store", () => {
+  it("retries completion after the index rename without losing the staged or ready bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-commit-"));
+    onTestFinished(() => rm(root, { recursive: true, force: true }));
+    const store = new BlobStore(root);
+    await store.init();
+    const bytes = Buffer.from("fixture image");
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const created = await store.create({ sessionId: "s1", fileName: "a.png", mimeType: "image/png", byteLength: bytes.length, sha256: hash });
+    await store.appendChunk(created.id, 0, bytes.toString("base64"));
+    const internals = store as unknown as { save(index: unknown): Promise<void> };
+    const save = internals.save.bind(store);
+    vi.spyOn(internals, "save").mockRejectedValueOnce(new Error("fixture disk write failure"));
+    await expect(store.complete(created.id, hash)).rejects.toThrow("fixture disk write failure");
+    const part = join(root, "staging", `${created.id}.part`);
+    expect(await readFile(part)).toEqual(bytes);
+    vi.mocked(internals.save).mockImplementationOnce(async index => {
+      await save(index);
+      throw new JsonCommitUncertainError(join(root, "media", "index.json"), new Error("fixture directory sync failure"));
+    });
+    await expect(store.complete(created.id, hash)).rejects.toBeInstanceOf(JsonCommitUncertainError);
+    expect(await readFile(part)).toEqual(bytes);
+    const restarted = new BlobStore(root);
+    expect(await restarted.read(created.id, 0, bytes.length)).toMatchObject({ dataBase64: bytes.toString("base64"), eof: true });
+    expect(await restarted.complete(created.id, hash)).toMatchObject({ id: created.id, state: "ready" });
+    await expect(stat(part)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("preserves concurrent upload registrations", async () => {
     const store = new BlobStore(await mkdtemp(join(tmpdir(), "pi-adaptor-media-race-")));
     await store.init();

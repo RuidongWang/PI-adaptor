@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
+import { once } from "node:events";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createTcpServer } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { tmpdir } from "node:os";
@@ -8,11 +9,12 @@ import { join } from "node:path";
 import { request as httpsRequest } from "node:https";
 import { promisify } from "node:util";
 import WebSocket from "ws";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { DeterministicAgentDriver } from "../src/agent/driver.js";
 import { ensureHostDirectories, parseHostConfig, type HostConfig } from "../src/config.js";
 import { loadDirectTlsIdentity } from "../src/security/direct-tls.js";
 import { HostService } from "../src/server/host-service.js";
+import { MAX_IMAGE_BYTES } from "../src/media/blob-store.js";
 import { SocketDeviceRegistry, startDirectWebSocketServer, startWebSocketServer, type RunningDirectServer } from "../src/server/ws.js";
 
 const execFileAsync = promisify(execFile);
@@ -32,10 +34,11 @@ type DirectFixture = TlsFixture & {
   url: string;
 };
 
-const cleanups: Array<() => Promise<void> | void> = [];
-afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-});
+async function makeTempDirectory(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  onTestFinished(() => rm(root, { recursive: true, force: true }));
+  return root;
+}
 
 async function freePort(): Promise<number> {
   const server = createTcpServer();
@@ -59,7 +62,7 @@ async function makeCertificate(overrides: {
   signatureHash?: string;
 } = {}): Promise<TlsFixture> {
   const { rsaBits = 2048, signatureHash = "sha256", ...extensionOverrides } = overrides;
-  const root = await mkdtemp(join(tmpdir(), "pi-adaptor-direct-tls-"));
+  const root = await makeTempDirectory("pi-adaptor-direct-tls-");
   const tlsDir = join(root, "tls");
   await mkdir(tlsDir, { mode: 0o700 });
   await chmod(tlsDir, 0o700);
@@ -103,13 +106,14 @@ async function makeDirectFixture(overrides: Partial<HostConfig["direct"]> = {}):
   Object.assign(config.direct, overrides);
   await ensureHostDirectories(config);
   const service = new HostService(config, new DeterministicAgentDriver());
+  onTestFinished(() => service.shutdown());
   await service.init();
   const pairing = await service.createPairingToken();
   const device = await service.tokens.pair(pairing.token, "direct-test");
   const unusedPairing = await service.createPairingToken();
   const registry = new SocketDeviceRegistry(service);
   const server = await startDirectWebSocketServer(service, config.direct, registry);
-  cleanups.push(() => server.close());
+  onTestFinished(() => server.close());
   return {
     ...tls,
     config,
@@ -243,18 +247,16 @@ function spawnHost(args: string[]): {
   });
   child.stderr!.setEncoding("utf8");
   child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
-  cleanups.push(() => new Promise<void>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve();
-      return;
-    }
-    const timer = setTimeout(resolve, 2_000);
-    child.once("exit", () => {
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  onTestFinished(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+    try {
+      await closed;
+    } finally {
       clearTimeout(timer);
-      resolve();
-    });
-    child.kill("SIGTERM");
-  }));
+    }
+  });
   return {
     child,
     lines,
@@ -452,6 +454,73 @@ describe("direct admission, frames, and shared revocation", () => {
     expect(await closed).toEqual({ code: 1008, reason: "rate limited" });
   });
 
+  it("reads a full 20 MiB attachment over direct WSS without using the control message budget", async () => {
+    const fixture = await makeDirectFixture();
+    const bytes = Buffer.alloc(MAX_IMAGE_BYTES);
+    for (let offset = 0; offset < bytes.length; offset += 4) {
+      bytes.writeUInt32LE(offset, offset);
+    }
+    const expected = createHash("sha256").update(bytes).digest("hex");
+    const attachment = await fixture.service.blobs.importImageBase64({
+      sessionId: "fixture", kind: "output", fileName: "fixture.png", mimeType: "image/png", dataBase64: bytes.toString("base64")
+    });
+    const socket = await connectDirect(fixture);
+    try {
+      await initializeDirect(socket, 1, "1.0");
+      const digest = createHash("sha256");
+      let offset = 0;
+      let request = 2;
+      while (offset < bytes.length) {
+        const reply = await rpc(socket, request++, "attachment/read", { attachmentId: attachment.id, offset, length: 262_144 });
+        expect(reply.error).toBeUndefined();
+        const data = Buffer.from(reply.result.dataBase64, "base64");
+        expect(data.length).toBe(262_144);
+        digest.update(data);
+        offset += data.length;
+        expect(reply.result.eof).toBe(offset === bytes.length);
+      }
+      expect(digest.digest("hex")).toBe(expected);
+      expect((await rpc(socket, request, "connection/ping")).result.ok).toBe(true);
+    } finally {
+      await closeSocket(socket);
+    }
+  });
+
+  it("reads an oversized tool result over WSS without consuming the control budget", async () => {
+    const fixture = await makeDirectFixture();
+    const auth = { device: await fixture.service.tokens.authenticate(fixture.device.deviceToken) };
+    const { session } = await fixture.service.handle("session/create", {}, auth) as { session: { id: string } };
+    const sessionId = session.id;
+    const file = await fixture.service.catalog.createFile(fixture.root, join(fixture.config.dataDir, "sessions"), sessionId);
+    const itemId = "tool-history-entry";
+    const text = "结果\n".repeat(600_000);
+    const totalBytes = Buffer.byteLength(text);
+    await appendFile(file, JSON.stringify({
+      type: "message", id: itemId, parentId: null, timestamp: new Date().toISOString(),
+      message: { role: "toolResult", content: [{ type: "text", text }], toolName: "fixture", toolCallId: "tool-call", isError: false, timestamp: Date.now() }
+    }) + "\n");
+    await fixture.service.meta.updateSession(sessionId, { nativePath: file });
+    const socket = await connectDirect(fixture);
+    try {
+      await initializeDirect(socket, 1, "1.0");
+      const digest = createHash("sha256");
+      let request = 2;
+      for (let offset = 0; offset < totalBytes;) {
+        const reply = await rpc(socket, request++, "session/history", { sessionId, textRange: { itemId, offset } });
+        expect(reply.error).toBeUndefined();
+        expect(reply.result.textChunk.totalBytes).toBe(totalBytes);
+        const chunk = Buffer.from(reply.result.textChunk.dataBase64, "base64");
+        expect(chunk.length).toBeGreaterThan(0);
+        digest.update(chunk);
+        offset += chunk.length;
+      }
+      expect(digest.digest("hex")).toBe(createHash("sha256").update(text).digest("hex"));
+      expect((await rpc(socket, request, "connection/ping")).result.ok).toBe(true);
+    } finally {
+      await closeSocket(socket);
+    }
+  });
+
   it("enforces T from TCP accept without using a WebSocket close before 101", async () => {
     const fixture = await makeDirectFixture({ unauthenticatedTimeoutMs: 1_000 });
     const response = await new Promise<string>((resolve, reject) => {
@@ -480,11 +549,13 @@ describe("direct admission, frames, and shared revocation", () => {
 
   it("releases N admission after ordinary HTTP and rejected Upgrade responses", async () => {
     const fixture = await makeDirectFixture({ maxConnections: 1 });
+    const authenticated = vi.spyOn(fixture.registry, "authenticate");
     const ordinary = await new Promise<number>((resolve, reject) => {
       const request = httpsRequest({
         host: "127.0.0.1",
         port: fixture.server.port,
         path: DIRECT_PATH,
+        agent: false,
         ca: fixture.certificatePem
       }, (response) => {
         response.resume();
@@ -494,10 +565,12 @@ describe("direct admission, frames, and shared revocation", () => {
       request.end();
     });
     expect(ordinary).toBe(426);
-    const first = await connectDirect(fixture);
-    await closeSocket(first);
-    expect((await upgradeError(fixture)).status).toBe(401);
-    const second = await connectDirect(fixture);
+    const first = await connectDirect(fixture).catch(error => { throw new Error("WebSocket after ordinary HTTPS response", { cause: error }); });
+    const serverSocket = authenticated.mock.calls[0]?.[0];
+    expect(serverSocket).toBeDefined();
+    await Promise.all([once(serverSocket!, "close"), closeSocket(first)]);
+    expect((await upgradeError(fixture).catch(error => { throw new Error("Upgrade after server-side WebSocket close", { cause: error }); })).status).toBe(401);
+    const second = await connectDirect(fixture).catch(error => { throw new Error("WebSocket after rejected Upgrade response", { cause: error }); });
     await closeSocket(second);
   });
 
@@ -555,7 +628,7 @@ describe("direct admission, frames, and shared revocation", () => {
   it("revokes every loopback and direct socket through the shared registry", async () => {
     const fixture = await makeDirectFixture();
     const loopback = await startWebSocketServer(fixture.service, 0, fixture.registry);
-    cleanups.push(() => loopback.close());
+    onTestFinished(() => loopback.close());
     const loopUrl = `ws://127.0.0.1:${loopback.port}${DIRECT_PATH}`;
     const loop = await new Promise<WebSocket>((resolve, reject) => {
       const socket = new WebSocket(loopUrl, { headers: { Authorization: `Bearer ${fixture.device.deviceToken}` } });
@@ -688,7 +761,7 @@ describe("direct handshake and credential lifecycle", () => {
     await initializeDirect(oldDirect, 1, "1.0");
     await rpc(oldDirect, 2, "events/subscribe", { scope: "host" });
     const loopback = await startWebSocketServer(fixture.service, 0, fixture.registry);
-    cleanups.push(() => loopback.close());
+    onTestFinished(() => loopback.close());
     const oldLoop = await new Promise<WebSocket>((resolve, reject) => {
       const socket = new WebSocket(`ws://127.0.0.1:${loopback.port}${DIRECT_PATH}`, {
         headers: { Authorization: `Bearer ${fixture.device.deviceToken}` }
@@ -729,7 +802,7 @@ describe("direct handshake and credential lifecycle", () => {
 
 describe("main direct lifecycle and bootstrap trust", () => {
   it("keeps full loopback pairing available and emits no trust when direct TLS fails", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-main-direct-failure-"));
+    const root = await makeTempDirectory("pi-adaptor-main-direct-failure-");
     const bootstrapDir = join(root, ".bootstrap");
     await mkdir(bootstrapDir, { recursive: true, mode: 0o700 });
     await writeFile(join(bootstrapDir, "state.json"), JSON.stringify({ attemptId: "boot_failed", status: "running" }), { mode: 0o600 });
@@ -774,7 +847,7 @@ describe("main direct lifecycle and bootstrap trust", () => {
   });
 
   it("invalidates stale trust when a new attempt has direct disabled", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-main-direct-disabled-"));
+    const root = await makeTempDirectory("pi-adaptor-main-direct-disabled-");
     const bootstrapDir = join(root, ".bootstrap");
     await mkdir(bootstrapDir, { recursive: true, mode: 0o700 });
     // No state.json/current attempt exists: any previous authorization is stale.
@@ -785,7 +858,7 @@ describe("main direct lifecycle and bootstrap trust", () => {
   });
 
   it("invalidates a previous valid trust when restarting the same attempt with direct disabled", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-main-same-attempt-disabled-"));
+    const root = await makeTempDirectory("pi-adaptor-main-same-attempt-disabled-");
     const bootstrapDir = join(root, ".bootstrap");
     await mkdir(bootstrapDir, { recursive: true, mode: 0o700 });
     await writeFile(join(bootstrapDir, "state.json"), JSON.stringify({ attemptId: "boot_same_disabled", status: "running" }), { mode: 0o600 });

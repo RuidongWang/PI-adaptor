@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("provider store", () => {
   it("preserves the default provider when deleting another and serializes creation", async () => {
-    const store = new ProviderStore(await mkdtemp(join(tmpdir(), "pi-adaptor-provider-race-")), true);
+    const store = new ProviderStore(await mkdtemp(join(tmpdir(), "pi-adaptor-provider-race-")), { allowPrivateHosts: true });
     const input = { name: "mock", type: "openai_compatible", protocol: "openai_compatible", baseUrl: "https://example.com", authKind: "none" as const, models: [] };
     const [first, second] = await Promise.all([store.create({ ...input, vendorKey: "one" }), store.create({ ...input, vendorKey: "two" })]);
     await store.delete(second.id);
@@ -24,7 +24,7 @@ describe("provider store", () => {
   });
   it("keeps provider metadata without persisting the api key", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-"));
-    const store = new ProviderStore(root, true);
+    const store = new ProviderStore(root, { allowPrivateHosts: true });
     const created = await store.create({
       name: "Mock",
       vendorKey: "mock",
@@ -49,7 +49,7 @@ describe("provider store", () => {
 
   it("purges legacy secret files on startup migration and reports only a count", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-purge-"));
-    const store = new ProviderStore(root, true);
+    const store = new ProviderStore(root, { allowPrivateHosts: true });
     const secretsDir = join(root, "providers", "secrets");
     await mkdir(secretsDir, { recursive: true });
     await writeFile(join(secretsDir, "legacy-1"), "sk-legacy-one");
@@ -63,7 +63,7 @@ describe("provider store", () => {
 
   it("updates every model while retaining the default flag and creation time", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-update-"));
-    const store = new ProviderStore(root, true);
+    const store = new ProviderStore(root, { allowPrivateHosts: true });
     const created = await store.create({
       name: "Original", vendorKey: "original", type: "openai_compatible",
       protocol: "openai_compatible", baseUrl: "https://example.com/v1",
@@ -103,7 +103,7 @@ describe("provider store", () => {
   });
   it("rejects invalid auth combinations", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-"));
-    const store = new ProviderStore(root, true);
+    const store = new ProviderStore(root, { allowPrivateHosts: true });
     await expect(
       store.create({
         name: "Mock",
@@ -301,7 +301,7 @@ describe("HostService provider/discover", () => {
 
   it("takes a saved provider's endpoint as one snapshot serialized with updates", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-provider-snapshot-"));
-    const store = new ProviderStore(root, true);
+    const store = new ProviderStore(root, { allowPrivateHosts: true });
     const created = await store.create({
       name: "Original", vendorKey: "snapshot", type: "openai_compatible", protocol: "openai_compatible",
       baseUrl: "https://provider-a.unit/v1", authKind: "none", models: []

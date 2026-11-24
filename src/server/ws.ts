@@ -6,7 +6,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { DirectConfig } from "../config.js";
 import { HostError, asHostError } from "../errors.js";
 import { loadDirectTlsIdentity, type DirectTlsIdentity } from "../security/direct-tls.js";
-import { HostService } from "./host-service.js";
+import { HISTORY_TEXT_CHUNK_BYTES, HostService } from "./host-service.js";
+import { MAX_IMAGE_BYTES, MAX_READ_CHUNK_BYTES } from "../media/blob-store.js";
 
 const RACP_PATH = "/v1/racp/ws";
 const V1_PROTOCOL = "pi-racp.v1.jsonrpc";
@@ -196,7 +197,9 @@ function respondHttp(
     "Content-Length": Buffer.byteLength(body),
     Connection: "close"
   });
-  response.end(body, onComplete);
+  // Release the HTTP request's admission slot before the client can read the reply.
+  onComplete?.();
+  response.end(body);
 }
 
 function rejectUpgrade(
@@ -221,10 +224,8 @@ function rejectUpgrade(
     "",
     body
   ].join("\r\n");
-  socket.write(response, () => {
-    onComplete?.();
-    socket.destroy();
-  });
+  onComplete?.();
+  socket.end(response);
 }
 
 function validWebSocketKey(value: string | undefined): boolean {
@@ -296,14 +297,7 @@ export class DirectPreAuthRateLimiter {
   }
 }
 
-function requestIdFrom(raw: WebSocket.RawData): string | number | null {
-  try {
-    const value = JSON.parse(raw.toString()) as { id?: unknown };
-    return typeof value.id === "string" || typeof value.id === "number" ? value.id : null;
-  } catch {
-    return null;
-  }
-}
+type MediaWindow = FixedWindow & { bytes: number; active: number };
 
 type DirectConnectionState = {
   socket: Duplex;
@@ -424,6 +418,10 @@ export async function startDirectWebSocketServer(
       return;
     }
     sockets.add(socket);
+    const key = connectionKey(request.socket);
+    socket.once("close", () => {
+      if (authenticatedRaw.get(key) === request.socket) authenticatedRaw.delete(key);
+    });
     registry.authenticate(socket, upgrade.deviceId, "direct", credentialHash(tokenFrom(request)!));
     attachConnection(service, registry, socket, request, "direct", upgrade.protocol, rateLimit);
     socket.on("close", () => sockets.delete(socket));
@@ -471,7 +469,7 @@ export async function startDirectWebSocketServer(
         }
         let device;
         try {
-          device = await service.tokens.authenticate(token);
+          device = await service.authenticateDevice(token);
         } catch (error) {
           if (error instanceof HostError && error.code === "UNAUTHORIZED") {
             reject(socket, 401, "UNAUTHORIZED");
@@ -554,25 +552,47 @@ function attachConnection(
   const token = tokenFrom(request);
   const handshake = listener === "direct" ? { stage: "initialize" } as DirectHandshake : undefined;
   const window = rateLimit ? { startedAt: Date.now(), count: 0 } : undefined;
+  const mediaWindow: MediaWindow = { startedAt: Date.now(), count: 0, bytes: 0, active: 0 };
   socket.on("message", (raw, isBinary) => {
-    if (rateLimit && window) {
-      const rate = consumeFixedWindow(window, rateLimit);
-      if (!rate.allowed) {
-        const response = new HostError("RATE_LIMITED", "rate limited", { retryAfterMs: rate.retryAfterMs })
-          .toJSONRPC(requestIdFrom(raw));
-        if (socket.readyState === socket.OPEN) {
-          socket.send(JSON.stringify(response), () => socket.close(1008, "rate limited"));
-        } else {
-          socket.close(1008, "rate limited");
-        }
-        return;
-      }
-    }
     if (isBinary) {
       socket.close(1003, "text frames only");
       return;
     }
-    void handleMessage(service, registry, socket, token, raw.toString(), listener, protocol, handshake);
+    const text = raw.toString();
+    let frame: RequestFrame | undefined;
+    try { frame = JSON.parse(text) as RequestFrame; } catch { /* handled as a parse error below */ }
+    if (rateLimit && window) {
+      const method = frame?.jsonrpc === "2.0" && handshake?.stage === "ready" ? frame.method : undefined;
+      const params = frame?.params as { textRange?: unknown; length?: unknown } | undefined;
+      const isHistoryChunk = method === "approval/read" || (method === "session/history" && params?.textRange !== undefined);
+      const isMedia = isHistoryChunk || method === "attachment/read" || method === "attachment/chunk";
+      if (isMedia) {
+        const now = Date.now();
+        if (now - mediaWindow.startedAt >= rateLimit.windowMs) mediaWindow.bytes = 0;
+        const budget = consumeFixedWindow(mediaWindow, { count: Math.max(384, rateLimit.count), windowMs: rateLimit.windowMs }, now);
+        const length = params?.length ?? 262_144;
+        let bytes = MAX_READ_CHUNK_BYTES;
+        if (isHistoryChunk) bytes = HISTORY_TEXT_CHUNK_BYTES;
+        else if (method === "attachment/chunk") bytes = Buffer.byteLength(text);
+        else if (typeof length === "number" && Number.isSafeInteger(length) && length > 0) bytes = Math.min(length, MAX_READ_CHUNK_BYTES);
+        if (!budget.allowed || mediaWindow.bytes + bytes > 4 * MAX_IMAGE_BYTES || mediaWindow.active >= 4) {
+          send(socket, new HostError("RATE_LIMITED", "transfer budget exceeded", { retryAfterMs: budget.retryAfterMs }).toJSONRPC(frame?.id ?? null));
+          return;
+        }
+        mediaWindow.bytes += bytes;
+        mediaWindow.active++;
+        void handleMessage(service, registry, socket, token, frame, listener, protocol, handshake).finally(() => { mediaWindow.active--; });
+        return;
+      }
+      const rate = consumeFixedWindow(window, rateLimit);
+      if (!rate.allowed) {
+        const id = typeof frame?.id === "string" || typeof frame?.id === "number" ? frame.id : null;
+        const response = new HostError("RATE_LIMITED", "rate limited", { retryAfterMs: rate.retryAfterMs }).toJSONRPC(id);
+        if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(response), () => socket.close(1008, "rate limited"));
+        return;
+      }
+    }
+    void handleMessage(service, registry, socket, token, frame, listener, protocol, handshake);
   });
 }
 
@@ -581,15 +601,12 @@ async function handleMessage(
   registry: SocketDeviceRegistry,
   socket: WebSocket,
   token: string | null,
-  raw: string,
+  frame: RequestFrame | undefined,
   listener: ListenerKind,
   protocol?: RacpProtocol,
   handshake?: DirectHandshake
 ): Promise<void> {
-  let frame: RequestFrame;
-  try {
-    frame = JSON.parse(raw) as RequestFrame;
-  } catch {
+  if (frame === undefined) {
     send(socket, {
       jsonrpc: "2.0",
       id: null,
@@ -609,7 +626,7 @@ async function handleMessage(
     let auth = null;
     if (listener === "direct") {
       if (!token) throw new HostError("UNAUTHORIZED", "a device token is required");
-      auth = { device: await service.tokens.authenticate(token) };
+      auth = { device: await service.authenticateDevice(token) };
       if (socket.readyState !== socket.OPEN) return;
       registry.authenticate(socket, auth.device.deviceId, "direct", credentialHash(token));
       if (frame.method === "connection/pair") {
@@ -646,7 +663,7 @@ async function handleMessage(
     } else if (frame.method === "connection/initialize") {
       auth = null;
     } else if (token && token.startsWith("pdt2.")) {
-      auth = { device: await service.tokens.authenticate(token) };
+      auth = { device: await service.authenticateDevice(token) };
       if (socket.readyState !== socket.OPEN) return;
       registry.authenticate(socket, auth.device.deviceId, "loopback", credentialHash(token));
     } else if (!token || !token.startsWith("ppt2.")) {

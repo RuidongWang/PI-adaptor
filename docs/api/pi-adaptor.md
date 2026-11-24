@@ -407,6 +407,7 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 | `turn/interrupt` | owner | 是 | 中断运行中 turn |
 | `turn/cancel` | owner | 是 | 取消排队 turn |
 | `approval/respond` | owner | 是 | 审批 |
+| `approval/read` | owner | 否 | 读取待审批的大参数原文分段 |
 | `input/respond` | owner | 是 | AskTool 回答 |
 | `provider/list` | owner | 否 | provider 列表（无服务端密钥） |
 | `provider/create` | owner | 是 | 新建 provider |
@@ -682,6 +683,12 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 
 工具决策：`allow-once | allow-session | deny`。Plan/Goal 决策：`approve | reject`。
 
+`approval.requested` 和 `session/attach` 使用同一份审批投影。参数 JSON 超过 4 KiB 时，`input` 提供预览，`inputByteLength` 提供完整 UTF-8 字节数。客户端通过 `approval/read` 读取原文。
+
+`approval/read` 参数为 `{"sessionId":"session_id","approvalId":"approval_id","revision":14,"offset":0}`。返回 `{"dataBase64":"…","totalBytes":12345}`，每段最多 64 KiB，`offset` 按原文字节递增。审批已结束、会话不匹配或无完整原文时返回 `NOT_FOUND`，版本不匹配时返回 `APPROVAL_STALE`，偏移越界时返回 `INVALID_ARGUMENT`。
+
+对含 `inputByteLength` 的审批提交允许决策时，客户端须先展示完整参数供用户审阅，再在 `approval/respond` 中携带原文字节的 SHA-256 小写十六进制 `inputDigest` 及对应的 `context.expectedRevision`。缺少有效摘要时返回 `INVALID_ARGUMENT`。拒绝仍可直接提交。Host 会拒绝无法完整审阅的超限参数，单份审批参数上限为 16 MiB。
+
 结果：`{"resolved":true,"alreadyResolved":false,"effectivePermissionMode":"ask"}`。
 
 ### 8.4 `input/respond`
@@ -801,7 +808,7 @@ v2 CRUD 首版只接受 `authKind: api_key | none`。若只读外部 provider �
 }
 ```
 
-`source.type`：`git | directory`。本地目录来源必须有 `path`；Git 来源必须有 `url`，可选 `subdir` 与 `ref`。
+`source.type`：`git | directory`。本地目录来源必须有 `path`；Git 来源必须有 `url`，可选 `subdir` 与 `ref`。指定 `refType: "commit"` 时，`ref` 使用完整的 40 位 SHA-1 或 64 位 SHA-256 提交哈希，且远端须允许按该对象获取。
 
 ### 10.2 操作
 

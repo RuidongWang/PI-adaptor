@@ -136,15 +136,24 @@ export class MetaStore {
     if (sessions.length === 0) return;
     await this.serialized(async () => {
       const data = await this.load();
-      const known = new Set(data.sessions.map((session) => session.id));
-      const previousCount = data.sessions.length;
+      const known = new Map(data.sessions.map((session) => [session.id, session]));
+      let changed = false;
       for (const session of sessions) {
-        if (known.has(session.id)) continue;
-        // Deleted rows are also known. A stale filesystem scan cannot revive one.
-        known.add(session.id);
-        data.sessions.push(session);
+        const existing = known.get(session.id);
+        if (existing) {
+          if (!existing.deletedAt && existing.nativePath === session.nativePath
+              && !existing.readOnlyReason && session.readOnlyReason) {
+            existing.readOnlyReason = session.readOnlyReason;
+            existing.revision += 1;
+            changed = true;
+          }
+        } else {
+          known.set(session.id, session);
+          data.sessions.push(session);
+          changed = true;
+        }
       }
-      if (data.sessions.length !== previousCount) await this.save(data);
+      if (changed) await this.save(data);
     });
   }
 

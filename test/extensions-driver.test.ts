@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,12 +7,15 @@ import { DefaultResourceLoader, SessionManager, AgentSession } from "@earendil-w
 import { PiAgentDriver, type AgentEvent, type AgentTurnRequest } from "../src/agent/driver.js";
 import { ExtensionRegistry, parseExtensionsConfig } from "../src/extensions/registry.js";
 import type { ExtensionSnapshot } from "../src/extensions/types.js";
+import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
+import { NativeSessionCatalog } from "../src/pi/session-catalog.js";
+import { HostService } from "../src/server/host-service.js";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 // Local scripted OpenAI transport exercises the actual SDK agent/tool/approval path;
 // it is deliberately not a real model acceptance test.
-export async function driverFixture(options: { hang?: boolean; source?: string } = {}) {
+export async function driverFixture(options: { hang?: boolean; source?: string; modelError?: string; beforeModelReply?: () => void } = {}) {
   const root = await mkdtemp(join(tmpdir(), "pi-extensions-driver-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const agentDir = join(root, "agent"), sessionDir = join(root, "sessions");
@@ -26,9 +29,20 @@ export default pi => {
   pi.registerCommand("fixture_command",{handler:async()=>{}});
 }`);
   let calls = 0;
+  let authorization: string | undefined;
+  let requestBody = "";
   const server = createServer(async (req, res) => {
-    for await (const _ of req) { /* consume body */ }
+    req.setEncoding("utf8");
+    requestBody = "";
+    for await (const part of req) requestBody += part;
     calls += 1;
+    authorization = req.headers.authorization;
+    options.beforeModelReply?.();
+    if (options.modelError) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: options.modelError } }));
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     if (options.hang) { res.write(': waiting\n\n'); return; }
     const tool = calls % 2 === 1;
@@ -42,10 +56,114 @@ export default pi => {
   const registry = new ExtensionRegistry(parseExtensionsConfig({ enabled: true, entries: [{ id: "fixture", entryPath: entry, compatibility: "headless-reviewed" }] }));
   const snapshots: ExtensionSnapshot[] = [], events: AgentEvent[] = [];
   const request: AgentTurnRequest = { turnId: "turn_fixture", sessionId: "session_fixture", cwd: root, sessionDir, text: "call the fixture", images: [], modelId: "fixture", provider: { id: "fixture", name: "Fixture", baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: "fixture-secret", models: [{ id: "fixture", displayName: "Fixture", contextWindow: 32768, maxTokens: 1000, thinkingLevels: [], defaultThinkingLevel: null, supportsImages: false }] }, requestApproval: async () => true, extensions: { registry, hostId: "host_fixture", publish: async snapshot => { snapshots.push(structuredClone(snapshot)); } }, onEvent: event => events.push(event) };
-  return { root, agentDir, marker, registry, request, snapshots, events, driver: new PiAgentDriver(agentDir), calls: () => calls };
+  return { root, agentDir, marker, registry, request, snapshots, events, driver: new PiAgentDriver(agentDir), calls: () => calls, authorization: () => authorization, requestBody: () => requestBody };
 }
 
 describe("extensions driver", () => {
+  it("links ordinary completed SDK messages to the verified native entries", async () => {
+    const fixture = await driverFixture();
+    const catalog = new NativeSessionCatalog([fixture.request.sessionDir]);
+    const file = await catalog.createFile(fixture.root, fixture.request.sessionDir, fixture.request.sessionId);
+    fixture.request.sessionFile = file;
+    await fixture.driver.start(fixture.request).wait();
+
+    expect(fixture.events.at(-1)?.kind).toBe("turn.completed");
+    const entries = await catalog.history(file, fixture.request.sessionId);
+    const ordinary = fixture.events.flatMap(event => {
+      if (event.kind !== "item.completed") return [];
+      const item = event.payload.item as { role: string; historyItemId?: string };
+      return item.role === "user" || item.role === "assistant" ? [item] : [];
+    });
+    expect(ordinary.map(item => item.role)).toEqual(expect.arrayContaining(["user", "assistant"]));
+    expect(ordinary.map(item => item.historyItemId)).toEqual(entries.flatMap(entry =>
+      entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant")
+        ? [entry.id] : []
+    ));
+  });
+
+  it("uses literal runtime credentials and omits upstream error text from events and native history", async () => {
+    const marker = "fixture-private-model-error";
+    const key = "fixture-$LITERAL_SEGMENT";
+    const fixture = await driverFixture({ modelError: `${marker} ${key}` });
+    fixture.request.provider!.apiKey = key;
+    await fixture.driver.start(fixture.request).wait();
+    expect(fixture.authorization()).toBe(`Bearer ${key}`);
+    expect(fixture.events.at(-1)?.kind).toBe("turn.failed");
+    const sessionFile = (await readdir(fixture.request.sessionDir)).find((path) => path.endsWith(".jsonl"))!;
+    const history = await readFile(join(fixture.request.sessionDir, sessionFile), "utf8");
+    for (const serialized of [JSON.stringify(fixture.events), history]) {
+      expect(serialized.includes(marker)).toBe(false);
+      expect(serialized.includes(key)).toBe(false);
+    }
+  });
+
+  it("uses the literal credential for suggestions and falls back when the model returns an error", async () => {
+    const key = "fixture-$LITERAL_SEGMENT";
+    const marker = "fixture-private-title-error";
+    const fixture = await driverFixture({ modelError: `${marker} ${key}` });
+    const config = parseHostConfig(["--home", join(fixture.root, "host")], {}, fixture.root);
+    await ensureHostDirectories(config);
+    const service = new HostService(config, fixture.driver);
+    await service.init();
+    const paired = await service.pair({}, (await service.createPairingToken()).token);
+    const auth = { device: await service.tokens.authenticate(paired.deviceToken) };
+    const baseUrl = fixture.request.provider!.baseUrl;
+    const provider = await service.providers.create({
+      name: "Fixture", vendorKey: "fixture", type: "openai_compatible", protocol: "openai_compatible",
+      baseUrl, authKind: "api_key", apiKey: key, models: fixture.request.provider!.models
+    });
+    const { session } = await service.handle("session/create", { providerId: provider.id, modelId: "fixture" }, auth) as {
+      session: { id: string };
+    };
+    const result = await service.handle("session/suggest-title", {
+      sessionId: session.id, instruction: "Rename fixture files", apiKey: key,
+      providerBinding: { providerId: provider.id, baseUrl }
+    }, auth);
+    expect(fixture.authorization()).toBe(`Bearer ${key}`);
+    expect(result).toEqual({ title: "Rename fixture files" });
+  });
+
+  it("does not publish completion for a message that lost its native append check", async () => {
+    let nativeFile = "";
+    const fixture = await driverFixture({ beforeModelReply: () => {
+      SessionManager.open(nativeFile).appendMessage({ role: "user", content: "saved by native Pi", timestamp: Date.now() });
+    } });
+    const catalog = new NativeSessionCatalog([fixture.request.sessionDir]);
+    nativeFile = await catalog.createFile(fixture.root, fixture.request.sessionDir, fixture.request.sessionId);
+    fixture.request.sessionFile = nativeFile;
+    const markReadOnly = vi.fn(async (_reason: string) => {});
+    fixture.request.onSessionReadOnly = markReadOnly;
+
+    await fixture.driver.start(fixture.request).wait();
+
+    expect(markReadOnly).toHaveBeenCalledWith("external_write_conflict");
+    expect(fixture.events.at(-1)).toMatchObject({ kind: "turn.failed" });
+    const completed = fixture.events.filter(event => event.kind === "item.completed");
+    expect(completed.map(event => (event.payload.item as { role: string }).role)).toEqual(["user"]);
+    expect((await catalog.history(nativeFile)).at(-1)).toMatchObject({ message: { content: "saved by native Pi" } });
+  });
+
+  it("loads the indexed skill ahead of a same-name default and skips unreadable indexed skills", async () => {
+    const fixture = await driverFixture();
+    const defaultDir = join(fixture.agentDir, "skills", "demo");
+    const managed = join(fixture.root, "indexed");
+    await mkdir(defaultDir, { recursive: true });
+    await mkdir(managed);
+    const current = join(managed, "SKILL.md");
+    const legacy = join(managed, "legacy.md");
+    await writeFile(join(defaultDir, "SKILL.md"), "---\nname: demo\ndescription: default-skill-description\n---\n");
+    await writeFile(current, "---\nname: demo\ndescription: indexed-skill-description\n---\n");
+    await writeFile(legacy, "---\nname: legacy\n---\n");
+    fixture.request.skills = [{ name: "demo", filePath: current }, { name: "legacy", filePath: legacy }];
+
+    await fixture.driver.start(fixture.request).wait();
+
+    expect(fixture.events.at(-1)?.kind).toBe("turn.completed");
+    expect(fixture.requestBody()).toContain("indexed-skill-description");
+    expect(fixture.requestBody()).not.toContain("default-skill-description");
+    expect(fixture.snapshots.at(-1)?.diagnostics).toContainEqual(expect.objectContaining({ code: "SKILL_SOURCE_UNAVAILABLE", severity: "warning" }));
+  });
+
   it.each([true, false])("executes a real SDK extension tool only when approval=%s and cleans two consecutive rounds", async allowed => {
     const fixture = await driverFixture();
     const approve = vi.fn(async () => allowed); fixture.request.requestApproval = approve;
@@ -99,7 +217,6 @@ describe("extensions driver", () => {
   it("cleans initialized instances if session creation fails before binding", async () => {
     const fixture = await driverFixture();
     fixture.request.sessionFile = join(fixture.root, "missing-session.jsonl");
-    vi.spyOn(SessionManager, "open").mockImplementation(() => { throw new Error("injected session construction failure"); });
     await fixture.driver.start(fixture.request).wait();
     expect(fixture.calls()).toBe(0);
     expect(await readFile(fixture.marker, "utf8")).toBe("shutdown\n");
