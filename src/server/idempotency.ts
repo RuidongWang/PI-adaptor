@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { HostError } from "../errors.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import { sha256 } from "../util/id.js";
+import { KeyedMutex } from "../util/keyed-mutex.js";
 
 export type IdempotencyRecord = {
   key: string;
@@ -73,6 +74,7 @@ function persistable(value: unknown): unknown {
 export class IdempotencyStore {
   private readonly path: string;
   private pending: Promise<void> = Promise.resolve();
+  private readonly requests = new KeyedMutex();
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.then(work);
@@ -116,69 +118,57 @@ export class IdempotencyStore {
     now = new Date(),
     recoverPending?: () => Promise<T | undefined>
   ): Promise<T> {
-    return this.serialized(async () => {
-      const data = await this.load();
-      const cutoff = now.getTime() - IDEMPOTENCY_TTL_MS;
-      // Retain expired tombstones up to 7 days so expired retries raise CONFLICT
-      // instead of being admitted as fresh requests (contract §3.1).
-      const purgeCutoff = now.getTime() - 7 * 24 * 60 * 60 * 1000;
-      data.records = data.records.filter((record) => Date.parse(record.createdAt) >= purgeCutoff);
-      const existing = data.records.find(
-        (record) => record.key === key && (record.deviceId ?? "") === (deviceId ?? "")
-      );
-      if (existing) {
-        if (Date.parse(existing.createdAt) < cutoff) {
-          throw new HostError("CONFLICT", "idempotency key expired");
+    const matches = (record: IdempotencyRecord) => record.key === key && (record.deviceId ?? "") === (deviceId ?? "");
+    return this.requests.run(JSON.stringify([deviceId ?? "", key]), async () => {
+      const reservation = await this.serialized(async () => {
+        const data = await this.load();
+        const cutoff = now.getTime() - IDEMPOTENCY_TTL_MS;
+        const existing = data.records.find(matches);
+        if (existing) {
+          if (Date.parse(existing.createdAt) < cutoff) throw new HostError("CONFLICT", "idempotency key expired");
+          if (existing.method !== method || existing.digest !== digest) {
+            throw new HostError("IDEMPOTENCY_CONFLICT", "idempotency key reused with different request");
+          }
+          return { existing };
         }
-        if (existing.method !== method || existing.digest !== digest) {
-          await this.save(data);
-          throw new HostError("IDEMPOTENCY_CONFLICT", "idempotency key reused with different request");
-        }
-        if (existing.state === "pending") {
-          // The previous attempt may have run its side effect before the result
-          // was persisted. Never replay automatically; let the caller reconcile.
+        const purgeCutoff = now.getTime() - 7 * IDEMPOTENCY_TTL_MS;
+        data.records = data.records.filter((record) => record.state === "pending" || Date.parse(record.createdAt) >= purgeCutoff);
+        data.records.push({ key, ...(deviceId ? { deviceId } : {}), method, digest, result: null, createdAt: now.toISOString(), state: "pending" });
+        await this.save(data);
+        return { existing: undefined };
+      });
+      const { existing } = reservation;
+      if (existing && existing.state !== "pending") return existing.result as T;
+
+      let result: T;
+      try {
+        if (existing) {
           const committed = await recoverPending?.();
           if (committed === undefined) {
             throw new HostError("CONFLICT", "previous attempt outcome is unknown; reconcile before retrying");
           }
-          existing.result = persistable(committed);
-          existing.state = "done";
-          await this.save(data);
-          return committed;
+          result = committed;
+        } else {
+          result = await work();
         }
-        return existing.result as T;
-      }
-      // Execute outside the store's serialisation is unsafe: two concurrent
-      // identical requests must not both run. The store lock is the admission
-      // point, so `work` runs while holding it.
-      const pending: IdempotencyRecord = {
-        key,
-        ...(deviceId ? { deviceId } : {}),
-        method,
-        digest,
-        result: null,
-        createdAt: now.toISOString(),
-        state: "pending"
-      };
-      data.records.push(pending);
-      // Persist the reservation before running the side effect. A crash after
-      // this point leaves a tombstone that blocks silent double execution.
-      await this.save(data);
-      let result: T;
-      try {
-        result = await work();
       } catch (error) {
-        // Business rejections may be retried. An unexpected storage or runtime
-        // failure can happen after the mutation committed, so keep its reservation.
-        if (error instanceof HostError && error.code !== "INTERNAL") {
-          data.records = data.records.filter((record) => record !== pending);
-          await this.save(data).catch(() => undefined);
+        if (!existing && error instanceof HostError && error.code !== "INTERNAL") {
+          await this.serialized(async () => {
+            const data = await this.load();
+            data.records = data.records.filter((record) => !matches(record));
+            await this.save(data);
+          }).catch(() => undefined);
         }
         throw error;
       }
-      pending.result = persistable(result);
-      pending.state = "done";
-      await this.save(data);
+      await this.serialized(async () => {
+        const data = await this.load();
+        const record = data.records.find(matches);
+        if (!record) throw new HostError("INTERNAL", "idempotency reservation is missing");
+        record.result = persistable(result);
+        record.state = "done";
+        await this.save(data);
+      });
       return result;
     });
   }

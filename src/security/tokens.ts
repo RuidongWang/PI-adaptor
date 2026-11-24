@@ -74,6 +74,10 @@ export class TokenStore {
     return result;
   }
 
+  waitForWrites(): Promise<void> {
+    return this.pending;
+  }
+
   constructor(dataDir: string) {
     this.path = join(dataDir, "meta", "tokens.json");
   }

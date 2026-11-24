@@ -1,18 +1,20 @@
 import { join } from "node:path";
 import {
   DefaultResourceLoader,
-  ModelRuntime,
   ExtensionRunner,
   ModelRegistry,
   SessionManager,
   SettingsManager,
   createAgentSession,
+  loadSkills,
   type ExtensionError,
   type AgentSessionEvent
 } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { HostError } from "../errors.js";
 import { providerApi } from "../providers/protocol.js";
+import { createProviderRuntime, publicAssistantMessage } from "../providers/runtime.js";
+import { messageText, openNativeSessionForWrite } from "../pi/session-catalog.js";
 import { uuid } from "../util/id.js";
 import { ExtensionRegistry } from "../extensions/registry.js";
 import { HOST_APPROVAL_PATH, hostApprovalExtension } from "../extensions/approval.js";
@@ -37,6 +39,7 @@ export type AgentTurnRequest = {
   cwd: string;
   sessionDir: string;
   sessionFile?: string | undefined;
+  skills?: Array<{ name: string; filePath: string }>;
   provider?: {
     id: string;
     name: string;
@@ -60,6 +63,7 @@ export type AgentTurnRequest = {
   text: string;
   images: ImageContent[];
   requestApproval?: ((toolName: string, input: unknown) => Promise<boolean>) | undefined;
+  onSessionReadOnly?(reason: string): Promise<void>;
   extensions?: { registry: ExtensionRegistry; hostId: string; publish(snapshot: ExtensionSnapshot): Promise<void> };
   onEvent(event: AgentEvent): void;
 };
@@ -124,13 +128,7 @@ function itemIdFor(message: unknown): string {
   return typeof value?.id === "string" ? value.id : uuid();
 }
 function textFromMessage(message: unknown): string {
-  const content = (message as { content?: unknown })?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => (part as { text?: unknown }).text)
-    .filter((text): text is string => typeof text === "string")
-    .join("");
+  return messageText((message as { content?: unknown })?.content);
 }
 
 /**
@@ -173,7 +171,7 @@ export class ToolOutputDeltaTracker {
 
 export class PiAgentDriver implements AgentDriver {
   readonly appendsPrompt = true;
-  constructor(private readonly agentDir: string, private readonly skillPaths: string[] = []) {}
+  constructor(private readonly agentDir: string) {}
 
   start(request: AgentTurnRequest): AgentTurnHandle {
     const turnId = request.turnId;
@@ -186,7 +184,7 @@ export class PiAgentDriver implements AgentDriver {
     let cleanupUnbound: (() => Promise<void>) | undefined;
     let approvalStarted = false;
     let unsubscribe: (() => void) | undefined;
-    let terminalError: string | null = null;
+    let terminalError = false;
     let failure: unknown;
     let publishChain = Promise.resolve();
     let publishFailure: unknown;
@@ -212,15 +210,10 @@ export class PiAgentDriver implements AgentDriver {
         if (request.provider.authKind !== "none" && !request.provider.apiKey) {
           throw new HostError("PROVIDER_SECRET_MISSING", "provider secret is missing");
         }
-        const runtime = await ModelRuntime.create({
-          authPath: join(request.cwd, ".pi-host-auth.json"),
-          modelsPath: null
-        });
         const api = providerApi(request.provider.protocol);
-        runtime.registerProvider(request.provider.id, {
+        const runtime = await createProviderRuntime(request.provider.id, {
           name: request.provider.name,
           baseUrl: request.provider.baseUrl,
-          apiKey: request.provider.apiKey ?? "none",
           api,
           models: request.provider.models.map((model) => ({
             id: model.id,
@@ -232,7 +225,7 @@ export class PiAgentDriver implements AgentDriver {
             maxTokens: model.maxTokens,
             reasoning: model.thinkingLevels.length > 0
           }))
-        });
+        }, request.provider.apiKey ?? "none");
         const model = runtime.getModel(request.provider.id, request.modelId);
         if (!model) throw new HostError("PROVIDER_NOT_CONFIGURED", "model is not configured");
         const settings = SettingsManager.inMemory({
@@ -247,11 +240,21 @@ export class PiAgentDriver implements AgentDriver {
         await publish();
         if (publishFailure) throw publishFailure;
         if (aborted) throw new HostError("INTERNAL", "Turn canceled before extension loading");
+        const skills = request.skills ?? [];
+        const skillPaths = skills.map((skill) => skill.filePath);
+        const indexedSkills = loadSkills({ cwd: request.cwd, agentDir: this.agentDir, skillPaths, includeDefaults: false });
+        if (indexedSkills.skills.length !== skills.length) {
+          addDiagnostic(snapshot.diagnostics, diagnostic("load", "SKILL_SOURCE_UNAVAILABLE", "An installed skill could not be loaded.", "warning"));
+        }
+        const indexedNames = new Set([...skills, ...indexedSkills.skills].map((skill) => skill.name));
         const loader = new DefaultResourceLoader({
           cwd: request.cwd,
           agentDir: this.agentDir,
           settingsManager: settings,
-          additionalSkillPaths: this.skillPaths,
+          skillsOverride: (base) => ({
+            skills: [...indexedSkills.skills, ...base.skills.filter((skill) => !indexedNames.has(skill.name))],
+            diagnostics: [...indexedSkills.diagnostics, ...base.diagnostics]
+          }),
           noExtensions: true,
           additionalExtensionPaths: [...selectedPaths.values()],
           extensionFactories: [hostApprovalExtension(request.requestApproval, () => { approvalStarted = true; })]
@@ -284,8 +287,31 @@ export class PiAgentDriver implements AgentDriver {
         const approval = loaded.extensions.find(extension => extension.path === HOST_APPROVAL_PATH);
         if (!approval?.hidden || approval.handlers.get("tool_call")?.length !== 1 || approval.handlers.get("session_start")?.length !== 1 || loaded.errors.some(error => error.path === HOST_APPROVAL_PATH)) throw new HostError("INTERNAL", "Host approval extension initialization failed");
         const manager = request.sessionFile
-          ? SessionManager.open(request.sessionFile)
+          ? await openNativeSessionForWrite(request.sessionFile, request.sessionId)
           : SessionManager.create(request.cwd, request.sessionDir, { id: request.sessionId });
+        const completedMessages = new WeakMap<object, (entryId: string) => void>();
+        const completedTools = new Map<string, AgentEvent>();
+        const appendMessage = manager.appendMessage.bind(manager);
+        manager.appendMessage = (message) => {
+          let entryId: string;
+          try {
+            entryId = appendMessage(message.role === "assistant" ? publicAssistantMessage(message) : message);
+          } catch (error) {
+            failure = error;
+            throw error;
+          }
+          if (message.role === "toolResult") {
+            const tool = completedTools.get(message.toolCallId);
+            completedTools.delete(message.toolCallId);
+            if (tool) request.onEvent({ ...tool, payload: { ...tool.payload, historyItemId: entryId } });
+          }
+          // The SDK calls its listeners before appendMessage. Publish a completed
+          // item only after the native write has passed verification.
+          const completed = completedMessages.get(message);
+          completedMessages.delete(message);
+          completed?.(entryId);
+          return entryId;
+        };
         const created = await createAgentSession({
           cwd: request.cwd,
           agentDir: this.agentDir,
@@ -318,11 +344,10 @@ export class PiAgentDriver implements AgentDriver {
         let streamItemId: string | null = null;
         const toolOutput = new ToolOutputDeltaTracker();
         unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-          const raw = event as unknown as Record<string, unknown>;
-          const type = String(raw.type ?? "");
+          const type = event.type;
           if (type === "message_start") {
-            const message = raw.message as { role?: string } | undefined;
-            const role = message?.role ?? "assistant";
+            const { message } = event;
+            const role = message.role;
             if (role === "assistant") {
               streamItemId = itemIdFor(message);
               request.onEvent({
@@ -333,9 +358,7 @@ export class PiAgentDriver implements AgentDriver {
               streamItemId = null;
             }
           } else if (type === "message_update") {
-            const update = raw.assistantMessageEvent as
-              | { type?: string; delta?: string }
-              | undefined;
+            const update = event.assistantMessageEvent;
             if (
               update?.type === "text_delta" &&
               typeof update.delta === "string" &&
@@ -348,10 +371,11 @@ export class PiAgentDriver implements AgentDriver {
               });
             }
           } else if (type === "message_end") {
-            const message = raw.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
-            const role = message?.role ?? "assistant";
-            if (message?.stopReason === "error" || message?.errorMessage) {
-              terminalError = message.errorMessage ?? "Model returned error stopReason";
+            const original = event.message;
+            const message = original.role === "assistant" ? publicAssistantMessage(original) : original;
+            const role = message.role;
+            if (message.role === "assistant" && (message.stopReason === "error" || message.errorMessage)) {
+              terminalError = true;
             }
             if (role === "system") {
               streamItemId = null;
@@ -359,45 +383,52 @@ export class PiAgentDriver implements AgentDriver {
             }
             const id = streamItemId ?? itemIdFor(message);
             streamItemId = null;
-            request.onEvent({
+            const complete = (entryId?: string) => request.onEvent({
               kind: "item.completed",
               payload: {
                 item: {
-                  id,
-                  itemType: "message",
-                  kind: "message",
+                  id: message.role === "toolResult" ? message.toolCallId : id,
+                  ...(entryId ? { historyItemId: entryId } : {}),
+                  itemType: message.role === "toolResult" ? "tool" : "message",
+                  kind: message.role === "toolResult" ? "tool" : "message",
                   role,
+                  ...(message.role === "toolResult" ? { toolName: message.toolName, status: message.isError ? "failed" : "completed" } : {}),
                   text: textFromMessage(message),
                   content: message,
                   attachments: []
                 }
               }
             });
+            if (role === "user" || role === "assistant" || role === "toolResult") {
+              completedMessages.set(original, complete);
+            } else {
+              complete();
+            }
           } else if (type === "tool_execution_start") {
             request.onEvent({
               kind: "tool.started",
               payload: {
-                itemId: String(raw.toolCallId ?? uuid()),
-                toolName: String(raw.toolName ?? "tool"),
-                input: raw.args ?? {}
+                itemId: event.toolCallId,
+                toolName: event.toolName,
+                input: event.args ?? {}
               }
             });
           } else if (type === "tool_execution_update") {
             // Pi 推的是累计快照，契约要求追加增量：只发新增后缀（见 Tracker）。
-            const itemId = String(raw.toolCallId ?? "");
-            const delta = toolOutput.accept(itemId, textFromToolResult(raw.partialResult));
+            const itemId = event.toolCallId;
+            const delta = toolOutput.accept(itemId, textFromToolResult(event.partialResult));
             if (delta) {
               request.onEvent({ kind: "tool.updated", payload: { itemId, delta } });
             }
           } else if (type === "tool_execution_end") {
-            const itemId = String(raw.toolCallId ?? "");
+            const itemId = event.toolCallId;
             toolOutput.forget(itemId);
-            request.onEvent({
+            completedTools.set(itemId, {
               kind: "tool.completed",
               payload: {
                 itemId,
-                status: raw.isError ? "failed" : "completed",
-                result: raw.result ?? {}
+                status: event.isError ? "failed" : "completed",
+                result: event.result ?? {}
               }
             });
           } else if (type === "agent_settled") {
@@ -407,7 +438,7 @@ export class PiAgentDriver implements AgentDriver {
         request.onEvent({ kind: "turn.started", payload: { turnId } });
         await session.prompt(request.text, { images: request.images, streamingBehavior: "followUp" });
       } catch (error) {
-        failure = error;
+        failure ??= error;
         if (snapshot?.phase === "loading") {
           snapshot.phase = "failed"; snapshot.completedAt = new Date().toISOString();
           addDiagnostic(snapshot.diagnostics, diagnostic(extensionStage, aborted ? "TURN_CANCELED" : "INITIALIZATION_FAILED", aborted ? "Turn was canceled during extension initialization." : "Extension runtime initialization failed; raw error details were withheld."));
@@ -430,7 +461,18 @@ export class PiAgentDriver implements AgentDriver {
         }
         if (snapshot) await publish();
         await publishChain;
-        if (!aborted) request.onEvent({ kind: failure || terminalError || publishFailure ? "turn.failed" : "turn.completed", payload: { turnId, ...(failure || terminalError || publishFailure ? { error: "Agent turn failed; sensitive error details withheld" } : {}) } });
+        if (failure instanceof HostError && failure.code === "SESSION_READ_ONLY") {
+          await request.onSessionReadOnly?.(failure.message);
+        }
+        if (!aborted) {
+          if (failure || terminalError || publishFailure) {
+            const reason = failure instanceof HostError && failure.code === "SESSION_READ_ONLY"
+              ? failure.message : "Agent turn failed; sensitive error details withheld";
+            request.onEvent({ kind: "turn.failed", payload: { turnId, error: reason } });
+          } else {
+            request.onEvent({ kind: "turn.completed", payload: { turnId } });
+          }
+        }
       }
     })();
     return {

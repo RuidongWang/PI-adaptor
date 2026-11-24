@@ -1,5 +1,31 @@
-import { describe, expect, it } from "vitest";
-import { requestDigest } from "../src/server/idempotency.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { IdempotencyStore, requestDigest } from "../src/server/idempotency.js";
+
+it("lets an unrelated request finish while a slow request and its retry wait", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-adaptor-idempotency-"));
+  const store = new IdempotencyStore(root);
+  let complete!: (result: { completed: boolean }) => void;
+  const gate = new Promise<{ completed: boolean }>((resolve) => { complete = resolve; });
+  const slow = vi.fn(() => gate);
+  const original = store.run("slow", "skill/install", "first", slow, "device");
+  const retry = store.run("slow", "skill/install", "first", slow, "device");
+  const quick = store.run("quick", "turn/start", "second", async () => ({ accepted: true }), "device");
+  let advanced = false;
+  void quick.then(() => { advanced = true; }, () => undefined);
+  try {
+    await vi.waitFor(() => expect(advanced).toBe(true), { timeout: 500 });
+    expect(slow).toHaveBeenCalledTimes(1);
+  } finally {
+    complete({ completed: true });
+    await Promise.allSettled([original, retry, quick]);
+    await rm(root, { recursive: true, force: true });
+  }
+  expect(await retry).toEqual({ completed: true });
+  expect(slow).toHaveBeenCalledTimes(1);
+});
 
 describe("request digest redaction", () => {
   it("redacts top-level and nested api keys before hashing", () => {

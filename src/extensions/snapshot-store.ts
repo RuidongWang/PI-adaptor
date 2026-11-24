@@ -69,7 +69,15 @@ export class ExtensionSnapshotStore {
       if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
       const sessionId = live.get(file);
       if (!sessionId) { await rm(join(this.directory, file), { force: true }); continue; }
-      const pair = await this.get(sessionId), latest = pair.latestAttempt;
+      let pair: SnapshotPair;
+      try {
+        pair = await this.get(sessionId);
+      } catch (error) {
+        if (!(error instanceof HostError) || error.code !== "INTERNAL") throw error;
+        console.warn("Extension snapshot recovery skipped an unreadable session sidecar.");
+        continue;
+      }
+      const latest = pair.latestAttempt;
       if (latest?.phase === "loading") {
         latest.phase = "failed"; latest.revision += 1; latest.completedAt = new Date().toISOString();
         addDiagnostic(latest.diagnostics, diagnostic("startup", "AGENT_RESTARTED", "Host restarted before extension initialization completed."));

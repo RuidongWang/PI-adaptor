@@ -1,14 +1,20 @@
-import { mkdtemp, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { HostError } from "../src/errors.js";
 import { TokenStore } from "../src/security/tokens.js";
 
+async function makeStore() {
+  const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
+  onTestFinished(() => rm(root, { recursive: true, force: true }));
+  return { root, store: new TokenStore(root) };
+}
+
 describe("token store", () => {
   it("serializes simultaneous pair and revoke operations", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-race-"));
-    const store = new TokenStore(root);
+    const { store } = await makeStore();
     const pairing = await store.createPairingToken();
     const attempts = await Promise.allSettled([store.pair(pairing.token, "a"), store.pair(pairing.token, "b")]);
     expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -17,30 +23,45 @@ describe("token store", () => {
     await expect(store.authenticate(paired.value.deviceToken)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 
-  it("does not share empty state across separate stores", async () => {
-    const first = new TokenStore(await mkdtemp(join(tmpdir(), "pi-adaptor-first-")));
-    const second = new TokenStore(await mkdtemp(join(tmpdir(), "pi-adaptor-second-")));
-    await first.createPairingToken();
-    expect(await second.listDevices()).toEqual([]);
+  it("isolates paired devices across separate stores", async () => {
+    const { store: first } = await makeStore();
+    const { store: second } = await makeStore();
+    const firstPair = await first.createPairingToken();
+    const secondPair = await second.createPairingToken();
+    const firstDevice = await first.pair(firstPair.token, "first");
+    const secondDevice = await second.pair(secondPair.token, "second");
+
+    expect((await first.listDevices()).map(device => device.deviceId)).toEqual([firstDevice.deviceId]);
+    expect((await second.listDevices()).map(device => device.deviceId)).toEqual([secondDevice.deviceId]);
+    await expect(first.authenticate(secondDevice.deviceToken)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(second.authenticate(firstDevice.deviceToken)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
+
   it("pairs once, authenticates, and stores only hashes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
-    const store = new TokenStore(root);
+    const { root, store } = await makeStore();
     const pairing = await store.createPairingToken(600, new Date("2026-01-01T00:00:00Z"));
     expect(pairing.token).toMatch(/^ppt2\./);
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:01:00Z"));
     expect(paired.deviceToken).toMatch(/^pdt2\./);
     const device = await store.authenticate(paired.deviceToken, new Date("2026-01-01T00:02:00Z"));
     expect(device.deviceId).toBe(paired.deviceId);
-    expect((await stat(join(root, "meta", "tokens.json"))).mode & 0o777).toBe(0o600);
+    const path = join(root, "meta", "tokens.json");
+    const persisted = await readFile(path, "utf8");
+    const digest = (token: string) => createHash("sha256").update(token).digest("hex");
+    expect(JSON.parse(persisted)).toMatchObject({
+      pairing: [{ tokenHash: digest(pairing.token) }],
+      devices: [{ deviceId: paired.deviceId, tokenHash: digest(paired.deviceToken) }]
+    });
+    expect(persisted).not.toContain(pairing.token);
+    expect(persisted).not.toContain(paired.deviceToken);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
     await expect(store.pair(pairing.token, "replay", new Date("2026-01-01T00:03:00Z"))).rejects.toMatchObject({
       code: "PAIRING_FAILED"
     });
   });
 
   it("rejects expired pairing tokens and revoked devices", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
-    const store = new TokenStore(root);
+    const { store } = await makeStore();
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     await expect(
       store.pair(pairing.token, "late", new Date("2026-01-01T00:02:00Z"))
@@ -55,8 +76,7 @@ describe("token store", () => {
   });
 
   it("rotates with a five-minute overlap and confirms the new token", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
-    const store = new TokenStore(root);
+    const { store } = await makeStore();
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:00:10Z"));
     const rotated = await store.rotate(paired.deviceId, new Date("2026-01-01T00:01:00Z"));
@@ -73,8 +93,7 @@ describe("token store", () => {
   });
 
   it("rejects a confirmation whose rotationId does not match", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
-    const store = new TokenStore(root);
+    const { store } = await makeStore();
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:00:10Z"));
     await store.rotate(paired.deviceId, new Date("2026-01-01T00:01:00Z"));
@@ -84,8 +103,7 @@ describe("token store", () => {
   });
 
   it("voids an unconfirmed rotation after restart, keeping the old token valid", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tokens-"));
-    const store = new TokenStore(root);
+    const { root, store } = await makeStore();
     const pairing = await store.createPairingToken(60, new Date("2026-01-01T00:00:00Z"));
     const paired = await store.pair(pairing.token, "iPhone", new Date("2026-01-01T00:00:10Z"));
     const rotated = await store.rotate(paired.deviceId, new Date("2026-01-01T00:01:00Z"));

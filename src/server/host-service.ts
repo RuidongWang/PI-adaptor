@@ -3,16 +3,15 @@ import { access, mkdir, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-import { AgentDriver, type AgentEvent } from "../agent/driver.js";
+import { AgentDriver, textFromToolResult, type AgentEvent, type AgentTurnHandle, type AgentTurnRequest } from "../agent/driver.js";
 import { isSupportedProviderProtocol, providerApi } from "../providers/protocol.js";
+import { createProviderRuntime, publicAssistantMessage } from "../providers/runtime.js";
 import { HostConfig } from "../config.js";
 import { HostError } from "../errors.js";
 import { EventJournal, type Cursor, type HostEvent } from "../events/journal.js";
 import { BlobStore, type AttachmentRecord } from "../media/blob-store.js";
 import { MetaStore, type SessionMeta } from "../meta/store.js";
-import { NativeSessionCatalog } from "../pi/session-catalog.js";
+import { messageText, NativeSessionCatalog } from "../pi/session-catalog.js";
 import { discoverProviderModels, ProviderDiscoveryError, type ProviderDiscoveryInput, type ProviderDiscoveryOptions } from "../providers/discovery.js";
 import { ProviderStore } from "../providers/store.js";
 import { SkillRegistry } from "../skills/registry.js";
@@ -62,9 +61,14 @@ const IDEMPOTENT_METHODS = new Set([
 /** Keep history responses well below the client's 1 MiB advertised receive budget. */
 const HISTORY_RESPONSE_MAX_BYTES = 512 * 1024;
 const HISTORY_TEXT_PREVIEW_BYTES = 8 * 1024;
-const HISTORY_TEXT_CHUNK_BYTES = 64 * 1024;
+export const HISTORY_TEXT_CHUNK_BYTES = 64 * 1024;
+const LIVE_EVENT_PAYLOAD_BYTES = 256 * 1024;
 const SNAPSHOT_QUEUE_TEXT_BYTES = 1024;
 const SNAPSHOT_ACTIVE_ITEMS_BYTES = 128 * 1024;
+const APPROVAL_INLINE_BYTES = 4 * 1024;
+const MAX_APPROVAL_INPUT_BYTES = 16 * 1024 * 1024;
+const MAX_PENDING_APPROVAL_BYTES = 64 * 1024 * 1024;
+const MAX_PENDING_SESSION_APPROVALS = 16;
 /** Bounded in-memory queue: protects the host from unbounded queued text. */
 const MAX_QUEUED_TURNS_PER_SESSION = 20;
 const MAX_QUEUED_TURNS_TOTAL = 200;
@@ -136,6 +140,17 @@ type TurnState = {
   handle?: { abort(): Promise<void>; wait(): Promise<void> };
 };
 
+type PendingApproval = {
+  sessionId: string;
+  turnId: string;
+  toolName: string;
+  input: unknown;
+  fullInput?: Buffer;
+  inputDigest?: string;
+  revision: number;
+  resolve: (allowed: boolean) => void;
+};
+
 /** 标题只保留一行：去引号/句末标点，压缩空白，限长。 */
 export function sanitizeSessionTitle(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
@@ -154,26 +169,6 @@ export function fallbackSessionTitle(instruction: string): string {
   if (!collapsed) return "New session";
   return collapsed.length <= 24 ? collapsed : `${collapsed.slice(0, 24)}…`;
 }
-
-/**
- * 一次性标题补全只需要请求期的临时 API Key，绝不能把凭据写进服务器磁盘。
- * `ModelRuntime.create` 默认会落到 `authPath` 指向的文件，这里注入纯内存存储。
- */
-const ephemeralCredentialStore: CredentialStore = {
-  async read(): Promise<Credential | undefined> {
-    return undefined;
-  },
-  async list(): Promise<readonly CredentialInfo[]> {
-    return [];
-  },
-  async modify(
-    _providerId: string,
-    fn: (current: Credential | undefined) => Promise<Credential | undefined>
-  ): Promise<Credential | undefined> {
-    return fn(undefined);
-  },
-  async delete(): Promise<void> {}
-};
 
 function str(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
@@ -231,15 +226,6 @@ function transientApiKey(params: Record<string, unknown>): string | undefined {
 
 function imageExtension(mimeType: string): string {
   return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
-}
-
-function messageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => (part as { text?: unknown } | null)?.text)
-    .filter((text): text is string => typeof text === "string")
-    .join("");
 }
 
 async function projectContent(
@@ -302,7 +288,7 @@ async function itemFromEntry(
   blobs: BlobStore
 ) {
   if (entry.type !== "message") return null;
-  const message = entry.message as {
+  const message = (entry.message.role === "assistant" ? publicAssistantMessage(entry.message) : entry.message) as {
     role?: string;
     content?: unknown;
     toolName?: string;
@@ -355,6 +341,8 @@ export class HostService {
   readonly catalog: NativeSessionCatalog;
   readonly journal: EventJournal;
   private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
+  private readonly inFlight = new Set<Promise<unknown>>();
   readonly blobs: BlobStore;
   readonly providers: ProviderStore;
   readonly skills: SkillRegistry;
@@ -365,11 +353,11 @@ export class HostService {
 
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly turns = new Map<string, TurnState>();
-  private readonly sessionFiles = new Map<string, string>();
   private readonly idempotency: IdempotencyStore;
   private readonly turnStore: TurnStore;
   /** Serialises per-session native writes and session-scoped event emission. */
   private readonly sessionLocks = new KeyedMutex();
+  private readonly turnStopLocks = new KeyedMutex();
   /** Serialises per-turn driver event processing in strict FIFO order. */
   private readonly turnEventChains = new Map<string, Promise<void>>();
   /** turnId → (itemId → partial output) for the in-flight turn's active items. */
@@ -389,17 +377,7 @@ export class HostService {
   /// start them in parallel.
   private readonly draining = new Set<string>();
   private maintenanceTimer: NodeJS.Timeout | undefined;
-  private readonly pendingApprovals = new Map<
-    string,
-    {
-      sessionId: string;
-      turnId: string;
-      toolName: string;
-      input: unknown;
-      revision: number;
-      resolve: (allowed: boolean) => void;
-    }
-  >();
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly allowedSessionTools = new Map<string, Set<string>>();
   private approvalRevision = 0;
 
@@ -413,8 +391,8 @@ export class HostService {
     this.catalog = new NativeSessionCatalog(config.sessionRoots);
     this.journal = new EventJournal(config.dataDir);
     this.blobs = new BlobStore(config.dataDir);
-    this.providers = new ProviderStore(config.dataDir, config.dataDir.includes("test"));
-    this.skills = new SkillRegistry(config.dataDir, join(config.agentDir, ".."), config.dataDir.includes("test"));
+    this.providers = new ProviderStore(config.dataDir, { lookup: discoveryOptions.testOnly?.lookup });
+    this.skills = new SkillRegistry(config.dataDir, join(config.agentDir, ".."));
     this.idempotency = new IdempotencyStore(config.dataDir);
     this.turnStore = new TurnStore(config.dataDir);
     this.extensions = new ExtensionRegistry(config.extensions);
@@ -457,7 +435,7 @@ export class HostService {
 
   /** Start periodic media GC. Call from the process entrypoint after `init()`. */
   startMaintenance(intervalMs = 60 * 60 * 1000): void {
-    if (this.maintenanceTimer) return;
+    if (this.shuttingDown || this.maintenanceTimer) return;
     void this.runMaintenance().catch(() => undefined);
     this.maintenanceTimer = setInterval(() => {
       void this.runMaintenance().catch(() => undefined);
@@ -465,21 +443,27 @@ export class HostService {
     this.maintenanceTimer.unref?.();
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.stopMaintenance();
-    const turns = [...this.turns.values()];
-    await Promise.all(turns.filter(turn => ACTIVE_TURN_STATUSES.has(turn.status)).map(turn => this.stopTurn(turn.id, "interrupted")));
-    await Promise.all([...this.executingDrivers.entries()].map(async ([sessionId, id]) => {
-      try {
-        const turn = this.turns.get(id);
-        this.settleApprovalsForTurn(id);
-        await turn?.handle?.abort();
-        await turn?.handle?.wait();
-      } finally {
-        if (this.executingDrivers.get(sessionId) === id) this.executingDrivers.delete(sessionId);
+    this.shutdownPromise ??= (async () => {
+      const turns = [...this.turns.values()].filter(turn => ACTIVE_TURN_STATUSES.has(turn.status));
+      await Promise.allSettled(turns.map(turn => this.stopTurn(turn.id, "interrupted")));
+      for (const turnId of this.executingDrivers.values()) {
+        this.settleApprovalsForTurn(turnId);
+        const handle = this.turns.get(turnId)?.handle;
+        if (handle) this.trackWork(handle.abort());
       }
-    }));
+      while (this.inFlight.size) await Promise.allSettled([...this.inFlight]);
+      await this.tokens.waitForWrites();
+    })();
+    return this.shutdownPromise;
+  }
+
+  private trackWork<T>(work: Promise<T>): Promise<T> {
+    this.inFlight.add(work);
+    void work.then(() => this.inFlight.delete(work), () => this.inFlight.delete(work));
+    return work;
   }
   stopMaintenance(): void {
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
@@ -491,7 +475,12 @@ export class HostService {
    * reference by walking each live session's native history, then drop unreferenced blobs.
    * If any session's history cannot be read, maintenance is aborted to prevent accidental GC.
    */
-  async runMaintenance(now = new Date()): Promise<number> {
+  runMaintenance(now = new Date()): Promise<number> {
+    if (this.shuttingDown) return Promise.resolve(0);
+    return this.trackWork(this.performMaintenance(now));
+  }
+
+  private async performMaintenance(now: Date): Promise<number> {
     try {
       const { ids, hashes } = await this.collectReferencedAttachments();
       return await this.blobs.gc(ids, hashes, now);
@@ -506,7 +495,7 @@ export class HostService {
     const hashes = new Set<string>();
     for (const session of await this.meta.listSessions(true)) {
       if (!session.nativePath) continue;
-      const entries = await this.catalog.history(session.nativePath);
+      const entries = await this.catalog.history(session.nativePath, session.id);
       for (const entry of entries) {
         if (entry.type !== "message") continue;
         const content = (entry.message as { content?: unknown }).content;
@@ -602,10 +591,27 @@ export class HostService {
   }
 
   async createPairingToken(ttlSeconds = 600) {
-    return this.tokens.createPairingToken(ttlSeconds);
+    if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
+    return this.trackWork(this.tokens.createPairingToken(ttlSeconds));
+  }
+
+  async authenticateDevice(token: string): Promise<DeviceRecord> {
+    if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
+    return this.trackWork(this.tokens.authenticate(token));
   }
 
   async handle(
+    method: string,
+    rawParams: unknown,
+    auth: AuthContext | null,
+    pairingToken?: string,
+    effects?: ConnectionEffects
+  ): Promise<unknown> {
+    if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
+    return this.trackWork(this.handleAdmitted(method, rawParams, auth, pairingToken, effects));
+  }
+
+  private async handleAdmitted(
     method: string,
     rawParams: unknown,
     auth: AuthContext | null,
@@ -736,13 +742,15 @@ export class HostService {
       case "turn/start":
         return this.startTurn(params);
       case "turn/get":
-        return { turn: this.getTurn(str(params.turnId, "turnId")) };
+        return { turn: this.publicTurn(this.getTurn(str(params.turnId, "turnId"))) };
       case "turn/interrupt":
         return this.stopTurn(str(params.turnId, "turnId"), "interrupted");
       case "turn/cancel":
         return this.stopTurn(str(params.turnId, "turnId"), "canceled");
       case "approval/respond":
         return this.respondApproval(params, auth);
+      case "approval/read":
+        return this.readApproval(params, auth);
       case "input/respond":
         // AskTool is not wired to the production driver yet. Returning success
         // here would claim an answer was delivered when nothing consumed it.
@@ -1095,12 +1103,24 @@ export class HostService {
   }
 
   private async attachSessionSnapshot(sessionId: string) {
-    const session = await this.requireSession(sessionId);
+    let session = await this.requireSession(sessionId);
+    let native = session.nativePath ? await this.catalog.historyForAttach(session.nativePath, sessionId) : undefined;
+    if (session.nativePath && native?.readOnlyReason === "external_write_conflict" && this.activeTurnIdFor(sessionId)) {
+      native = await this.catalog.historyForAttach(session.nativePath, sessionId);
+      if (native.readOnlyReason === "external_write_conflict") {
+        throw new HostError("CONFLICT", "Session changed while reading. Open it again to refresh.");
+      }
+    }
+    // Only a verified reopen may clear a recorded conflict, after its writer has exited.
+    if (native && (native.readOnlyReason || !this.activeTurnIdFor(sessionId))
+        && native.readOnlyReason !== (session.readOnlyReason ?? null)) {
+      session = await this.updateSessionWriteState(session, native.readOnlyReason);
+    }
     // Capture history, the cursor, and live turn projections under one session
     // lock. A terminal event can therefore never be included in the cursor while
     // its already-settled turn is still reported as active in this snapshot.
     const seq = this.journal.currentCursor();
-    const history = session.nativePath ? await this.catalog.history(session.nativePath) : [];
+    const history = native?.entries ?? [];
     const cursor = seq;
     // A pending tool approval is not part of the native JSONL history, so it has
     // to be replayed from the live turn state. Without this, a client that
@@ -1108,15 +1128,7 @@ export class HostService {
     // turn hangs forever (the model never gets a tool result).
     const pendingApprovals = [...this.pendingApprovals.entries()]
       .filter(([, pending]) => pending.sessionId === sessionId)
-      .map(([id, pending]) => ({
-        id,
-        revision: pending.revision,
-        kind: "tool",
-        title: pending.toolName,
-        toolName: pending.toolName,
-        input: pending.input,
-        expiresAt: null
-      }));
+      .map(([id, pending]) => this.approvalProjection(id, pending));
     const summary = this.summarize(session);
     const activeTurn = summary.activeTurnId ? this.turns.get(summary.activeTurnId) ?? null : null;
     const activeItems = activeTurn ? this.activeItemPreviews(activeTurn.id) : [];
@@ -1262,17 +1274,12 @@ export class HostService {
       }
       return this.sessionLocks.run(sessionId, async () => {
         const session = await this.requireSession(sessionId);
-        const entries = session.nativePath ? await this.catalog.history(session.nativePath) : [];
-        const item = entries.find((entry) => entry.type === "message" && entry.id === itemId);
-        if (!item || item.type !== "message") throw new HostError("NOT_FOUND", "history item no longer exists");
-        const body = Buffer.from(messageText((item.message as { content?: unknown }).content), "utf8");
-        if (offset > body.length) throw new HostError("INVALID_ARGUMENT", "textRange.offset exceeds the body length");
+        if (!session.nativePath) throw new HostError("NOT_FOUND", "history item no longer exists");
+        const textChunk = await this.catalog.historyTextChunk(
+          session.nativePath, sessionId, itemId, offset, HISTORY_TEXT_CHUNK_BYTES
+        );
         return {
-          items: [], hasMore: false, revision: session.revision,
-          textChunk: {
-            dataBase64: body.subarray(offset, offset + HISTORY_TEXT_CHUNK_BYTES).toString("base64"),
-            totalBytes: body.length
-          }
+          items: [], hasMore: false, revision: session.revision, textChunk
         };
       });
     }
@@ -1285,7 +1292,7 @@ export class HostService {
       : str(params.beforeItemId, "beforeItemId");
     return this.sessionLocks.run(sessionId, async () => {
       const session = await this.requireSession(sessionId);
-      const history = session.nativePath ? await this.catalog.history(session.nativePath) : [];
+      const history = session.nativePath ? await this.catalog.history(session.nativePath, sessionId) : [];
       const result = { items: [] as Record<string, unknown>[], hasMore: false, revision: session.revision };
       const page = await this.historyPage(
         session.id,
@@ -1342,14 +1349,9 @@ export class HostService {
     this.assertProviderKey(provider, apiKey, params.providerBinding);
     const api = providerApi(provider.protocol);
     const declared = provider.models.find((model) => model.id === modelId);
-    const runtime = await ModelRuntime.create({
-      credentials: ephemeralCredentialStore,
-      modelsPath: null
-    });
-    runtime.registerProvider(provider.id, {
+    const runtime = await createProviderRuntime(provider.id, {
       name: provider.name,
       baseUrl: provider.baseUrl,
-      apiKey: provider.authKind === "api_key" ? apiKey! : "none",
       api,
       models: [{
         id: modelId,
@@ -1361,7 +1363,7 @@ export class HostService {
         maxTokens: declared?.maxTokens ?? 4_096,
         reasoning: declared?.thinkingLevels.length ? true : false
       }]
-    });
+    }, provider.authKind === "api_key" ? apiKey! : "none");
     const model = runtime.getModel(provider.id, modelId);
     if (!model) throw new HostError("PROVIDER_NOT_CONFIGURED", "model is not configured");
 
@@ -1378,7 +1380,7 @@ export class HostService {
       { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
       { maxTokens: 64 }
     );
-    const text = message.content
+    const text = publicAssistantMessage(message).content
       .filter((part): part is { type: "text"; text: string } => part.type === "text")
       .map((part) => part.text)
       .join(" ")
@@ -1390,7 +1392,17 @@ export class HostService {
     const sessionId = str(params.sessionId, "sessionId");
     const title = str(params.title, "title");
     return this.reviseSession(sessionId, { title }, async (session) => {
-      if (session.nativePath) await this.catalog.appendSessionInfo(session.nativePath, title);
+      if (session.nativePath && this.sessionBusy(sessionId)) throw new HostError("SESSION_BUSY", "wait until the session is idle before renaming");
+      if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
+      if (!session.nativePath) return;
+      try {
+        await this.catalog.appendSessionInfo(session.nativePath, title, session.id);
+      } catch (error) {
+        if (error instanceof HostError && error.code === "SESSION_READ_ONLY") {
+          await this.updateSessionWriteState(session, error.message);
+        }
+        throw error;
+      }
     });
   }
 
@@ -1412,11 +1424,18 @@ export class HostService {
     });
   }
 
+  private async updateSessionWriteState(session: SessionMeta, reason: string | null): Promise<SessionMeta> {
+    if ((session.readOnlyReason ?? null) === reason) return session;
+    const updated = await this.meta.updateSession(session.id, { readOnlyReason: reason }, { incrementRevision: true });
+    await this.emit("host", "session.changed", { session: updated }, { sessionId: session.id });
+    return updated;
+  }
+
   private async branchSession(params: Record<string, unknown>) {
     const sessionId = str(params.sessionId, "sessionId");
     const session = await this.requireSession(sessionId);
     if (!session.nativePath) throw new HostError("NOT_FOUND", "session has no native file");
-    const childPath = await this.catalog.branch(session.nativePath, str(params.fromItemId, "fromItemId"));
+    const childPath = await this.catalog.branch(session.nativePath, str(params.fromItemId, "fromItemId"), sessionId);
     const child = await this.catalog.scan().then((items) => items.find((item) => item.path === childPath));
     if (!child) throw new HostError("INTERNAL", "branch was not discoverable");
     return this.meta.upsertSession({
@@ -1427,7 +1446,8 @@ export class HostService {
       revision: 1,
       createdAt: child.createdAt,
       updatedAt: child.updatedAt,
-      archived: false
+      archived: false,
+      readOnlyReason: child.readOnlyReason
     });
   }
 
@@ -1444,14 +1464,13 @@ export class HostService {
     return this.sessionLocks.run(sessionId, async () => {
       const session = await this.requireSession(sessionId);
       if (this.sessionBusy(sessionId)) throw new HostError("SESSION_BUSY", "session is running or has queued turns");
+      // Verify the native target before any destructive changes. A retry may
+      // finish cleanup if the native file was already removed.
+      if (session.nativePath) await this.catalog.deleteFile(session.nativePath, sessionId);
       this.queuedStarts.delete(sessionId);
-      // Remove sidecars/media before the tombstone so a failed delete can be retried.
+      this.catalog.forgetHistoryText(sessionId);
       await this.extensionSnapshots.delete(sessionId);
       await this.blobs.deleteSession(sessionId);
-      if (session.nativePath) {
-        const { rm } = await import("node:fs/promises");
-        await rm(session.nativePath, { force: true });
-      }
       await this.meta.deleteSession(sessionId);
       await this.emit("host", "session.deleted", { sessionId }, { sessionId });
       return { deleted: true, sessionId };
@@ -1526,6 +1545,7 @@ export class HostService {
       if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
       const provider = await this.sessionProvider(session);
       this.assertProviderKey(provider, apiKey, params.providerBinding);
+      if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
       if (this.sessionBusy(sessionId)) {
         if (admission === "reject_if_busy") {
           throw new HostError("SESSION_BUSY", "session already has a running or queued turn");
@@ -1592,13 +1612,18 @@ export class HostService {
     });
 
     if (plan.kind === "queued") {
-      return { turn: plan.turn };
+      return { turn: this.publicTurn(plan.turn) };
     }
 
     try {
       const turn = await this.launchTurn(plan.session, plan.turnId, text, attachments, plan.provider, apiKey);
-      return { turn };
+      return { turn: this.publicTurn(turn) };
     } catch (error) {
+      if (error instanceof HostError && error.code === "SESSION_READ_ONLY") {
+        await this.sessionLocks.run(sessionId, async () => {
+          await this.updateSessionWriteState(await this.requireSession(sessionId), error.message);
+        }).catch(() => undefined);
+      }
       if (!this.turns.get(plan.turnId)?.stopRequested) {
         await this.settleTurn(plan.turnId, "failed", "turn_start_failed").catch(() => undefined);
       }
@@ -1664,6 +1689,7 @@ export class HostService {
     // actual driver start. Never start a turn that is already terminal.
     const turn = this.getTurn(turnId);
     if (turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return turn;
+    const skills = this.driver.appendsPrompt ? await this.skills.activeSkills() : undefined;
     const images = [];
     for (const id of attachmentIds) {
       const { dataBase64, mimeType } = await this.blobs.readForTurn(id, session.id);
@@ -1674,24 +1700,26 @@ export class HostService {
       if (turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return;
       await this.persistTurnBeforeStart(turn);
       if (turn.stopRequested) return;
-      let path = session.nativePath;
+      let path = (await this.requireSession(session.id)).nativePath;
       if (!path) {
         path = await this.catalog.createFile(session.projectPath, join(this.config.dataDir, "sessions"), session.id);
         await this.meta.updateSession(session.id, { nativePath: path });
       }
       if (!turn.stopRequested && !this.driver.appendsPrompt && text) {
-        await this.catalog.appendUserMessage(path, text);
+        await this.catalog.appendUserMessage(path, text, Date.now(), session.id);
       }
       return path;
     });
     if (!nativePath || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return turn;
 
-    const handle = this.driver.start({
+    let exited = false;
+    const request: AgentTurnRequest = {
       turnId,
       sessionId: session.id,
       cwd: session.projectPath,
       sessionDir: join(this.config.dataDir, "sessions"),
       sessionFile: nativePath,
+      ...(skills ? { skills } : {}),
       provider: provider
         ? {
             id: provider.id,
@@ -1707,47 +1735,70 @@ export class HostService {
       thinkingLevel: session.thinkingLevel ?? undefined,
       text,
       images: images as never,
-      extensions: { registry: this.extensions, hostId: this.hostId, publish: snapshot => this.publishExtensionSnapshot(session.id, turnId, snapshot) },
+      extensions: {
+        registry: this.extensions,
+        hostId: this.hostId,
+        publish: snapshot => exited ? Promise.resolve() : this.publishExtensionSnapshot(session.id, turnId, snapshot)
+      },
+      onSessionReadOnly: async (reason) => {
+        await this.sessionLocks.run(session.id, async () => {
+          await this.updateSessionWriteState(await this.requireSession(session.id), reason);
+        }).catch(() => undefined);
+      },
       requestApproval: async (toolName: string, toolInput: unknown) => {
         const currentSession = await this.requireSession(session.id);
+        if (this.shuttingDown || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return false;
         if (currentSession.permissionMode === "auto") return true;
         return this.requestApproval(currentSession, turnId, toolName, toolInput);
       },
       onEvent: (event) => {
+        if (exited || this.executingDrivers.get(session.id) !== turnId) return;
         const prev = this.turnEventChains.get(turnId) ?? Promise.resolve();
         const next = prev.then(async () => {
+          if (this.executingDrivers.get(session.id) !== turnId) return;
           await this.handleAgentEvent(session.id, turnId, event);
         }).catch((err) => {
           console.error("handleAgentEvent error:", err);
         });
         this.turnEventChains.set(turnId, next);
       }
-    });
-    turn.handle = handle;
+    };
+    // A driver can publish its initial extension snapshot from inside start().
     this.executingDrivers.set(session.id, turnId);
-    const settled = handle.wait().then(async () => {
+    let handle: AgentTurnHandle;
+    try {
+      handle = this.driver.start(request);
+    } catch (error) {
+      this.executingDrivers.delete(session.id);
+      this.turnEventChains.delete(turnId);
+      throw error;
+    }
+    turn.handle = handle;
+    const settled = this.trackWork(handle.wait().then(() => false, () => true).then(async failed => {
+      exited = true;
       await (this.turnEventChains.get(turn.id) ?? Promise.resolve());
       this.turnEventChains.delete(turn.id);
-      if (this.executingDrivers.get(session.id) === turn.id) this.executingDrivers.delete(session.id);
       const current = this.turns.get(turn.id);
-      // A stop request drives the terminal state itself. Otherwise a resolved
-      // wait is authoritative even when the driver omitted its terminal event:
-      // publish the same completion as handleAgentEvent so subscribers leave
-      // the running state and the queued turn can start.
+      // A stop request drives its own terminal state. If the driver omitted
+      // its terminal event, settle after draining all of its output.
       if (current && ACTIVE_TURN_STATUSES.has(current.status) && !current.stopRequested) {
         await this.handleAgentEvent(session.id, turn.id, {
-          kind: "turn.completed",
-          payload: { turnId: turn.id }
+          kind: failed ? "turn.failed" : "turn.completed",
+          payload: failed ? { error: "Agent turn failed; sensitive error details withheld" } : {}
         });
       }
-      if (!current?.stopRequested) void this.drainQueue(session.id);
-    });
+    }).finally(() => {
+      delete turn.handle;
+      if (this.executingDrivers.get(session.id) === turn.id) this.executingDrivers.delete(session.id);
+      if (!turn.stopRequested) void this.drainQueue(session.id);
+    }));
     // A short turn may finish before the RPC response is sent. Join only work
     // that is already queued; a turn still running settles later, not inline.
     await Promise.race([
       settled,
       this.sessionLocks.run(session.id, async () => undefined)
     ]);
+    if (exited) await settled;
     return turn;
   }
 
@@ -1767,19 +1818,18 @@ export class HostService {
    * output, settle its approvals, and let the queue advance. A turn that is
    * already terminal keeps its first terminal status.
    */
-  private async settleTurn(turnId: string, status: string, settledReason?: string): Promise<void> {
+  private async settleTurn(turnId: string, status: string, settledReason?: string, fromDriver = false): Promise<boolean> {
     const turn = this.turns.get(turnId);
-    if (!turn) return;
-    await this.sessionLocks.run(turn.sessionId, async () => {
-      const turn = this.turns.get(turnId);
-      if (!turn) return;
-      if (!ACTIVE_TURN_STATUSES.has(turn.status)) return;
+    if (!turn) return false;
+    return this.sessionLocks.run(turn.sessionId, async () => {
+      if (!ACTIVE_TURN_STATUSES.has(turn.status) || (fromDriver && turn.stopRequested)) return false;
       turn.status = status;
       turn.settledAt = new Date().toISOString();
       if (settledReason) turn.settledReason = settledReason;
       this.liveItems.delete(turnId);
       this.settleApprovalsForTurn(turnId);
       await this.turnStore.upsert(this.toRecord(turn));
+      return true;
     });
   }
 
@@ -1823,13 +1873,17 @@ export class HostService {
     this.liveItems.get(turnId)?.delete(itemId);
   }
 
-  private async drainQueue(sessionId: string): Promise<void> {
-    if (this.shuttingDown) return;
+  private drainQueue(sessionId: string): Promise<void> {
+    if (this.shuttingDown) return Promise.resolve();
+    return this.trackWork(this.drainQueueOnce(sessionId));
+  }
+
+  private async drainQueueOnce(sessionId: string): Promise<void> {
     if (this.draining.has(sessionId)) return;
     this.draining.add(sessionId);
     try {
       const next = await this.sessionLocks.run(sessionId, async () => {
-        if (this.activeTurnIdFor(sessionId)) return undefined;
+        if (this.shuttingDown || this.activeTurnIdFor(sessionId)) return undefined;
         const queue = this.queuedStarts.get(sessionId);
         if (!queue || queue.length === 0) return undefined;
         const item = queue.shift()!;
@@ -1868,45 +1922,78 @@ export class HostService {
     toolName: string,
     input: unknown
   ): Promise<boolean> {
+    const turn = this.turns.get(turnId);
+    if (this.shuttingDown || !turn || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return false;
     if (this.allowedSessionTools.get(session.id)?.has(toolName)) return true;
+    if ([...this.pendingApprovals.values()].filter(pending => pending.sessionId === session.id).length >= MAX_PENDING_SESSION_APPROVALS) return false;
+    const encoded = Buffer.from(JSON.stringify(input) ?? "null", "utf8");
+    if (encoded.length > MAX_APPROVAL_INPUT_BYTES) return false;
+    if (encoded.length > APPROVAL_INLINE_BYTES) {
+      const pendingBytes = [...this.pendingApprovals.values()].reduce((total, pending) => total + (pending.fullInput?.length ?? 0), 0);
+      if (pendingBytes + encoded.length > MAX_PENDING_APPROVAL_BYTES) return false;
+    }
     const approvalId = uuid();
     const revision = ++this.approvalRevision;
-    const approval = {
-      id: approvalId,
-      revision,
-      kind: "tool",
-      title: toolName,
-      toolName,
-      input,
-      expiresAt: null
-    };
+    const fullInput = encoded.length > APPROVAL_INLINE_BYTES ? encoded : undefined;
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingApprovals.delete(approvalId);
         resolve(false);
       }, 24 * 60 * 60 * 1000);
-      this.pendingApprovals.set(approvalId, {
+      const pending: PendingApproval = {
         sessionId: session.id,
         turnId,
         toolName,
-        input,
+        input: fullInput ? { preview: textPreview(encoded.subarray(0, 1024).toString("utf8"), 512) } : input,
+        ...(fullInput ? { fullInput, inputDigest: sha256(fullInput) } : {}),
         revision,
         resolve: (allowed) => {
           clearTimeout(timer);
           resolve(allowed);
         }
-      });
-      this.emit(
+      };
+      this.pendingApprovals.set(approvalId, pending);
+      this.trackWork(this.emit(
         "session",
         "approval.requested",
-        { approval },
+        { approval: this.approvalProjection(approvalId, pending) },
         { sessionId: session.id, turnId, revision }
-      ).catch(() => {
+      )).catch(() => {
         clearTimeout(timer);
         this.pendingApprovals.delete(approvalId);
         resolve(false);
       });
     });
+  }
+
+  private approvalProjection(id: string, pending: PendingApproval) {
+    return {
+      id,
+      revision: pending.revision,
+      kind: "tool",
+      title: textPreview(pending.toolName, 256),
+      toolName: textPreview(pending.toolName, 256),
+      input: pending.input,
+      expiresAt: null,
+      ...(pending.fullInput ? { inputByteLength: pending.fullInput.length } : {})
+    };
+  }
+
+  private readApproval(params: Record<string, unknown>, auth: AuthContext) {
+    if (auth.device.role !== "owner") throw new HostError("FORBIDDEN", "approval requires owner");
+    const pending = this.pendingApprovals.get(str(params.approvalId, "approvalId"));
+    if (!pending?.fullInput || pending.sessionId !== str(params.sessionId, "sessionId")) {
+      throw new HostError("NOT_FOUND", "approval input is no longer available");
+    }
+    if (params.revision !== pending.revision) throw new HostError("APPROVAL_STALE", "approval revision does not match");
+    const offset = params.offset;
+    if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 || offset >= pending.fullInput.length) {
+      throw new HostError("INVALID_ARGUMENT", "approval input offset is out of range");
+    }
+    return {
+      dataBase64: pending.fullInput.subarray(offset, offset + HISTORY_TEXT_CHUNK_BYTES).toString("base64"),
+      totalBytes: pending.fullInput.length
+    };
   }
 
   private async respondApproval(params: Record<string, unknown>, auth: AuthContext) {
@@ -1924,6 +2011,9 @@ export class HostService {
     }
     const decision = str(params.decision, "decision");
     const allowed = decision === "allow-once" || decision === "allow-session" || decision === "approve";
+    if (allowed && pending.fullInput && (expectedRevision !== pending.revision || params.inputDigest !== pending.inputDigest)) {
+      throw new HostError("INVALID_ARGUMENT", "review the full approval input before allowing this request");
+    }
     if (decision === "allow-session") {
       const tools = this.allowedSessionTools.get(pending.sessionId) ?? new Set<string>();
       tools.add(pending.toolName);
@@ -1952,12 +2042,12 @@ export class HostService {
       pending.resolve(false);
       // 客户端只按 `approval.resolved` 收敛卡片。turn 结束时静默丢弃待审批项，会让
       // 「权限请求」卡片永久留在会话里（用户点它必定失败，而工具早已不在等它）。
-      this.emit(
+      void this.trackWork(this.emit(
         "session",
         "approval.resolved",
         { approvalId, status: "denied" },
         { sessionId: pending.sessionId, turnId: pending.turnId, revision: pending.revision }
-      );
+      )).catch(error => console.error("approval resolution event failed:", error));
     }
   }
 
@@ -1976,16 +2066,16 @@ export class HostService {
   }
 
   private async handleAgentEvent(sessionId: string, turnId: string, event: AgentEvent) {
-    // A user-requested stop aborts the execution, which surfaces here as
-    // turn.failed. That is not a real failure: `stopTurn` owns the terminal state
-    // and emits turn.interrupted, so swallow the abort-induced failure entirely.
-    if ((event.kind === "turn.failed" || event.kind === "turn.completed") && this.turns.get(turnId)?.stopRequested) {
-      return;
-    }
     let payload = event.payload;
     if (event.kind === "item.delta") {
+      if (typeof payload.delta === "string") payload = { ...payload, delta: textPreview(payload.delta, 32 * 1024) };
       this.trackLiveItem(turnId, payload);
     } else if (event.kind === "tool.started" || event.kind === "tool.updated") {
+      if (event.kind === "tool.updated" && typeof payload.delta === "string") {
+        payload = { ...payload, delta: textPreview(payload.delta, 32 * 1024) };
+      } else if (Buffer.byteLength(JSON.stringify(payload)) > LIVE_EVENT_PAYLOAD_BYTES) {
+        payload = { itemId: payload.itemId, toolName: payload.toolName, input: { omitted: "Tool input exceeds the live preview limit" } };
+      }
       this.trackLiveItem(turnId, payload, true);
     } else if (event.kind === "item.completed") {
       const item = payload.item as
@@ -2026,16 +2116,41 @@ export class HostService {
           }
         };
       }
+      const completed = payload.item as Record<string, unknown> | undefined;
+      if (completed && Buffer.byteLength(JSON.stringify(payload)) > LIVE_EVENT_PAYLOAD_BYTES) {
+        const text = typeof completed.text === "string" ? completed.text : "";
+        const length = Buffer.byteLength(text, "utf8");
+        payload = {
+          item: {
+            id: item?.id, historyItemId: completed.historyItemId, itemType: completed.itemType,
+            kind: completed.kind, role: item?.role,
+            text: textPreview(text, HISTORY_TEXT_PREVIEW_BYTES), toolName: completed.toolName,
+            status: completed.status, attachments: Array.isArray(completed.attachments) ? completed.attachments.slice(0, 10) : [],
+            ...(completed.historyItemId && length > HISTORY_TEXT_PREVIEW_BYTES ? { textByteLength: length } : {})
+          }
+        };
+      }
       if (item?.id) this.removeLiveItem(turnId, { itemId: item.id });
     } else if (event.kind === "tool.completed") {
       this.removeLiveItem(turnId, payload);
+      const { historyItemId, ...completion } = payload;
+      payload = completion;
+      if (Buffer.byteLength(JSON.stringify(payload)) > LIVE_EVENT_PAYLOAD_BYTES) {
+        const text = textFromToolResult(payload.result);
+        const length = Buffer.byteLength(text, "utf8");
+        payload = {
+          itemId: payload.itemId,
+          status: payload.status,
+          result: {
+            text: text ? textPreview(text, HISTORY_TEXT_PREVIEW_BYTES) : "Tool result exceeds the live preview limit",
+            ...(length > HISTORY_TEXT_PREVIEW_BYTES ? { historyItemId, textByteLength: length } : {})
+          }
+        };
+      }
     }
     if (event.kind === "turn.completed" || event.kind === "turn.failed") {
-      const existing = this.turns.get(turnId);
-      if (existing && !ACTIVE_TURN_STATUSES.has(existing.status)) return;
-      // Settle before serialising so the payload carries the terminal status, and
-      // drop any approval the turn was waiting on (contract §8.2).
-      await this.settleTurn(turnId, event.kind === "turn.completed" ? "completed" : "failed");
+      const status = event.kind === "turn.completed" ? "completed" : "failed";
+      if (!await this.settleTurn(turnId, status, undefined, true)) return;
       const turn = this.turns.get(turnId);
       payload = {
         turn: turn ? this.publicTurn(turn) : { id: turnId },
@@ -2058,7 +2173,11 @@ export class HostService {
     return turn;
   }
 
-  private async stopTurn(turnId: string, status: "interrupted" | "canceled") {
+  private stopTurn(turnId: string, status: "interrupted" | "canceled") {
+    return this.turnStopLocks.run(turnId, () => this.stopTurnOnce(turnId, status));
+  }
+
+  private async stopTurnOnce(turnId: string, status: "interrupted" | "canceled") {
     const turn = this.getTurn(turnId);
     // Repeating an interrupt on an already-terminal turn returns the same
     // terminal state without a second execution or event (contract §8.2).
@@ -2067,7 +2186,7 @@ export class HostService {
     }
     if (turn.status === "queued") {
       this.removeQueuedStart(turn.sessionId, turnId);
-      await this.settleTurn(turnId, "canceled");
+      if (!await this.settleTurn(turnId, "canceled")) return { turn: this.publicTurn(turn) };
       await this.sessionLocks.run(turn.sessionId, () =>
         this.emit(
           "session",
@@ -2079,26 +2198,24 @@ export class HostService {
       return { turn: this.publicTurn(turn) };
     }
     turn.stopRequested = true;
-    if (turn.handle) {
+    const handle = turn.handle;
+    if (handle) {
       this.settleApprovalsForTurn(turnId);
-      await turn.handle.abort();
+      await handle.abort();
       // Release any tool approval the execution is blocked on, otherwise its
       // `wait` never settles (deadlock). Then wait for it to actually stop; the
       // driver resolves `wait` once its terminal event has been routed.
       this.settleApprovalsForTurn(turnId);
-      await turn.handle.wait().catch(() => undefined);
+      await handle.wait().catch(() => undefined);
       await (this.turnEventChains.get(turnId) ?? Promise.resolve());
     }
-    // Stopping a running turn also cancels anything queued behind it — those turns never
-    // start, so they must be settled explicitly (and reported) rather than left
-    // parked in `queued` forever.
+    // An interrupt stops the session's backlog. Cancel targets one turn, even after promotion.
     const queued = this.queuedStarts.get(turn.sessionId);
-    if (queued && queued.length > 0) {
+    if (status === "interrupted" && queued && queued.length > 0) {
       this.queuedStarts.delete(turn.sessionId);
       for (const entry of queued) {
         const queuedTurn = this.turns.get(entry.turnId);
-        if (!queuedTurn || !ACTIVE_TURN_STATUSES.has(queuedTurn.status)) continue;
-        await this.settleTurn(entry.turnId, "canceled");
+        if (!queuedTurn || !await this.settleTurn(entry.turnId, "canceled")) continue;
         await this.sessionLocks.run(turn.sessionId, () =>
           this.emit(
             "session",
@@ -2109,19 +2226,15 @@ export class HostService {
         );
       }
     }
-    const settled = this.turns.get(turnId);
-    if (!settled) throw new HostError("NOT_FOUND", "turn not found");
-    if (ACTIVE_TURN_STATUSES.has(settled.status)) {
-      await this.settleTurn(turnId, status);
-    }
+    if (!await this.settleTurn(turnId, status)) return { turn: this.publicTurn(turn) };
     // The frozen event list has no `turn.canceled`; cancel reuses turn.completed,
     // matching the pre-existing behaviour, while the turn status stays `canceled`.
     const eventKind = status === "interrupted" ? "turn.interrupted" : "turn.completed";
     await this.sessionLocks.run(turn.sessionId, () =>
-      this.emit("session", eventKind, { turn: this.publicTurn(settled) }, { sessionId: turn.sessionId, turnId })
+      this.emit("session", eventKind, { turn: this.publicTurn(turn) }, { sessionId: turn.sessionId, turnId })
     );
     void this.drainQueue(turn.sessionId);
-    return { turn: this.publicTurn(settled) };
+    return { turn: this.publicTurn(turn) };
   }
 
   private async createAttachment(params: Record<string, unknown>) {

@@ -34,6 +34,8 @@ describe("extensions API", () => {
     }
     const result = await service.handle("session/extensions", { sessionId }, auth) as SnapshotPair;
     expect(result.latestAttempt?.turnId).toBe(driver.requests[1]!.turnId); expect(result.previousCompleted?.turnId).toBe(driver.requests[0]!.turnId);
+    driver.requests[0]!.onEvent({ kind: "item.delta", payload: { itemId: "late", delta: "ignored" } });
+    expect(service["turnEventChains"].has(driver.requests[0]!.turnId)).toBe(false);
     await driver.requests[0]!.extensions!.publish(snapshotFor(driver.requests[0]!, "failed", 99));
     expect(await service.extensionSnapshots.get(sessionId)).toEqual(result.latestAttempt ? { latestAttempt: result.latestAttempt, previousCompleted: result.previousCompleted } : null);
     const events = service.journal.replay("session", sessionId, { epoch: service.journal.epoch, sequence: 0 });
@@ -89,11 +91,34 @@ describe("extensions API", () => {
   });
   it("blocks new work and waits for outstanding cleanup on host shutdown", async () => {
     const driver = new SnapshotDriver(true), { service, auth, sessionId } = await setup(driver);
+    let releaseEvent!: () => void;
+    const eventGate = new Promise<void>(resolve => { releaseEvent = resolve; });
+    let entered = false;
+    const append = service.journal.append.bind(service.journal);
+    vi.spyOn(service.journal, "append").mockImplementation(async (...args) => {
+      if (args[1] === "turn.completed") {
+        entered = true;
+        await eventGate;
+      }
+      return append(...args);
+    });
     await service.handle("turn/start", { sessionId, input: { text: "cleanup" } }, auth);
-    await vi.waitFor(() => expect(service["turns"].get(driver.requests[0]!.turnId)?.status).toBe("completed"));
-    await service.shutdown();
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true));
+      let stopped = false;
+      const stopping = service.shutdown().then(() => { stopped = true; });
+      await expect(service.handle("turn/start", { sessionId, input: { text: "after shutdown" } }, auth)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+      expect(stopped).toBe(false);
+      releaseEvent();
+      await stopping;
+    } finally {
+      releaseEvent();
+      await service.shutdown();
+      vi.restoreAllMocks();
+    }
     expect(service["executingDrivers"].size).toBe(0);
-    await expect(service.handle("turn/start", { sessionId, input: { text: "after shutdown" } }, auth)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+    expect(service["turns"].get(driver.requests[0]!.turnId)?.handle).toBeUndefined();
+    expect(service["turnEventChains"].size).toBe(0);
   });
   it("releases the execution slot if driver construction throws synchronously", async () => {
     class FailingStartDriver extends SnapshotDriver {

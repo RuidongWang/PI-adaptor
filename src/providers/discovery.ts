@@ -373,6 +373,13 @@ function isLocalOrMetadataHostname(hostname: string): boolean {
     host === "metadata.oraclecloud.internal" || host.endsWith(".metadata.oraclecloud.internal");
 }
 
+export function allowsProviderAddress(hostname: string, address: string, allowLoopback: boolean): boolean {
+  const parsed = parseAddress(address);
+  if (!parsed) return false;
+  if (isLoopbackHostname(hostname)) return allowLoopback && isLoopbackAddress(parsed);
+  return !isLocalOrMetadataHostname(hostname) && addressKind(parsed) === "public";
+}
+
 function rawHostname(raw: string): string | null {
   const authority = /^https?:\/\/([^/?#]*)/i.exec(raw)?.[1];
   if (authority === undefined) return null;

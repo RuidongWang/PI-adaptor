@@ -41,7 +41,7 @@
 | `PI_ADAPTOR_SESSION_DIR` | env | 命名空间化的会话目录覆盖（替代泛化的 `PI_SESSION_DIR`）。 |
 | `<home>/logs/`、`<home>/run/` | 派生目录 | 日志与运行态（`run/host.pid`）根，独立于原 host。 |
 
-`config.json` 键（全部可选）：`dataDir`、`agentDir`、`sessionDir`、`port`、`pair`、`hostId`、`hostVersion`、`piVersion`。
+`config.json` 键（全部可选）：`dataDir`、`agentDir`、`sessionDir`、`port`、`pair`、`hostId`、`piVersion`。Host 版本取自随包发布的 `package.json`，旧配置中的 `hostVersion` 和 `PI_ADAPTOR_VERSION` 不影响运行身份。
 
 ### 3.2 修改（**仅默认值**，显式配置时行为不变）
 
@@ -59,7 +59,7 @@
 | 配置项 | 状态 |
 |---|---|
 | CLI：`--data-dir` / `--agent-dir` / `--session-dir` / `--port` / `--pair` / `--host-id` | 保留，语义不变 |
-| env：`PI_ADAPTOR_DATA_DIR` / `PI_ADAPTOR_PORT` / `PI_ADAPTOR_PAIR` / `PI_ADAPTOR_HOST_ID` / `PI_ADAPTOR_VERSION` / `PI_CODING_AGENT_VERSION` / `PI_ADAPTOR_DETERMINISTIC` | 保留 |
+| env：`PI_ADAPTOR_DATA_DIR` / `PI_ADAPTOR_PORT` / `PI_ADAPTOR_PAIR` / `PI_ADAPTOR_HOST_ID` / `PI_CODING_AGENT_VERSION` / `PI_ADAPTOR_DETERMINISTIC` | 保留 |
 | 旧泛化别名：`PI_AGENT_DIR` / `PI_SESSION_DIR` / `PI_CODING_AGENT_VERSION` | 仍接受（低于命名空间化变量），**标注 deprecated**（因为它们是共享命名空间） |
 | `PI_HOST_READY` / `PI_HOST_PAIRING_TOKEN` 输出格式 | 不变（客户端解析依赖它） |
 
@@ -119,7 +119,6 @@ ExecStart=/usr/bin/node %h/.pi-adaptor/current/dist/main.js
   "sessionDir": "/home/pi/.pi-adaptor/data/sessions",
   "port": 19445,
   "hostId": "pi-adaptor-aarch64",
-  "hostVersion": "0.0.1",
   "piVersion": "1.3.0"
 }
 ```

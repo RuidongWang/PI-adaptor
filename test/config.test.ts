@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -136,6 +136,18 @@ describe("release version", () => {
     // advertising anything else would ship under the wrong version.
     expect(HOST_VERSION).toBe(manifest.version);
     expect(parseHostConfig([], {}, "/home/tester").hostVersion).toBe(manifest.version);
+
+    const home = await mkdtemp(join(tmpdir(), "pi-adaptor-release-config-"));
+    try {
+      const example = JSON.parse(await readFile(new URL("../config.example.json", import.meta.url), "utf8"));
+      expect(example).not.toHaveProperty("hostVersion");
+      const configFile = join(home, "config.json");
+      await writeFile(configFile, JSON.stringify({ ...example, hostVersion: "0.0.2" }));
+      const config = loadHostConfig(["--config", configFile], { PI_ADAPTOR_VERSION: "0.0.1" }, home);
+      expect(config.hostVersion).toBe(manifest.version);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });
 

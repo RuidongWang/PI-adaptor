@@ -63,7 +63,6 @@ export type HostConfigFile = {
   port?: number;
   pair?: boolean;
   hostId?: string;
-  hostVersion?: string;
   piVersion?: string;
   providerSeedFile?: string;
   direct?: DirectConfigFile;
@@ -85,13 +84,12 @@ export const DEFAULT_HOME_DIR_NAME = ".pi-adaptor";
  * same field, so bytes and declared version cannot drift apart.
  */
 function readPackageVersion(): string {
-  try {
-    const require = createRequire(import.meta.url);
-    const pkg = require("../package.json") as { version?: unknown };
-    return typeof pkg.version === "string" && pkg.version.length > 0 ? pkg.version : "0.0.0";
-  } catch {
-    return "0.0.0";
+  const require = createRequire(import.meta.url);
+  const pkg = require("../package.json") as { version?: unknown };
+  if (typeof pkg.version !== "string" || pkg.version.trim().length === 0) {
+    throw new Error("pi-adaptor package manifest is missing a version");
   }
+  return pkg.version;
 }
 
 export const HOST_VERSION = readPackageVersion();
@@ -298,7 +296,7 @@ export function parseHostConfig(
     port,
     pair: args.includes("--pair") || env.PI_ADAPTOR_PAIR === "1" || fileConfig.pair === true,
     hostId: valueAfter(args, "--host-id") ?? env.PI_ADAPTOR_HOST_ID ?? fileConfig.hostId ?? "",
-    hostVersion: env.PI_ADAPTOR_VERSION ?? fileConfig.hostVersion ?? HOST_VERSION,
+    hostVersion: HOST_VERSION,
     piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.3.0",
     direct: parseDirectConfig(args, env, fileConfig),
     extensions: parseExtensionsConfig(fileConfig.extensions)

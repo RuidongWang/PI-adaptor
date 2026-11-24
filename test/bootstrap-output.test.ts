@@ -1,7 +1,8 @@
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { BOOTSTRAP_HOST, directTrustLine, pairingTokenLine, readyLine } from "../src/bootstrap-output.js";
 import { HOST_VERSION } from "../src/config.js";
@@ -159,6 +160,18 @@ describe("bootstrap stdout", () => {
         host: BOOTSTRAP_HOST,
         port: pairing.port
       });
+      const pidFile = join(root, "run", "host.pid");
+      const activePid = await readFile(pidFile, "utf8");
+      const exec = promisify(execFile);
+      const args = ["--import", "tsx", "src/main.ts", "--home", root, "--port", "0"];
+      const options = { cwd: join(import.meta.dirname, ".."), timeout: 5_000 };
+      await expect(exec(process.execPath, args, options)).rejects.toMatchObject({ code: 1 });
+      const forwarded = await exec(process.execPath, [...args, "--pair"], options);
+      expect(forwarded.stdout.split("\n").filter(Boolean)).toHaveLength(1);
+      expect(forwarded.stdout.startsWith("PI_HOST_PAIRING_TOKEN ")).toBe(true);
+      const forwardedPairing = JSON.parse(forwarded.stdout.trim().slice("PI_HOST_PAIRING_TOKEN ".length));
+      expect(forwardedPairing.port).toBe(ready.port);
+      expect(await readFile(pidFile, "utf8")).toBe(activePid);
     } catch (error) {
       throw new Error(`${String(error)}\nhost stderr:\n${stderr}`);
     } finally {

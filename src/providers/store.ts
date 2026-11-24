@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { HostError } from "../errors.js";
 import { purgeSecretDirectory } from "../security/secrets.js";
-import { assertPublicHttpsEndpoint } from "../security/endpoint.js";
+import { assertPublicHttpsEndpoint, type EndpointPolicy } from "../security/endpoint.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import { uuid } from "../util/id.js";
 
@@ -55,7 +55,7 @@ export class ProviderStore {
   /** Legacy location written by older builds; only read to migrate on startup. */
   private readonly legacySecretsDir: string;
 
-  constructor(dataDir: string, private readonly allowPrivateHosts = false) {
+  constructor(dataDir: string, private readonly endpointPolicy: EndpointPolicy = {}) {
     this.index = join(dataDir, "providers", "providers.json");
     this.legacySecretsDir = join(dataDir, "providers", "secrets");
   }
@@ -89,7 +89,7 @@ export class ProviderStore {
 
   async create(input: ProviderInput, now = new Date()) {
     return this.serialized(async () => {
-      await assertPublicHttpsEndpoint(input.baseUrl, { allowPrivateHosts: this.allowPrivateHosts });
+      await assertPublicHttpsEndpoint(input.baseUrl, this.endpointPolicy);
       if (input.authKind === "api_key" && !input.apiKey) {
         throw new HostError("INVALID_ARGUMENT", "apiKey is required for api_key provider");
       }
@@ -116,7 +116,7 @@ export class ProviderStore {
 
   async update(id: string, input: ProviderInput, now = new Date()) {
     return this.serialized(async () => {
-      await assertPublicHttpsEndpoint(input.baseUrl, { allowPrivateHosts: this.allowPrivateHosts });
+      await assertPublicHttpsEndpoint(input.baseUrl, this.endpointPolicy);
       const data = await this.load();
       const record = data.providers.find((entry) => entry.id === id);
       if (!record) throw new HostError("NOT_FOUND", "provider not found");

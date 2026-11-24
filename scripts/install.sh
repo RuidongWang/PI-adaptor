@@ -204,6 +204,26 @@ switch_current() {
     fail "state-mismatch" "$EXIT_STATE" "could not atomically switch current"
 }
 
+lock_installation() {
+  local bootstrap="$HOME_DIR/.bootstrap"
+  local lockfile="$bootstrap/install.flock"
+  command -v flock >/dev/null || fail "filesystem-failed" "$EXIT_FILESYSTEM" "flock unavailable"
+  mkdir -p "$bootstrap" && chmod 700 "$bootstrap" ||
+    fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not secure bootstrap directory"
+  # Bootstrap holds the same open file description across installation and rollback.
+  if ! node -e '
+    const fs = require("node:fs");
+    try {
+      const held = fs.fstatSync(9, { bigint: true });
+      const target = fs.statSync(process.argv[1], { bigint: true });
+      process.exit(held.dev === target.dev && held.ino === target.ino ? 0 : 1);
+    } catch { process.exit(1); }
+  ' "$lockfile"; then
+    exec 9>>"$lockfile" || fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not open install lock"
+  fi
+  flock -n 9 || fail "state-mismatch" "$EXIT_STATE" "another installation owns the install lock"
+}
+
 resolve_previous_current() {
   home=$1
   current="$home/current"
@@ -222,17 +242,11 @@ resolve_previous_current() {
     fail "state-mismatch" "$EXIT_STATE" "current target is not a canonical release directory"
 }
 
-write_receipt() {
-  home=$1
-  install_directory=$2
-  bundle_directory="pi-adaptor-$VERSION-$TARGET"
-  bootstrap="$home/.bootstrap"
-  mkdir -p "$bootstrap" ||
-    fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not create bootstrap directory"
-  chmod 700 "$bootstrap" ||
-    fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not secure bootstrap directory"
-  receipt="$bootstrap/install-receipt.json"
-  tmp="$receipt.tmp.$$"
+stage_receipt() {
+  local install_directory=$1
+  local bundle_directory="pi-adaptor-$VERSION-$TARGET"
+  RECEIPT_TEMP=$(mktemp "$HOME_DIR/.bootstrap/install-receipt.XXXXXX") ||
+    fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not stage receipt"
   {
     printf '{"schemaVersion":1,"version":"%s","target":"%s",' \
       "$(json_escape "$VERSION")" "$(json_escape "$TARGET")"
@@ -242,9 +256,7 @@ write_receipt() {
       "$(json_escape "$bundle_directory")" "$(json_escape "$install_directory")"
     printf '"entrypoint":"dist/main.js","unitName":"pi-adaptor.service",'
     printf '"activatedAt":"%s"}\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  } >"$tmp" || fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not write receipt"
-  chmod 600 "$tmp" || fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not secure receipt"
-  mv -f "$tmp" "$receipt" || fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not publish receipt"
+  } >"$RECEIPT_TEMP" || fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not write receipt"
 }
 
 install_action() {
@@ -264,6 +276,7 @@ install_action() {
     fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not secure install home"
   HOME_DIR=$(CDPATH= cd -- "$HOME_DIR" && pwd -P) ||
     fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not resolve install home"
+  lock_installation
   releases="$HOME_DIR/releases"
   install_id="$VERSION-$ASSET_SHA256"
   destination="$releases/$install_id"
@@ -279,10 +292,12 @@ install_action() {
   previous=$(resolve_previous_current "$HOME_DIR")
 
   STAGE=""
+  RECEIPT_TEMP=""
   cleanup_stage() {
     if [[ -n "${STAGE:-}" && -d "$STAGE" ]]; then
       rm -rf "$STAGE"
     fi
+    if [[ -n "$RECEIPT_TEMP" ]]; then rm -f -- "$RECEIPT_TEMP"; fi
   }
   trap cleanup_stage EXIT
 
@@ -308,9 +323,19 @@ install_action() {
     fi
   fi
 
+  stage_receipt "$destination"
   current_relative="releases/$install_id"
   switch_current "$HOME_DIR" "$current_relative"
-  write_receipt "$HOME_DIR" "$destination"
+  if ! "$node_path" -e 'require("fs").renameSync(process.argv[1], process.argv[2])' \
+    "$RECEIPT_TEMP" "$HOME_DIR/.bootstrap/install-receipt.json" >/dev/null 2>&1; then
+    if [[ "$previous" == "none" ]]; then
+      rm -f "$HOME_DIR/current" || fail "rollback-failed" "$EXIT_ROLLBACK" "could not restore the previous link"
+    else
+      (switch_current "$HOME_DIR" "$previous") || fail "rollback-failed" "$EXIT_ROLLBACK" "could not restore the previous link"
+    fi
+    fail "filesystem-failed" "$EXIT_FILESYSTEM" "could not publish receipt"
+  fi
+  RECEIPT_TEMP=""
 
   previous_json=null
   [[ "$previous" == "none" ]] || previous_json="\"$(json_escape "$previous")\""
@@ -345,6 +370,7 @@ rollback_action() {
     return
   fi
   HOME_DIR=$(CDPATH= cd -- "$HOME_DIR" && pwd -P)
+  lock_installation
   releases="$HOME_DIR/releases"
   current_target=null
 

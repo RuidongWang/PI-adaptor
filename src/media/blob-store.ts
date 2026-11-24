@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { link, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { HostError } from "../errors.js";
-import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
+import { JsonCommitUncertainError, readJsonFile, syncDirectory, writeJsonFileAtomic } from "../util/json-file.js";
 import { uuid } from "../util/id.js";
 
 export type AttachmentRecord = {
@@ -164,9 +164,10 @@ export class BlobStore {
       await writeFile(this.partPath(record.id), new Uint8Array(), { mode: 0o600 });
       data.attachments.push(record);
       try {
+        await syncDirectory(this.staging);
         await this.save(data);
       } catch (error) {
-        await rm(this.partPath(record.id), { force: true });
+        if (!(error instanceof JsonCommitUncertainError)) await rm(this.partPath(record.id), { force: true });
         throw error;
       }
       return record;
@@ -201,8 +202,19 @@ export class BlobStore {
   async complete(id: string, expectedSha256: string): Promise<AttachmentRecord> {
     return this.serialized(async () => {
       const index = await this.load();
-      const record = index.attachments.find((entry) => entry.id === id && entry.state === "uploading");
-      if (!record) throw new HostError("ATTACHMENT_INCOMPLETE", "upload not found");
+      const record = index.attachments.find((entry) => entry.id === id);
+      if (!record || (record.state !== "uploading" && record.state !== "ready")) {
+        throw new HostError("ATTACHMENT_INCOMPLETE", "upload not found");
+      }
+      const expected = normalizeSha256(expectedSha256);
+      if (record.state === "ready") {
+        if (expected !== record.sha256 || (await stat(this.blobPath(expected))).size !== record.byteLength) {
+          throw new HostError("ATTACHMENT_INVALID", "completed attachment does not match");
+        }
+        await syncDirectory(dirname(this.index));
+        await rm(this.partPath(id), { force: true });
+        return record;
+      }
       if (record.expiresAt && Date.parse(record.expiresAt) <= Date.now()) {
         record.state = "failed";
         await this.save(index);
@@ -211,7 +223,6 @@ export class BlobStore {
       }
       const bytes = await readFile(this.partPath(id));
       const actual = createHash("sha256").update(bytes).digest("hex");
-      const expected = normalizeSha256(expectedSha256);
       if (bytes.length !== record.byteLength || actual !== expected || actual !== record.sha256) {
         record.state = "failed";
         await this.save(index);
@@ -219,31 +230,36 @@ export class BlobStore {
         throw new HostError("ATTACHMENT_INVALID", "length or sha256 mismatch");
       }
       const destination = this.blobPath(actual);
-      let movedIntoPlace = false;
+      const part = await open(this.partPath(id), "r");
       try {
-        await stat(destination);
-        await rm(this.partPath(id), { force: true });
-      } catch {
-        await rename(this.partPath(id), destination);
-        movedIntoPlace = true;
+        await part.sync();
+      } finally {
+        await part.close();
       }
-      record.state = "ready";
-      delete record.expiresAt;
+      let linked = false;
       try {
+        try {
+          await link(this.partPath(id), destination);
+          linked = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          if (!(await readFile(destination)).equals(bytes)) {
+            throw new HostError("ATTACHMENT_INVALID", "existing blob checksum mismatch");
+          }
+        }
+        // Keep both names until the ready index is durable. A restart can
+        // continue from either index version after an uncertain commit.
+        await syncDirectory(this.blobs);
+        record.state = "ready";
+        delete record.expiresAt;
         await this.save(index);
       } catch (error) {
-        // Restore the recoverable uploading state instead of leaving an index
-        // entry whose part file no longer exists.
-        if (movedIntoPlace) {
-          await rename(destination, this.partPath(id)).catch(() => undefined);
-        } else {
-          await copyFile(destination, this.partPath(id)).catch(() => undefined);
+        if (linked && !(error instanceof JsonCommitUncertainError)) {
+          await rm(destination, { force: true }).catch(() => undefined);
         }
-        record.state = "uploading";
-        record.expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-        await this.save(index).catch(() => undefined);
         throw error;
       }
+      await rm(this.partPath(id), { force: true });
       return record;
     });
   }
@@ -260,13 +276,19 @@ export class BlobStore {
     if (!Number.isSafeInteger(length) || length < 1 || length > MAX_READ_CHUNK_BYTES) {
       throw new HostError("INVALID_ARGUMENT", "length must be between 1 and the read chunk limit");
     }
-    const bytes = await readFile(this.blobPath(record.sha256));
-    if (offset >= bytes.length) {
+    if (offset >= record.byteLength) {
       return { attachment: record, dataBase64: "", eof: true };
     }
-    const end = Math.min(bytes.length, offset + length);
-    const chunk = bytes.subarray(offset, end);
-    return { attachment: record, dataBase64: chunk.toString("base64"), eof: end >= bytes.length };
+    const file = await open(this.blobPath(record.sha256), "r");
+    try {
+      if ((await file.stat()).size !== record.byteLength) throw new HostError("ATTACHMENT_INVALID", "attachment length changed");
+      const chunk = Buffer.alloc(Math.min(length, record.byteLength - offset));
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, offset);
+      if (bytesRead !== chunk.length) throw new HostError("ATTACHMENT_INVALID", "attachment read was incomplete");
+      return { attachment: record, dataBase64: chunk.toString("base64"), eof: offset + bytesRead === record.byteLength };
+    } finally {
+      await file.close();
+    }
   }
 
   async importImageBase64(input: {

@@ -7,6 +7,7 @@ import { applyProviderSeed, loadProviderSeed } from "./providers/seed.js";
 import { directTrustLine, invalidateDirectTrustFile, pairingTokenLine, readyLine, removeDirectTrustFile, removeStaleDirectTrustFile, writeDirectTrustFile, type DirectTrustOutput } from "./bootstrap-output.js";
 import { DirectTlsError } from "./security/direct-tls.js";
 import { HostService } from "./server/host-service.js";
+import { claimHostInstance, requestPairingFromHost, startPairingAdmin } from "./server/host-instance.js";
 import { SocketDeviceRegistry, startDirectWebSocketServer, startWebSocketServer, type RunningDirectServer } from "./server/ws.js";
 
 async function currentBootstrapAttempt(home: string): Promise<string | null> {
@@ -25,6 +26,21 @@ async function currentBootstrapAttempt(home: string): Promise<string | null> {
 
 const config = loadHostConfig(process.argv.slice(2));
 await ensureHostDirectories(config);
+const instanceLock = claimHostInstance(config.dataDir);
+if (!instanceLock) {
+  if (config.pair) {
+    try {
+      const reply = await requestPairingFromHost(config.dataDir);
+      await new Promise<void>((resolve, reject) => process.stdout.write(reply, (error) => error ? reject(error) : resolve()));
+      process.exit(0);
+    } catch {
+      process.stderr.write("PI-adaptor already owns this data directory. Pairing is temporarily unavailable for this instance.\n");
+    }
+  } else {
+    process.stderr.write("PI-adaptor already owns this data directory.\n");
+  }
+  process.exit(1);
+}
 const bootstrapAttemptId = await currentBootstrapAttempt(config.home);
 if (bootstrapAttemptId) {
   await removeStaleDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
@@ -40,7 +56,7 @@ await writeFile(join(config.runDir, "host.pid"), `${process.pid}\n`, { mode: 0o6
 const useDeterministic = process.env.PI_ADAPTOR_DETERMINISTIC === "1";
 const driver = useDeterministic
   ? new DeterministicAgentDriver()
-  : new PiAgentDriver(config.agentDir, [join(config.dataDir, "skills", "versions")]);
+  : new PiAgentDriver(config.agentDir);
 const service = new HostService(config, driver);
 const { removedLegacySecrets } = await service.init();
 // Provider keys are no longer persisted; announce the one-time cleanup by count
@@ -88,14 +104,18 @@ if (directServer) {
     }
   }
 }
-if (config.pair) {
+let stopping = false;
+async function issuePairing(): Promise<string> {
+  if (stopping) throw new Error("Host is shutting down");
   const pairing = await service.createPairingToken(600);
-  process.stdout.write(pairingTokenLine({
+  return pairingTokenLine({
     token: pairing.token,
     expiresAt: pairing.expiresAt,
     port: server.port
-  }));
+  });
 }
+const admin = await startPairingAdmin(config.dataDir, issuePairing);
+if (config.pair) process.stdout.write(await issuePairing());
 const fingerprint = createHash("sha256").update(`${service.hostId}:${server.port}`).digest("hex").slice(0, 16);
 process.stdout.write(readyLine({
   version: config.hostVersion,
@@ -105,10 +125,13 @@ process.stdout.write(readyLine({
 }));
 
 async function shutdown(): Promise<void> {
-  await service.shutdown();
+  if (stopping) return;
+  stopping = true;
+  const adminClosed = new Promise<void>((resolve) => admin.close(() => resolve()));
+  await Promise.all([service.shutdown(), server.close(), directServer?.close(), adminClosed]);
   if (bootstrapAttemptId) await removeDirectTrustFile(config.home, bootstrapAttemptId).catch(() => undefined);
   else await invalidateDirectTrustFile(config.home).catch(() => undefined);
-  await Promise.all([server.close(), directServer?.close()]);
+  instanceLock!.close();
   process.exit(0);
 }
 process.once("SIGINT", () => void shutdown());
