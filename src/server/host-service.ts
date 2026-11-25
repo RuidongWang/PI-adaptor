@@ -1,40 +1,32 @@
-import { constants } from "node:fs";
-import { access, mkdir, readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { AgentDriver, textFromToolResult, type AgentEvent, type AgentTurnHandle, type AgentTurnRequest } from "../agent/driver.js";
-import { isSupportedProviderProtocol, providerApi } from "../providers/protocol.js";
-import { createProviderRuntime, publicAssistantMessage } from "../providers/runtime.js";
+import { join } from "node:path";
+import { AgentDriver } from "../agent/driver.js";
 import { HostConfig } from "../config.js";
 import { HostError } from "../errors.js";
 import { EventJournal, type Cursor, type HostEvent } from "../events/journal.js";
-import { BlobStore, type AttachmentRecord } from "../media/blob-store.js";
-import { MetaStore, type SessionMeta } from "../meta/store.js";
-import { messageText, NativeSessionCatalog } from "../pi/session-catalog.js";
-import { discoverProviderModels, ProviderDiscoveryError, type ProviderDiscoveryInput, type ProviderDiscoveryOptions } from "../providers/discovery.js";
-import { ProviderStore } from "../providers/store.js";
-import { SkillRegistry } from "../skills/registry.js";
-import { TokenStore, type DeviceRecord } from "../security/tokens.js";
-import { sha256, uuid } from "../util/id.js";
-import { KeyedMutex } from "../util/keyed-mutex.js";
-import { IdempotencyStore, requestDigest } from "./idempotency.js";
-import { ACTIVE_TURN_STATUSES, TurnStore, type TurnRecord } from "./turn-store.js";
 import { ExtensionRegistry } from "../extensions/registry.js";
 import { ExtensionSnapshotStore } from "../extensions/snapshot-store.js";
-import type { ExtensionSnapshot } from "../extensions/types.js";
+import { BlobStore } from "../media/blob-store.js";
+import { MetaStore, type SessionMeta } from "../meta/store.js";
+import { NativeSessionCatalog } from "../pi/session-catalog.js";
+import { discoverProviderModels, ProviderDiscoveryError, type ProviderDiscoveryInput, type ProviderDiscoveryOptions } from "../providers/discovery.js";
+import { isSupportedProviderProtocol } from "../providers/protocol.js";
+import { ProviderStore } from "../providers/store.js";
+import { TokenStore, type DeviceRecord } from "../security/tokens.js";
+import { SkillRegistry } from "../skills/registry.js";
+import { sha256, uuid } from "../util/id.js";
+import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
+import { KeyedMutex } from "../util/keyed-mutex.js";
+import { HISTORY_TEXT_CHUNK_BYTES } from "./history-projector.js";
+import { IdempotencyStore, requestDigest } from "./idempotency.js";
+import { fallbackSessionTitle, sanitizeSessionTitle, SessionService } from "./session-service.js";
+import { TurnCoordinator } from "./turn-coordinator.js";
+import { TurnStore } from "./turn-store.js";
 
-/**
- * Mutating methods that must be replay-safe. Retries carrying the same
- * `context.idempotencyKey` return the first result instead of executing twice
- * (contract §3.1 idempotency matrix).
- */
+export { HISTORY_TEXT_CHUNK_BYTES, fallbackSessionTitle, sanitizeSessionTitle };
+
 const IDEMPOTENT_METHODS = new Set([
   "connection/revoke",
   "connection/confirm-rotation",
-  // NOTE: `device/pairing-token` is intentionally NOT idempotent. Its result
-  // carries a plaintext pairing token that would otherwise be persisted (and
-  // replayed) from `meta/idempotency.json`; it is a one-shot mint instead.
   "project/register",
   "project/update",
   "project/delete",
@@ -58,50 +50,12 @@ const IDEMPOTENT_METHODS = new Set([
   "attachment/complete"
 ]);
 
-/** Keep history responses well below the client's 1 MiB advertised receive budget. */
-const HISTORY_RESPONSE_MAX_BYTES = 512 * 1024;
-const HISTORY_TEXT_PREVIEW_BYTES = 8 * 1024;
-export const HISTORY_TEXT_CHUNK_BYTES = 64 * 1024;
-const LIVE_EVENT_PAYLOAD_BYTES = 256 * 1024;
-const SNAPSHOT_QUEUE_TEXT_BYTES = 1024;
-const SNAPSHOT_ACTIVE_ITEMS_BYTES = 128 * 1024;
-const APPROVAL_INLINE_BYTES = 4 * 1024;
-const MAX_APPROVAL_INPUT_BYTES = 16 * 1024 * 1024;
-const MAX_PENDING_APPROVAL_BYTES = 64 * 1024 * 1024;
-const MAX_PENDING_SESSION_APPROVALS = 16;
-/** Bounded in-memory queue: protects the host from unbounded queued text. */
-const MAX_QUEUED_TURNS_PER_SESSION = 20;
-const MAX_QUEUED_TURNS_TOTAL = 200;
-const MAX_QUEUED_TEXT_BYTES_TOTAL = 8 * 1024 * 1024;
-
-const SNAPSHOT_HISTORY_LIMIT = 100;
-const HISTORY_PAGE_MAX_ITEMS = 200;
-
-/** Partial live output for a turn, used to rebuild `snapshot.activeItems`. */
-type LiveItem = {
-  itemId: string;
-  itemType: string;
-  kind: string;
-  role?: string | undefined;
-  text: string;
-  toolName?: string | undefined;
-  status: string;
-};
-
-type TurnProvider = Awaited<ReturnType<ProviderStore["list"]>>[number];
-
-function providerCredentialScope(provider: TurnProvider | undefined): string | undefined {
-  if (!provider) return undefined;
-  return JSON.stringify([provider.id, provider.baseUrl, provider.protocol, provider.authKind]);
-}
-
 export type AuthContext = { device: DeviceRecord };
 export type EventSink = (event: HostEvent) => void;
 export type ConnectionEffects = {
   rotationConfirmed?(deviceId: string, previousCredentialHash: string): void;
 };
 
-/** Preserve the discovery core's stable numeric/data envelope through the existing WS HostError boundary. */
 class HostProviderDiscoveryError extends HostError {
   constructor(
     private readonly discoveryError: ProviderDiscoveryError,
@@ -128,48 +82,6 @@ type Subscription = {
   buffer: HostEvent[];
 };
 
-type TurnState = {
-  id: string;
-  sessionId: string;
-  status: string;
-  createdAt: string;
-  settledAt: string | null;
-  settledReason?: string;
-  /** True once a stop was requested, so an abort-induced end is not read as success. */
-  stopRequested?: boolean;
-  handle?: { abort(): Promise<void>; wait(): Promise<void> };
-};
-
-type PendingApproval = {
-  sessionId: string;
-  turnId: string;
-  toolName: string;
-  input: unknown;
-  fullInput?: Buffer;
-  inputDigest?: string;
-  revision: number;
-  resolve: (allowed: boolean) => void;
-};
-
-/** 标题只保留一行：去引号/句末标点，压缩空白，限长。 */
-export function sanitizeSessionTitle(raw: string | undefined): string | undefined {
-  if (!raw) return undefined;
-  const cleaned = raw
-    .replace(/\s+/g, " ")
-    .replace(/^["'“”‘’。.，,：:；;\s]+/, "")
-    .replace(/["'“”‘’。.，,：:；;\s]+$/, "")
-    .trim();
-  if (!cleaned) return undefined;
-  return cleaned.length <= 40 ? cleaned : `${cleaned.slice(0, 40)}…`;
-}
-
-export function fallbackSessionTitle(instruction: string): string {
-  const firstLine = instruction.split(/\r?\n/)[0] ?? instruction;
-  const collapsed = firstLine.replace(/\s+/g, " ").trim();
-  if (!collapsed) return "New session";
-  return collapsed.length <= 24 ? collapsed : `${collapsed.slice(0, 24)}…`;
-}
-
 function str(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new HostError("INVALID_ARGUMENT", `${field} is required`);
@@ -184,20 +96,6 @@ function obj(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function context(params: Record<string, unknown>): {
-  requestId: string;
-  idempotencyKey: string | undefined;
-  expectedRevision: number | undefined;
-} {
-  const raw = obj(params.context);
-  return {
-    requestId: str(raw.requestId, "context.requestId"),
-    idempotencyKey: typeof raw.idempotencyKey === "string" ? raw.idempotencyKey : undefined,
-    expectedRevision: typeof raw.expectedRevision === "number" ? raw.expectedRevision : undefined
-  };
-}
-
-/** `context.idempotencyKey` if present; the request is a one-shot write otherwise. */
 function idempotencyKeyFrom(params: Record<string, unknown>): string | undefined {
   const raw = params.context;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -205,181 +103,38 @@ function idempotencyKeyFrom(params: Record<string, unknown>): string | undefined
   return typeof key === "string" && key.length > 0 ? key : undefined;
 }
 
-/**
- * Optional transient provider key accepted at the top level of `turn/start`
- * (contract §8.1). It is never stored: it is used for this call, and — when the
- * turn is queued — kept only in the in-memory queue entry until it starts.
- */
-function transientApiKey(params: Record<string, unknown>): string | undefined {
-  const value = params.apiKey;
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || value.length === 0) {
-    throw new HostError("INVALID_ARGUMENT", "apiKey must be a non-empty string", { field: "apiKey" });
-  }
-  if (value.length > 16_384 || /[\r\n]/.test(value)) {
-    throw new HostError("INVALID_ARGUMENT", "apiKey must be at most 16384 characters without CR/LF", {
-      field: "apiKey"
-    });
-  }
-  return value;
-}
-
-function imageExtension(mimeType: string): string {
-  return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
-}
-
-async function projectContent(
-  sessionId: string,
-  itemId: string,
-  content: unknown,
-  role: string,
-  blobs: BlobStore
-): Promise<{
-  text: string;
-  attachments: AttachmentRecord[];
-  content: unknown;
-}> {
-  if (typeof content === "string") {
-    return { text: content, attachments: [], content };
-  }
-  if (!Array.isArray(content)) {
-    return { text: "", attachments: [], content };
-  }
-  const attachments: AttachmentRecord[] = [];
-  const projected: unknown[] = [];
-  for (const [index, part] of content.entries()) {
-    const block = part as { type?: string; text?: string; data?: string; mimeType?: string };
-    if (
-      block.type === "image" &&
-      typeof block.data === "string" &&
-      typeof block.mimeType === "string"
-    ) {
-      try {
-        const attachment = await blobs.importImageBase64({
-          sessionId,
-          dataBase64: block.data,
-          mimeType: block.mimeType,
-          fileName: `${itemId}-${index}.${imageExtension(block.mimeType)}`,
-          kind: role === "user" ? "input" : "output"
-        });
-        attachments.push(attachment);
-        projected.push({
-          type: "image",
-          attachmentId: attachment.id,
-          mimeType: attachment.mimeType
-        });
-      } catch {
-        projected.push(block);
-      }
-    } else {
-      projected.push(block);
-    }
-  }
-  return {
-    text: messageText(projected),
-    attachments,
-    content: projected
-  };
-}
-
-async function itemFromEntry(
-  entry: SessionEntry,
-  sessionId: string,
-  blobs: BlobStore
-) {
-  if (entry.type !== "message") return null;
-  const message = (entry.message.role === "assistant" ? publicAssistantMessage(entry.message) : entry.message) as {
-    role?: string;
-    content?: unknown;
-    toolName?: string;
-    isError?: boolean;
-    timestamp?: number;
-  };
-  const role = message.role ?? "assistant";
-  const projected = await projectContent(sessionId, entry.id, message.content, role, blobs);
-  // Pi 把工具结果写成 `role: "toolResult"` 的消息条目（含 `toolName` / `isError`）。
-  // 契约 §3.5 的 `tool` 条目才是客户端渲染的工具卡片，所以历史投影必须给出
-  // `itemType: "tool"` 与 `toolName`；否则重新 attach 后同一次工具调用会从卡片
-  // 退化成一条没有归属的正文消息，卡片正文也就永远看不到。
-  const tool = role === "toolResult";
-  return {
-    id: entry.id,
-    itemType: tool ? "tool" : "message",
-    kind: tool ? "tool" : "message",
-    role,
-    text: projected.text,
-    status: tool && message.isError ? "failed" : "completed",
-    turnId: null,
-    toolName: tool ? (message.toolName ?? null) : null,
-    attachments: projected.attachments,
-    content: { ...message, content: projected.content }
-  };
-}
-
-function textPreview(text: string, maxBytes: number): string {
-  const prefix = Buffer.from(text.slice(0, maxBytes + 1), "utf8");
-  if (prefix.length <= maxBytes) return text;
-  let end = maxBytes;
-  // If the cut is in the middle of a UTF-8 character, move back to its start.
-  while ((prefix[end]! & 0xc0) === 0x80) end--;
-  return prefix.subarray(0, end).toString("utf8") + "\n…";
-}
-
-function historyItemPreview(item: NonNullable<Awaited<ReturnType<typeof itemFromEntry>>>): Record<string, unknown> {
-  const text = textPreview(item.text, HISTORY_TEXT_PREVIEW_BYTES);
-  return {
-    ...item,
-    text,
-    content: { role: item.role, timestamp: item.content.timestamp },
-    ...(text !== item.text ? { textByteLength: Buffer.byteLength(item.text, "utf8") } : {})
-  };
-}
-
 export class HostService {
   readonly tokens: TokenStore;
   readonly meta: MetaStore;
   readonly catalog: NativeSessionCatalog;
   readonly journal: EventJournal;
-  private shuttingDown = false;
-  private shutdownPromise: Promise<void> | undefined;
-  private readonly inFlight = new Set<Promise<unknown>>();
   readonly blobs: BlobStore;
   readonly providers: ProviderStore;
   readonly skills: SkillRegistry;
   readonly extensions: ExtensionRegistry;
   readonly extensionSnapshots: ExtensionSnapshotStore;
-  private readonly executingDrivers = new Map<string, string>();
   hostId: string;
 
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
+  private readonly inFlight = new Set<Promise<unknown>>();
   private readonly subscriptions = new Map<string, Subscription>();
-  private readonly turns = new Map<string, TurnState>();
   private readonly idempotency: IdempotencyStore;
   private readonly turnStore: TurnStore;
-  /** Serialises per-session native writes and session-scoped event emission. */
   private readonly sessionLocks = new KeyedMutex();
-  private readonly turnStopLocks = new KeyedMutex();
-  /** Serialises per-turn driver event processing in strict FIFO order. */
-  private readonly turnEventChains = new Map<string, Promise<void>>();
-  /** turnId → (itemId → partial output) for the in-flight turn's active items. */
-  private readonly liveItems = new Map<string, Map<string, LiveItem>>();
-  /** sessionId → queued turn starts awaiting the running turn (contract §8.1). */
-  private readonly queuedStarts = new Map<
-    string,
-    Array<{
-      turnId: string;
-      /** Snapshot-only prompt summary so a reattach can render the queued instruction. */
-      text: string;
-      attachmentCount: number;
-      run: () => Promise<void>;
-    }>
-  >();
-  /// One drain per session: two concurrent drains could shift two entries and
-  /// start them in parallel.
-  private readonly draining = new Set<string>();
+  private readonly turnCoordinator: TurnCoordinator;
+  private readonly sessionService: SessionService;
   private maintenanceTimer: NodeJS.Timeout | undefined;
-  private readonly pendingApprovals = new Map<string, PendingApproval>();
-  private readonly allowedSessionTools = new Map<string, Set<string>>();
-  private approvalRevision = 0;
+
+  // Test-inspection forwarders preserved for existing unit suites.
+  private get executingDrivers() { return this.turnCoordinator.executingDrivers; }
+  private get turns() { return this.turnCoordinator.turns; }
+  private get turnEventChains() { return this.turnCoordinator.turnEventChains; }
+  private get pendingApprovals() { return this.turnCoordinator.pendingApprovals; }
+  private get approvalRevision() { return this.turnCoordinator.approvalRevision; }
+  private requestApproval(session: SessionMeta, turnId: string, toolName: string, input: unknown) {
+    return this.turnCoordinator.requestApproval(session, turnId, toolName, input);
+  }
 
   constructor(
     readonly config: HostConfig,
@@ -398,6 +153,39 @@ export class HostService {
     this.extensions = new ExtensionRegistry(config.extensions);
     this.extensionSnapshots = new ExtensionSnapshotStore(config.dataDir);
     this.hostId = config.hostId || uuid();
+
+    this.turnCoordinator = new TurnCoordinator({
+      config: this.config,
+      meta: this.meta,
+      catalog: this.catalog,
+      blobs: this.blobs,
+      providers: this.providers,
+      skills: this.skills,
+      extensions: this.extensions,
+      extensionSnapshots: this.extensionSnapshots,
+      turnStore: this.turnStore,
+      driver: this.driver,
+      sessionLocks: this.sessionLocks,
+      getHostId: () => this.hostId,
+      isShuttingDown: () => this.shuttingDown,
+      trackWork: (work) => this.trackWork(work),
+      emit: (scope, kind, payload, extra) => this.emit(scope, kind, payload, extra),
+      requireSession: (sessionId) => this.sessionService.requireSession(sessionId),
+      updateSessionWriteState: (session, reason) => this.sessionService.updateSessionWriteState(session, reason)
+    });
+
+    this.sessionService = new SessionService({
+      meta: this.meta,
+      catalog: this.catalog,
+      journal: this.journal,
+      blobs: this.blobs,
+      providers: this.providers,
+      idempotency: this.idempotency,
+      extensionSnapshots: this.extensionSnapshots,
+      sessionLocks: this.sessionLocks,
+      turns: this.turnCoordinator,
+      emit: (scope, kind, payload, extra) => this.emit(scope, kind, payload, extra)
+    });
   }
 
   async init(): Promise<{ removedLegacySecrets: number }> {
@@ -408,32 +196,13 @@ export class HostService {
     const stored = await readJsonFile<{ version: 1; hostId: string } | null>(hostPath, null);
     if (stored?.version === 1 && stored.hostId) this.hostId = stored.hostId;
     else await writeJsonFileAtomic(hostPath, { version: 1, hostId: this.hostId }, 0o600);
-    // A rotation issued but never confirmed is void across a restart; the old
-    // token stays valid (contract §2.4).
     await this.tokens.recoverUnconfirmedRotations();
-    // Reconcile turns that were active when the previous process exited. The
-    // live execution is gone and cannot be proven stopped, so they become
-    // `uncertain` and are never auto-resumed (contract §9).
-    const reconciled = await this.turnStore.reconcileAfterRestart();
-    for (const record of reconciled) {
-      this.turns.set(record.id, {
-        id: record.id,
-        sessionId: record.sessionId,
-        status: record.status,
-        createdAt: record.createdAt,
-        settledAt: record.settledAt,
-        ...(record.settledReason ? { settledReason: record.settledReason } : {})
-      });
-    }
-    await this.extensionSnapshots.recover(new Set((await this.meta.listSessions(true)).map(session => session.id)));
-    // Provider keys are no longer persisted; older builds kept them under
-    // data/providers/secrets. Remove leftovers so an upgraded host never leaves
-    // a secret on disk. Only the count is reported, never names or contents.
+    this.turnCoordinator.seedRecoveredTurns(await this.turnStore.reconcileAfterRestart());
+    await this.extensionSnapshots.recover(new Set((await this.meta.listSessions(true)).map((session) => session.id)));
     const removedLegacySecrets = await this.providers.purgeLegacySecrets();
     return { removedLegacySecrets };
   }
 
-  /** Start periodic media GC. Call from the process entrypoint after `init()`. */
   startMaintenance(intervalMs = 60 * 60 * 1000): void {
     if (this.shuttingDown || this.maintenanceTimer) return;
     void this.runMaintenance().catch(() => undefined);
@@ -447,13 +216,7 @@ export class HostService {
     this.shuttingDown = true;
     this.stopMaintenance();
     this.shutdownPromise ??= (async () => {
-      const turns = [...this.turns.values()].filter(turn => ACTIVE_TURN_STATUSES.has(turn.status));
-      await Promise.allSettled(turns.map(turn => this.stopTurn(turn.id, "interrupted")));
-      for (const turnId of this.executingDrivers.values()) {
-        this.settleApprovalsForTurn(turnId);
-        const handle = this.turns.get(turnId)?.handle;
-        if (handle) this.trackWork(handle.abort());
-      }
+      await this.turnCoordinator.shutdown();
       while (this.inFlight.size) await Promise.allSettled([...this.inFlight]);
       await this.tokens.waitForWrites();
     })();
@@ -465,16 +228,12 @@ export class HostService {
     void work.then(() => this.inFlight.delete(work), () => this.inFlight.delete(work));
     return work;
   }
+
   stopMaintenance(): void {
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = undefined;
   }
 
-  /**
-   * Collect attachment ids and image content hashes that committed messages still
-   * reference by walking each live session's native history, then drop unreferenced blobs.
-   * If any session's history cannot be read, maintenance is aborted to prevent accidental GC.
-   */
   runMaintenance(now = new Date()): Promise<number> {
     if (this.shuttingDown) return Promise.resolve(0);
     return this.trackWork(this.performMaintenance(now));
@@ -513,42 +272,8 @@ export class HostService {
   }
 
   async initialize(params: Record<string, unknown>) {
-    if (params.protocolVersion !== "1.0" && params.protocolVersion !== "2.0.0") {
+    if (params.protocolVersion !== "2.0.0") {
       throw new HostError("PROTOCOL_MISMATCH", "unsupported initialize protocolVersion");
-    }
-    if (params.protocolVersion === "1.0") {
-      return {
-        protocolVersion: "1.0",
-        server: {
-          name: "pi-adaptor",
-          version: this.config.hostVersion,
-          hostId: this.hostId,
-          piVersion: this.config.piVersion
-        },
-        connectionId: uuid(),
-        principal: { subject: "paired-device", roles: ["owner"] },
-        policy: {
-          remoteMaxPermissionMode: "auto",
-          applyCeilingToPairedDevices: false
-        },
-        capabilities: {
-          extensionInventory: true, sessionExtensions: true, extensionManagement: false, extensionUI: false,
-          attachments: true,
-          imageOutput: true,
-          skills: true,
-          providers: true,
-          sessionBranches: true,
-          sessionDelete: true,
-          nativePiSessions: true,
-          directTransport: true,
-          providerDiscovery: true,
-          // Keys are supplied per turn by the client; nothing is stored on the host.
-          providerClientKeys: true,
-          // The driver has no AskTool request/answer bridge yet; do not claim
-          // bidirectional questions until it is implemented end to end.
-          inputRequests: false
-        }
-      };
     }
     return {
       protocolVersion: "2.0.0",
@@ -568,7 +293,10 @@ export class HostService {
         approvalDisconnectSeconds: 86400
       },
       capabilities: {
-        extensionInventory: true, sessionExtensions: true, extensionManagement: false, extensionUI: false,
+        extensionInventory: true,
+        sessionExtensions: true,
+        extensionManagement: false,
+        extensionUI: false,
         attachments: true,
         imageOutput: true,
         skills: true,
@@ -578,7 +306,6 @@ export class HostService {
         nativePiSessions: true,
         directTransport: true,
         providerDiscovery: true,
-        // Keys are supplied per turn by the client; nothing is stored on the host.
         providerClientKeys: true
       }
     };
@@ -628,24 +355,23 @@ export class HostService {
     if (IDEMPOTENT_METHODS.has(method)) {
       const key = idempotencyKeyFrom(params);
       if (key) {
-        if (method === "session/create") return this.createSessionWithKey(params, auth.device.deviceId, key);
+        if (method === "session/create") return this.sessionService.createSessionWithKey(params, auth.device.deviceId, key);
         return this.idempotency.run(
           key,
           method,
           requestDigest(params),
-          () => this.dispatch(method, params, auth, pairingToken, effects),
+          () => this.dispatch(method, params, auth, effects),
           auth.device.deviceId
         );
       }
     }
-    return this.dispatch(method, params, auth, pairingToken, effects);
+    return this.dispatch(method, params, auth, effects);
   }
 
   private async dispatch(
     method: string,
     params: Record<string, unknown>,
     auth: AuthContext,
-    pairingToken?: string,
     effects?: ConnectionEffects
   ): Promise<unknown> {
     switch (method) {
@@ -662,7 +388,9 @@ export class HostService {
         const confirmed = await this.tokens.confirmRotation(
           auth.device.deviceId,
           str(params.rotationId, "rotationId"),
-          (hash) => { previousCredentialHash = hash; }
+          (hash) => {
+            previousCredentialHash = hash;
+          }
         );
         if (confirmed && previousCredentialHash) {
           effects?.rotationConfirmed?.(auth.device.deviceId, previousCredentialHash);
@@ -674,9 +402,9 @@ export class HostService {
       case "project/list":
         return { projects: await this.meta.listProjects(true) };
       case "project/browse":
-        return this.browseProject(typeof params.path === "string" ? params.path : undefined);
+        return this.sessionService.browseProject(typeof params.path === "string" ? params.path : undefined);
       case "project/register": {
-        const path = await this.projectDirectory(str(params.path, "path"));
+        const path = await this.sessionService.projectDirectory(str(params.path, "path"));
         const label = typeof params.label === "string" ? params.label : path.split("/").pop() ?? path;
         return { project: await this.meta.registerProject(path, label) };
       }
@@ -686,75 +414,57 @@ export class HostService {
         if (typeof params.archived === "boolean") changes.archived = params.archived;
         return { project: await this.meta.updateProject(str(params.projectId, "projectId"), changes) };
       }
-      case "project/delete": {
-        const projectId = str(params.projectId, "projectId");
-        if (str(params.confirmProjectId, "confirmProjectId") !== projectId) {
-          throw new HostError("INVALID_ARGUMENT", "project confirmation does not match");
-        }
-        // Contract §5.5: a project with an active session cannot be deleted.
-        // Only turns belonging to this project's sessions count; checking every
-        // turn in the host wrongly blocks deleting an idle project while another
-        // project is running.
-        const projectSessionIds = new Set(
-          (await this.meta.listSessions(true))
-            .filter((session) => session.projectId === projectId)
-            .map((session) => session.id)
+      case "project/delete":
+        return this.sessionService.deleteProject(
+          str(params.projectId, "projectId"),
+          str(params.confirmProjectId, "confirmProjectId")
         );
-        return this.lockSessions([...projectSessionIds].sort(), async () => {
-          if ([...projectSessionIds].some(sessionId => this.sessionBusy(sessionId))) throw new HostError("SESSION_BUSY", "a session is running or cleaning up");
-          for (const sessionId of projectSessionIds) await this.extensionSnapshots.delete(sessionId);
-          return { deleted: true, projectId: (await this.meta.deleteProject(projectId)).id };
-        });
-      }
       case "session/list":
-        return this.listSessions(typeof params.includeArchived === "boolean" ? params.includeArchived : true);
+        return this.sessionService.listSessions(typeof params.includeArchived === "boolean" ? params.includeArchived : true);
       case "session/search":
-        return this.searchSessions(str(params.query, "query"), typeof params.limit === "number" ? params.limit : 50);
+        return this.sessionService.searchSessions(
+          str(params.query, "query"),
+          typeof params.limit === "number" ? params.limit : 50
+        );
       case "session/get":
-        return { session: this.summarize(await this.requireSession(str(params.sessionId, "sessionId"))) };
+        return { session: this.sessionService.summarize(await this.sessionService.requireSession(str(params.sessionId, "sessionId"))) };
       case "session/create":
-        return { session: this.summarize(await this.createSession(params)) };
+        return { session: this.sessionService.summarize(await this.sessionService.createSession(params)) };
       case "session/attach":
-        return this.attachSession(str(params.sessionId, "sessionId"));
+        return this.sessionService.attachSession(str(params.sessionId, "sessionId"));
       case "session/history":
-        return this.history(str(params.sessionId, "sessionId"), params);
+        return this.sessionService.history(str(params.sessionId, "sessionId"), params);
       case "session/configure":
-        return { session: this.summarize(await this.configureSession(params)) };
+        return { session: this.sessionService.summarize(await this.sessionService.configureSession(params)) };
       case "session/rename":
-        return { session: this.summarize(await this.renameSession(params)) };
+        return { session: this.sessionService.summarize(await this.sessionService.renameSession(params)) };
       case "session/suggest-title":
-        return this.suggestSessionTitle(params);
+        return this.sessionService.suggestSessionTitle(params);
       case "session/archive":
-        return { session: this.summarize(await this.archiveSession(params)) };
+        return { session: this.sessionService.summarize(await this.sessionService.archiveSession(params)) };
       case "session/branch":
-        return { session: this.summarize(await this.branchSession(params)) };
+        return { session: this.sessionService.summarize(await this.sessionService.branchSession(params)) };
       case "session/delete":
-        return this.deleteSession(params);
+        return this.sessionService.deleteSession(params);
       case "events/subscribe":
-        return this.subscribe(params, auth);
+        return this.subscribe(params);
       case "events/unsubscribe":
-        // Transport owns socket/subscription membership; deleting here would let
-        // another socket remove the owner's live subscription before ownership checks.
         str(params.subscriptionId, "subscriptionId");
         return { unsubscribed: true };
       case "events/ack":
         return { acknowledged: true };
       case "turn/start":
-        return this.startTurn(params);
+        return this.turnCoordinator.startTurn(params);
       case "turn/get":
-        return { turn: this.publicTurn(this.getTurn(str(params.turnId, "turnId"))) };
+        return { turn: this.turnCoordinator.publicTurn(this.turnCoordinator.getTurn(str(params.turnId, "turnId"))) };
       case "turn/interrupt":
-        return this.stopTurn(str(params.turnId, "turnId"), "interrupted");
+        return this.turnCoordinator.stopTurn(str(params.turnId, "turnId"), "interrupted");
       case "turn/cancel":
-        return this.stopTurn(str(params.turnId, "turnId"), "canceled");
+        return this.turnCoordinator.stopTurn(str(params.turnId, "turnId"), "canceled");
       case "approval/respond":
-        return this.respondApproval(params, auth);
+        return this.turnCoordinator.respondApproval(params, auth.device.role);
       case "approval/read":
-        return this.readApproval(params, auth);
-      case "input/respond":
-        // AskTool is not wired to the production driver yet. Returning success
-        // here would claim an answer was delivered when nothing consumed it.
-        throw new HostError("CAPABILITY_UNAVAILABLE", "input requests are not supported by this host build");
+        return this.turnCoordinator.readApproval(params, auth.device.role);
       case "provider/list":
         return { providers: await this.providers.list(), revision: 1 };
       case "provider/create":
@@ -771,9 +481,6 @@ export class HostService {
         return { deleted: await this.providers.delete(providerId) };
       }
       case "provider/test": {
-        // No server-side secret exists to verify: an api_key provider can only
-        // be tested by the client, at turn/start. Reporting `ok:false` here is
-        // honest but must not be read as "provider unusable".
         const providerId = str(params.providerId, "providerId");
         const provider = (await this.providers.list()).find((entry) => entry.id === providerId);
         if (!provider) throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
@@ -785,11 +492,20 @@ export class HostService {
         if (Object.keys(params).length !== 0) throw new HostError("INVALID_ARGUMENT", "extension/list accepts no parameters");
         return this.extensions.inventory(this.hostId);
       case "session/extensions": {
-        if (Object.keys(params).some(key => key !== "sessionId")) throw new HostError("INVALID_ARGUMENT", "session/extensions only accepts sessionId");
+        if (Object.keys(params).some((key) => key !== "sessionId")) {
+          throw new HostError("INVALID_ARGUMENT", "session/extensions only accepts sessionId");
+        }
         const sessionId = str(params.sessionId, "sessionId");
         return this.sessionLocks.run(sessionId, async () => {
-          await this.requireSession(sessionId);
-          return { hostId: this.hostId, sessionId, configRevision: this.extensions.configRevision, userLoadingEnabled: this.extensions.config.enabled, runningTurnId: this.activeTurnIdFor(sessionId), ...await this.extensionSnapshots.get(sessionId) };
+          await this.sessionService.requireSession(sessionId);
+          return {
+            hostId: this.hostId,
+            sessionId,
+            configRevision: this.extensions.configRevision,
+            userLoadingEnabled: this.extensions.config.enabled,
+            runningTurnId: this.turnCoordinator.activeTurnIdFor(sessionId),
+            ...(await this.extensionSnapshots.get(sessionId))
+          };
         });
       }
       case "skill/list":
@@ -819,10 +535,7 @@ export class HostService {
         };
       case "attachment/complete":
         return {
-          attachment: await this.blobs.complete(
-            str(params.attachmentId, "attachmentId"),
-            str(params.sha256, "sha256")
-          )
+          attachment: await this.blobs.complete(str(params.attachmentId, "attachmentId"), str(params.sha256, "sha256"))
         };
       case "attachment/read": {
         const offset = params.offset === undefined ? 0 : params.offset;
@@ -837,11 +550,7 @@ export class HostService {
     }
   }
 
-  private invalidDiscovery(
-    field: string,
-    reason: string,
-    requestId?: string
-  ): HostError {
+  private invalidDiscovery(field: string, reason: string, requestId?: string): HostError {
     return new HostError("INVALID_ARGUMENT", "invalid provider discovery request", {
       field,
       reason,
@@ -855,14 +564,21 @@ export class HostService {
     requestId?: string;
   } {
     const rawContext = params.context;
-    const requestId = rawContext && typeof rawContext === "object" && !Array.isArray(rawContext) &&
+    const requestId =
+      rawContext &&
+      typeof rawContext === "object" &&
+      !Array.isArray(rawContext) &&
       typeof (rawContext as { requestId?: unknown }).requestId === "string" &&
-      ((rawContext as { requestId: string }).requestId.length > 0)
-      ? (rawContext as { requestId: string }).requestId
-      : undefined;
+      (rawContext as { requestId: string }).requestId.length > 0
+        ? (rawContext as { requestId: string }).requestId
+        : undefined;
     for (const key of Object.keys(params)) {
       if (!["providerId", "baseUrl", "apiKey", "protocol", "context"].includes(key)) {
-        throw this.invalidDiscovery(key, key === "idempotencyKey" ? "idempotency_forbidden" : "unknown_field", requestId);
+        throw this.invalidDiscovery(
+          key,
+          key === "idempotencyKey" ? "idempotency_forbidden" : "unknown_field",
+          requestId
+        );
       }
     }
     if (rawContext !== undefined) {
@@ -875,7 +591,6 @@ export class HostService {
       }
       if (!requestId) throw this.invalidDiscovery("context.requestId", "required", requestId);
     }
-
     const saved = params.providerId !== undefined;
     const adHoc = params.baseUrl !== undefined || params.apiKey !== undefined;
     if (saved && adHoc) throw this.invalidDiscovery("providerId", "mutually_exclusive", requestId);
@@ -951,547 +666,14 @@ export class HostService {
     }
   }
 
-  private async browseProject(path?: string) {
-    const target = await this.projectDirectory(path ?? process.env.HOME ?? "/");
-    const entries = await readdir(target, { withFileTypes: true });
-    return {
-      path: target,
-      entries: entries.map((entry) => ({
-        name: entry.name,
-        path: join(target, entry.name),
-        kind: entry.isDirectory() ? "directory" : "file",
-        readable: true
-      }))
-    };
-  }
-
-  private async projectDirectory(path: string): Promise<string> {
-    const target = resolve(path);
-    try {
-      if (!(await stat(target)).isDirectory()) {
-        throw new HostError("INVALID_ARGUMENT", "project path is not a directory", { field: "path" });
-      }
-      await access(target, constants.R_OK | constants.X_OK);
-      return target;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") {
-        throw new HostError("NOT_FOUND", "project directory does not exist", { field: "path" });
-      }
-      if (code === "EACCES" || code === "EPERM") {
-        throw new HostError("FORBIDDEN", "project directory is not accessible", { field: "path" });
-      }
-      throw error;
-    }
-  }
-
-  private async requireSession(sessionId: string): Promise<SessionMeta> {
-    const session = await this.meta.getSession(sessionId);
-    if (!session || session.deletedAt) throw new HostError("NOT_FOUND", "session not found");
-    return session;
-  }
-
-  /// 当前运行或排队中的 turn id；契约 §3.4 要求会话摘要带 `activeTurnId`。
-  /// 该字段是运行期状态，不在持久化的 SessionMeta 上，故每次序列化时按 `this.turns` 计算。
-  private activeTurnIdFor(sessionId: string): string | null {
-    const executing = this.executingDrivers.get(sessionId);
-    if (executing) return executing;
-    for (const turn of this.turns.values()) {
-      if (turn.sessionId === sessionId && turn.status !== "queued" && ACTIVE_TURN_STATUSES.has(turn.status)) {
-        return turn.id;
-      }
-    }
-    return null;
-  }
-
-  /** A session is busy while it has a running turn or anything queued behind it. */
-  private sessionBusy(sessionId: string): boolean {
-    return this.activeTurnIdFor(sessionId) !== null || (this.queuedStarts.get(sessionId)?.length ?? 0) > 0;
-  }
-
-  /// 会话摘要 + 计算字段 `activeTurnId`（契约 §3.4）。
-  private summarize(session: SessionMeta): SessionMeta & { activeTurnId: string | null } {
-    return { ...session, activeTurnId: this.activeTurnIdFor(session.id) };
-  }
-
-
-  private async listSessions(includeArchived: boolean) {
-    const native = await this.catalog.scan();
-    const projects = await this.meta.listProjects(true);
-    await this.meta.importDiscoveredSessions(native.map((item): SessionMeta => ({
-      id: item.id,
-      title: item.title,
-      projectId: projects.find((project) => project.path === item.cwd)?.id ?? null,
-      projectPath: item.cwd,
-      mode: "agent",
-      permissionMode: "ask",
-      providerId: null,
-      modelId: null,
-      thinkingLevel: null,
-      revision: 1,
-      archived: false,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-      nativePath: item.path,
-      readOnlyReason: item.readOnlyReason
-    })));
-    const sessions = await this.meta.listSessions(includeArchived);
-    return {
-      sessions: sessions.filter((session) => !session.deletedAt).map((session) => this.summarize(session)),
-      revision: 1
-    };
-  }
-
-  private async searchSessions(query: string, limit: number) {
-    const result = await this.listSessions(true);
-    const lower = query.toLowerCase();
-    return {
-      sessions: result.sessions
-        .filter((session) => `${session.title} ${session.projectPath}`.toLowerCase().includes(lower))
-        .slice(0, Math.max(1, Math.min(limit, 200)))
-        .map((session) => this.summarize(session))
-    };
-  }
-
-  private async createSessionWithKey(params: Record<string, unknown>, deviceId: string, key: string) {
-    const digest = requestDigest(params);
-    // A retry can find the committed session even if the event or response never made it out.
-    const id = sha256(JSON.stringify(["session/create", deviceId, key, digest]));
-    return this.idempotency.run(
-      key, "session/create", digest,
-      async () => ({ session: this.summarize(await this.createSession(params, id)) }),
-      deviceId, undefined,
-      async () => {
-        const session = await this.meta.getSession(id);
-        return session && !session.deletedAt ? { session: this.summarize(session) } : undefined;
-      }
-    );
-  }
-
-  private async createSession(params: Record<string, unknown>, id = uuid()): Promise<SessionMeta> {
-    const existing = await this.meta.getSession(id);
-    if (existing) {
-      if (existing.deletedAt) throw new HostError("CONFLICT", "the created session was deleted");
-      return existing;
-    }
-    const projectId = typeof params.projectId === "string" ? params.projectId : null;
-    const project = projectId ? await this.meta.getProject(projectId) : null;
-    const now = new Date().toISOString();
-    const session: SessionMeta = {
-      id,
-      title: typeof params.title === "string" && params.title ? params.title : "New session",
-      projectId,
-      projectPath: project?.path ?? process.cwd(),
-      mode: params.mode === "plan" ? "plan" : "agent",
-      permissionMode: params.permissionMode === "auto" ? "auto" : "ask",
-      providerId: typeof params.providerId === "string" ? params.providerId : null,
-      modelId: typeof params.modelId === "string" ? params.modelId : null,
-      thinkingLevel: typeof params.thinkingLevel === "string" ? params.thinkingLevel : null,
-      revision: 1,
-      archived: false,
-      createdAt: now,
-      updatedAt: now,
-      nativePath: null
-    };
-    await this.meta.upsertSession(session);
-    await this.emit("host", "session.created", { session });
-    return session;
-  }
-
-  private async attachSession(sessionId: string) {
-    return this.sessionLocks.run(sessionId, () => this.attachSessionSnapshot(sessionId));
-  }
-
-  private async attachSessionSnapshot(sessionId: string) {
-    let session = await this.requireSession(sessionId);
-    let native = session.nativePath ? await this.catalog.historyForAttach(session.nativePath, sessionId) : undefined;
-    if (session.nativePath && native?.readOnlyReason === "external_write_conflict" && this.activeTurnIdFor(sessionId)) {
-      native = await this.catalog.historyForAttach(session.nativePath, sessionId);
-      if (native.readOnlyReason === "external_write_conflict") {
-        throw new HostError("CONFLICT", "Session changed while reading. Open it again to refresh.");
-      }
-    }
-    // Only a verified reopen may clear a recorded conflict, after its writer has exited.
-    if (native && (native.readOnlyReason || !this.activeTurnIdFor(sessionId))
-        && native.readOnlyReason !== (session.readOnlyReason ?? null)) {
-      session = await this.updateSessionWriteState(session, native.readOnlyReason);
-    }
-    // Capture history, the cursor, and live turn projections under one session
-    // lock. A terminal event can therefore never be included in the cursor while
-    // its already-settled turn is still reported as active in this snapshot.
-    const seq = this.journal.currentCursor();
-    const history = native?.entries ?? [];
-    const cursor = seq;
-    // A pending tool approval is not part of the native JSONL history, so it has
-    // to be replayed from the live turn state. Without this, a client that
-    // reattaches while a tool call is waiting for approval sees no card and the
-    // turn hangs forever (the model never gets a tool result).
-    const pendingApprovals = [...this.pendingApprovals.entries()]
-      .filter(([, pending]) => pending.sessionId === sessionId)
-      .map(([id, pending]) => this.approvalProjection(id, pending));
-    const summary = this.summarize(session);
-    const activeTurn = summary.activeTurnId ? this.turns.get(summary.activeTurnId) ?? null : null;
-    const activeItems = activeTurn ? this.activeItemPreviews(activeTurn.id) : [];
-    const queuedTurns = (this.queuedStarts.get(sessionId) ?? []).flatMap((entry) => {
-      const turn = this.turns.get(entry.turnId);
-      if (!turn) return [];
-      // The queued prompt text is carried by the queue entry, not by the turn
-      // state: it only ever appears in this snapshot (contract §3.6), never in
-      // events, turn/get or idempotency results.
-      return [
-        {
-          ...this.publicTurn(turn),
-          text: textPreview(entry.text, SNAPSHOT_QUEUE_TEXT_BYTES),
-          attachmentCount: entry.attachmentCount
-        }
-      ];
-    });
-    const result = {
-      session: summary,
-      snapshot: {
-        session: summary,
-        revision: session.revision,
-        cursor,
-        items: [] as Record<string, unknown>[],
-        activeItems,
-        // 契约 §3.4：会话摘要带 activeTurnId；重连/切后台后客户端据此恢复运行态与中止入口。
-        activeTurn: activeTurn
-          ? {
-              id: activeTurn.id,
-              sessionId: activeTurn.sessionId,
-              status: activeTurn.status,
-              createdAt: activeTurn.createdAt,
-              settledAt: activeTurn.settledAt,
-              settledReason: activeTurn.settledReason ?? null
-            }
-          : null,
-        queuedTurns,
-        pendingApprovals,
-        pendingInputs: [],
-        hasMoreHistory: false,
-        replayComplete: true
-      },
-      replayComplete: true
-    };
-    const page = await this.historyPage(
-      session.id,
-      history,
-      undefined,
-      SNAPSHOT_HISTORY_LIMIT,
-      Buffer.byteLength(JSON.stringify(result), "utf8")
-    );
-    result.snapshot.items = page.items;
-    result.snapshot.hasMoreHistory = page.hasMore;
-    return result;
-  }
-
-  private activeItemPreviews(turnId: string) {
-    const previews = [];
-    let bytes = 2;
-    for (const item of [...(this.liveItems.get(turnId)?.values() ?? [])].reverse()) {
-      const preview = {
-        id: item.itemId,
-        itemType: item.itemType,
-        kind: item.kind,
-        role: item.role ?? null,
-        text: textPreview(item.text, HISTORY_TEXT_PREVIEW_BYTES),
-        status: item.status,
-        turnId,
-        toolName: item.toolName ?? null
-      };
-      const size = Buffer.byteLength(JSON.stringify(preview), "utf8") + 1;
-      if (bytes + size > SNAPSHOT_ACTIVE_ITEMS_BYTES) continue;
-      previews.push(preview);
-      bytes += size;
-    }
-    return previews.reverse();
-  }
-
-  /**
-   * Select a contiguous suffix before a stable native item id. Project only the
-   * selected page. If a single item cannot fit, send a preview and keep the
-   * original available through session/history textRange.
-   */
-  private async historyPage(
-    sessionId: string,
-    entries: SessionEntry[],
-    beforeItemId: string | undefined,
-    limit: number,
-    baseBytes: number
-  ): Promise<{ items: Record<string, unknown>[]; hasMore: boolean }> {
-    const messages = entries.filter((entry) => entry.type === "message");
-    let end = messages.length;
-    if (beforeItemId !== undefined) {
-      end = messages.findIndex((entry) => entry.id === beforeItemId);
-      if (end < 0) {
-        throw new HostError("NOT_FOUND", "history item no longer exists", { field: "beforeItemId" });
-      }
-    }
-    if (baseBytes > HISTORY_RESPONSE_MAX_BYTES) {
-      throw new HostError("PAYLOAD_TOO_LARGE", "session snapshot state exceeds the response budget", {
-        maxBytes: HISTORY_RESPONSE_MAX_BYTES
-      });
-    }
-    const items: Record<string, unknown>[] = [];
-    let bytes = baseBytes;
-    let start = end;
-    while (start > 0 && items.length < limit) {
-      const projected = await itemFromEntry(messages[start - 1]!, sessionId, this.blobs);
-      if (!projected) break;
-      let item: Record<string, unknown> = projected;
-      let itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (items.length > 0 ? 1 : 0);
-      if (bytes + itemBytes > HISTORY_RESPONSE_MAX_BYTES && items.length === 0) {
-        item = historyItemPreview(projected);
-        itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8");
-      }
-      if (bytes + itemBytes > HISTORY_RESPONSE_MAX_BYTES) {
-        if (items.length === 0) {
-          throw new HostError("PAYLOAD_TOO_LARGE", "history item exceeds the response budget", {
-            field: "items",
-            maxBytes: HISTORY_RESPONSE_MAX_BYTES
-          });
-        }
-        break;
-      }
-      items.push(item);
-      bytes += itemBytes;
-      start -= 1;
-    }
-    items.reverse();
-    return { items, hasMore: start > 0 };
-  }
-
-  private async history(sessionId: string, params: Record<string, unknown> = {}) {
-    const range = params.textRange === undefined ? undefined : obj(params.textRange);
-    if (range) {
-      if (params.beforeItemId !== undefined || params.limit !== undefined) {
-        throw new HostError("INVALID_ARGUMENT", "textRange cannot be used with history pagination");
-      }
-      const itemId = str(range.itemId, "textRange.itemId");
-      const offset = range.offset;
-      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) {
-        throw new HostError("INVALID_ARGUMENT", "textRange.offset must be a nonnegative integer");
-      }
-      return this.sessionLocks.run(sessionId, async () => {
-        const session = await this.requireSession(sessionId);
-        if (!session.nativePath) throw new HostError("NOT_FOUND", "history item no longer exists");
-        const textChunk = await this.catalog.historyTextChunk(
-          session.nativePath, sessionId, itemId, offset, HISTORY_TEXT_CHUNK_BYTES
-        );
-        return {
-          items: [], hasMore: false, revision: session.revision, textChunk
-        };
-      });
-    }
-    const limit = params.limit === undefined ? SNAPSHOT_HISTORY_LIMIT : params.limit;
-    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > HISTORY_PAGE_MAX_ITEMS) {
-      throw new HostError("INVALID_ARGUMENT", "history limit must be an integer from 1 to 200", { field: "limit" });
-    }
-    const beforeItemId = params.beforeItemId === undefined
-      ? undefined
-      : str(params.beforeItemId, "beforeItemId");
-    return this.sessionLocks.run(sessionId, async () => {
-      const session = await this.requireSession(sessionId);
-      const history = session.nativePath ? await this.catalog.history(session.nativePath, sessionId) : [];
-      const result = { items: [] as Record<string, unknown>[], hasMore: false, revision: session.revision };
-      const page = await this.historyPage(
-        session.id,
-        history,
-        beforeItemId,
-        limit,
-        Buffer.byteLength(JSON.stringify(result), "utf8")
-      );
-      result.items = page.items;
-      result.hasMore = page.hasMore;
-      return result;
-    });
-  }
-
-  private async configureSession(params: Record<string, unknown>) {
-    const sessionId = str(params.sessionId, "sessionId");
-    const changes: Partial<SessionMeta> = {};
-    if (params.mode !== undefined) {
-      if (params.mode !== "agent" && params.mode !== "plan") {
-        throw new HostError("INVALID_ARGUMENT", "mode must be agent or plan", { field: "mode" });
-      }
-      changes.mode = params.mode;
-    }
-    if (params.permissionMode === "ask" || params.permissionMode === "auto") changes.permissionMode = params.permissionMode;
-    if (typeof params.providerId === "string") changes.providerId = params.providerId;
-    if (typeof params.modelId === "string") changes.modelId = params.modelId;
-    if (typeof params.thinkingLevel === "string") changes.thinkingLevel = params.thinkingLevel;
-    return this.reviseSession(sessionId, changes);
-  }
-
-  /**
-   * 用会话当前模型为首条指令生成一个短标题。
-   *
-   * 只做一次非流式补全，不创建 turn、不写会话历史；失败由客户端退回本地标题，
-   * 因此这里不缓存、不重试，也不把它算作会话状态的一部分。
-   */
-  private async suggestSessionTitle(params: Record<string, unknown>) {
-    const sessionId = str(params.sessionId, "sessionId");
-    const rawInstruction = str(params.instruction, "instruction");
-    const instruction = rawInstruction.slice(0, 4_000);
-    const session = await this.requireSession(sessionId);
-    const providerId = typeof params.providerId === "string" && params.providerId
-      ? params.providerId
-      : session.providerId;
-    const modelId = typeof params.modelId === "string" && params.modelId
-      ? params.modelId
-      : session.modelId;
-    if (!providerId) throw new HostError("PROVIDER_NOT_CONFIGURED", "provider is required");
-    if (!modelId) throw new HostError("PROVIDER_NOT_CONFIGURED", "model is required");
-    const provider = (await this.providers.list()).find((entry) => entry.id === providerId);
-    if (!provider) throw new HostError("NOT_FOUND", "provider not found", { field: "providerId" });
-
-    const apiKey = transientApiKey(params);
-    this.assertProviderKey(provider, apiKey, params.providerBinding);
-    const api = providerApi(provider.protocol);
-    const declared = provider.models.find((model) => model.id === modelId);
-    const runtime = await createProviderRuntime(provider.id, {
-      name: provider.name,
-      baseUrl: provider.baseUrl,
-      api,
-      models: [{
-        id: modelId,
-        name: declared?.displayName ?? modelId,
-        api,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: declared?.contextWindow ?? 32_768,
-        maxTokens: declared?.maxTokens ?? 4_096,
-        reasoning: declared?.thinkingLevels.length ? true : false
-      }]
-    }, provider.authKind === "api_key" ? apiKey! : "none");
-    const model = runtime.getModel(provider.id, modelId);
-    if (!model) throw new HostError("PROVIDER_NOT_CONFIGURED", "model is not configured");
-
-    const prompt = [
-      "You name coding sessions. Write a concise title for the session based on the user's first instruction.",
-      "Requirements: at most 12 Chinese characters or 6 English words; no quotes, no trailing punctuation, no explanation.",
-      "Reply with the title only.",
-      "",
-      "First instruction:",
-      instruction
-    ].join("\n");
-    const message = await runtime.completeSimple(
-      model,
-      { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      { maxTokens: 64 }
-    );
-    const text = publicAssistantMessage(message).content
-      .filter((part): part is { type: "text"; text: string } => part.type === "text")
-      .map((part) => part.text)
-      .join(" ")
-      .trim();
-    return { title: sanitizeSessionTitle(text) ?? fallbackSessionTitle(instruction) };
-  }
-
-  private async renameSession(params: Record<string, unknown>) {
-    const sessionId = str(params.sessionId, "sessionId");
-    const title = str(params.title, "title");
-    return this.reviseSession(sessionId, { title }, async (session) => {
-      if (session.nativePath && this.sessionBusy(sessionId)) throw new HostError("SESSION_BUSY", "wait until the session is idle before renaming");
-      if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
-      if (!session.nativePath) return;
-      try {
-        await this.catalog.appendSessionInfo(session.nativePath, title, session.id);
-      } catch (error) {
-        if (error instanceof HostError && error.code === "SESSION_READ_ONLY") {
-          await this.updateSessionWriteState(session, error.message);
-        }
-        throw error;
-      }
-    });
-  }
-
-  private async archiveSession(params: Record<string, unknown>) {
-    const sessionId = str(params.sessionId, "sessionId");
-    return this.reviseSession(sessionId, { archived: params.archived === true });
-  }
-
-  private async reviseSession(
-    sessionId: string,
-    changes: Partial<Omit<SessionMeta, "id" | "createdAt" | "revision">>,
-    beforeSave?: (session: SessionMeta) => Promise<void>
-  ): Promise<SessionMeta> {
-    return this.sessionLocks.run(sessionId, async () => {
-      if (beforeSave) await beforeSave(await this.requireSession(sessionId));
-      const updated = await this.meta.updateSession(sessionId, changes, { incrementRevision: true });
-      await this.emit("host", "session.changed", { session: updated }, { sessionId });
-      return updated;
-    });
-  }
-
-  private async updateSessionWriteState(session: SessionMeta, reason: string | null): Promise<SessionMeta> {
-    if ((session.readOnlyReason ?? null) === reason) return session;
-    const updated = await this.meta.updateSession(session.id, { readOnlyReason: reason }, { incrementRevision: true });
-    await this.emit("host", "session.changed", { session: updated }, { sessionId: session.id });
-    return updated;
-  }
-
-  private async branchSession(params: Record<string, unknown>) {
-    const sessionId = str(params.sessionId, "sessionId");
-    const session = await this.requireSession(sessionId);
-    if (!session.nativePath) throw new HostError("NOT_FOUND", "session has no native file");
-    const childPath = await this.catalog.branch(session.nativePath, str(params.fromItemId, "fromItemId"), sessionId);
-    const child = await this.catalog.scan().then((items) => items.find((item) => item.path === childPath));
-    if (!child) throw new HostError("INTERNAL", "branch was not discoverable");
-    return this.meta.upsertSession({
-      ...session,
-      id: child.id,
-      title: typeof params.title === "string" ? params.title : `${session.title} branch`,
-      nativePath: child.path,
-      revision: 1,
-      createdAt: child.createdAt,
-      updatedAt: child.updatedAt,
-      archived: false,
-      readOnlyReason: child.readOnlyReason
-    });
-  }
-
-  private lockSessions<T>(ids: string[], work: () => Promise<T>): Promise<T> {
-    const [first, ...rest] = ids;
-    return first === undefined ? work() : this.sessionLocks.run(first, () => this.lockSessions(rest, work));
-  }
-
-  private async deleteSession(params: Record<string, unknown>) {
-    const sessionId = str(params.sessionId, "sessionId");
-    if (str(params.confirmSessionId, "confirmSessionId") !== sessionId) {
-      throw new HostError("INVALID_ARGUMENT", "session confirmation does not match");
-    }
-    return this.sessionLocks.run(sessionId, async () => {
-      const session = await this.requireSession(sessionId);
-      if (this.sessionBusy(sessionId)) throw new HostError("SESSION_BUSY", "session is running or has queued turns");
-      // Verify the native target before any destructive changes. A retry may
-      // finish cleanup if the native file was already removed.
-      if (session.nativePath) await this.catalog.deleteFile(session.nativePath, sessionId);
-      this.queuedStarts.delete(sessionId);
-      this.catalog.forgetHistoryText(sessionId);
-      await this.extensionSnapshots.delete(sessionId);
-      await this.blobs.deleteSession(sessionId);
-      await this.meta.deleteSession(sessionId);
-      await this.emit("host", "session.deleted", { sessionId }, { sessionId });
-      return { deleted: true, sessionId };
-    });
-  }
-
-  private subscribe(params: Record<string, unknown>, _auth: AuthContext) {
+  private subscribe(params: Record<string, unknown>) {
     const scope = params.scope === "host" ? "host" : "session";
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : undefined;
     const after = params.after as Cursor | undefined;
-    // Take the resume point before replaying so the replay is contiguous with
-    // `starting`: the client continues from `starting` with nothing in between.
     const starting = this.journal.currentCursor();
     const replay = after ? this.journal.replay(scope, sessionId, after) : [];
     const id = uuid();
-    this.subscriptions.set(id, {
-      id,
-      scope,
-      sessionId,
-      buffer: []
-    });
+    this.subscriptions.set(id, { id, scope, sessionId, buffer: [] });
     return { subscriptionId: id, starting, replayComplete: true, replay };
   }
 
@@ -1528,717 +710,8 @@ export class HostService {
     return event;
   }
 
-  private async startTurn(params: Record<string, unknown>) {
-    if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
-    const sessionId = str(params.sessionId, "sessionId");
-    const input = obj(params.input);
-    const text = typeof input.text === "string" ? input.text : "";
-    const attachments = Array.isArray(input.attachments) ? input.attachments.filter((value): value is string => typeof value === "string") : [];
-    if (!text && attachments.length === 0) throw new HostError("INVALID_ARGUMENT", "message is empty");
-    if (attachments.length > 10) throw new HostError("ATTACHMENT_INVALID", "too many images");
-    const admission = params.admission === "queue" ? "queue" : "reject_if_busy";
-    const apiKey = transientApiKey(params);
-    // Single in-process writer actor per session (contract §6.2): serialize
-    // admission, reservation, and queue insertion under the session mutex.
-    const plan = await this.sessionLocks.run(sessionId, async () => {
-      const session = await this.requireSession(sessionId);
-      if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
-      const provider = await this.sessionProvider(session);
-      this.assertProviderKey(provider, apiKey, params.providerBinding);
-      if (this.shuttingDown) throw new HostError("CAPABILITY_UNAVAILABLE", "host is shutting down");
-      if (this.sessionBusy(sessionId)) {
-        if (admission === "reject_if_busy") {
-          throw new HostError("SESSION_BUSY", "session already has a running or queued turn");
-        }
-        const queue = this.queuedStarts.get(sessionId) ?? [];
-        const queuedBytes = [...this.queuedStarts.values()]
-          .flat()
-          .reduce((total, entry) => total + Buffer.byteLength(entry.text, "utf8"), 0);
-        const queuedCount = [...this.queuedStarts.values()].reduce((total, entries) => total + entries.length, 0);
-        if (
-          queue.length >= MAX_QUEUED_TURNS_PER_SESSION ||
-          queuedCount >= MAX_QUEUED_TURNS_TOTAL ||
-          queuedBytes + Buffer.byteLength(text, "utf8") > MAX_QUEUED_TEXT_BYTES_TOTAL
-        ) {
-          throw new HostError("QUEUE_FULL", "queued turn limit reached; retry after the queue drains");
-        }
-        const queuedId = uuid();
-        const queued: TurnState = {
-          id: queuedId,
-          sessionId,
-          status: "queued",
-          createdAt: new Date().toISOString(),
-          settledAt: null
-        };
-        const keyScope = providerCredentialScope(provider);
-        this.turns.set(queuedId, queued);
-        queue.push({
-          turnId: queuedId,
-          text,
-          attachmentCount: attachments.length,
-          run: async () => {
-            const fresh = await this.requireSession(sessionId);
-            if (fresh.readOnlyReason) throw new HostError("SESSION_READ_ONLY", fresh.readOnlyReason);
-            const currentProvider = await this.sessionProvider(fresh);
-            // The key is scoped to the service selected at admission, even if
-            // the same provider ID was edited to point at a different endpoint.
-            if (apiKey && providerCredentialScope(currentProvider) !== keyScope) {
-              throw new HostError("CONFLICT", "Model service changed while queued. Review the service and resend.", { field: "providerId" });
-            }
-            this.assertProviderKey(currentProvider, apiKey, params.providerBinding);
-            await this.launchTurn(fresh, queuedId, text, attachments, currentProvider, apiKey);
-          }
-        });
-        this.queuedStarts.set(sessionId, queue);
-        try {
-          await this.persistTurnBeforeStart(queued);
-        } catch (error) {
-          this.turns.delete(queuedId);
-          this.removeQueuedStart(sessionId, queuedId);
-          throw error;
-        }
-        return { kind: "queued" as const, turn: queued };
-      }
-      const turnId = uuid();
-      const placeholder: TurnState = {
-        id: turnId,
-        sessionId,
-        status: "running",
-        createdAt: new Date().toISOString(),
-        settledAt: null
-      };
-      this.turns.set(turnId, placeholder);
-      return { kind: "running" as const, turnId, session, provider };
-    });
-
-    if (plan.kind === "queued") {
-      return { turn: this.publicTurn(plan.turn) };
-    }
-
-    try {
-      const turn = await this.launchTurn(plan.session, plan.turnId, text, attachments, plan.provider, apiKey);
-      return { turn: this.publicTurn(turn) };
-    } catch (error) {
-      if (error instanceof HostError && error.code === "SESSION_READ_ONLY") {
-        await this.sessionLocks.run(sessionId, async () => {
-          await this.updateSessionWriteState(await this.requireSession(sessionId), error.message);
-        }).catch(() => undefined);
-      }
-      if (!this.turns.get(plan.turnId)?.stopRequested) {
-        await this.settleTurn(plan.turnId, "failed", "turn_start_failed").catch(() => undefined);
-      }
-      void this.drainQueue(sessionId);
-      throw error;
-    }
-  }
-
-  private removeQueuedStart(sessionId: string, turnId: string): void {
-    const queue = this.queuedStarts.get(sessionId);
-    if (!queue) return;
-    const remaining = queue.filter((entry) => entry.turnId !== turnId);
-    if (remaining.length === 0) this.queuedStarts.delete(sessionId);
-    else this.queuedStarts.set(sessionId, remaining);
-  }
-
-  private async sessionProvider(session: SessionMeta) {
-    return session.providerId
-      ? (await this.providers.list()).find((entry) => entry.id === session.providerId)
-      : undefined;
-  }
-
-  /**
-   * A provider with `authKind:"api_key"` requires the transient per-turn key:
-   * the host stores nothing. Providers with `authKind:"none"` ignore the field.
-   */
-  private assertProviderKey(provider: TurnProvider | undefined, apiKey: string | undefined, rawBinding: unknown): void {
-    if (rawBinding !== undefined) {
-      const binding = obj(rawBinding);
-      const providerId = str(binding.providerId, "providerBinding.providerId");
-      const baseUrl = str(binding.baseUrl, "providerBinding.baseUrl");
-      if (provider?.id !== providerId || provider.baseUrl !== baseUrl) {
-        throw new HostError("CONFLICT", "Model service or endpoint changed. Review its settings and retry.", { field: "providerBinding" });
-      }
-    }
-    if (provider?.authKind !== "api_key") return;
-    if (!apiKey) {
-      throw new HostError("PROVIDER_SECRET_MISSING", "apiKey is required for this provider", { field: "apiKey" });
-    }
-    if (rawBinding === undefined) {
-      throw new HostError("INVALID_ARGUMENT", "An API key requires a provider binding. Update the client and retry.", { field: "providerBinding" });
-    }
-  }
-
-  private async persistTurnBeforeStart(turn: TurnState): Promise<void> {
-    try {
-      await this.turnStore.upsert(this.toRecord(turn));
-    } catch {
-      // No provider or tool work has started. The caller can retry this request.
-      throw new HostError("CAPABILITY_UNAVAILABLE", "Unable to save the turn before starting. Retry when Host storage is available.");
-    }
-  }
-
-  private async launchTurn(
-    session: SessionMeta,
-    turnId: string,
-    text: string,
-    attachmentIds: string[],
-    provider: TurnProvider | undefined,
-    apiKey?: string
-  ): Promise<TurnState> {
-    // A turn can be canceled while it sits between admission/dequeue and the
-    // actual driver start. Never start a turn that is already terminal.
-    const turn = this.getTurn(turnId);
-    if (turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return turn;
-    const skills = this.driver.appendsPrompt ? await this.skills.activeSkills() : undefined;
-    const images = [];
-    for (const id of attachmentIds) {
-      const { dataBase64, mimeType } = await this.blobs.readForTurn(id, session.id);
-      images.push({ type: "image", data: dataBase64, mimeType });
-    }
-    // Order the reservation, possible native prompt write, and cancellation.
-    const nativePath = await this.sessionLocks.run(session.id, async () => {
-      if (turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return;
-      await this.persistTurnBeforeStart(turn);
-      if (turn.stopRequested) return;
-      let path = (await this.requireSession(session.id)).nativePath;
-      if (!path) {
-        path = await this.catalog.createFile(session.projectPath, join(this.config.dataDir, "sessions"), session.id);
-        await this.meta.updateSession(session.id, { nativePath: path });
-      }
-      if (!turn.stopRequested && !this.driver.appendsPrompt && text) {
-        await this.catalog.appendUserMessage(path, text, Date.now(), session.id);
-      }
-      return path;
-    });
-    if (!nativePath || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return turn;
-
-    let exited = false;
-    const request: AgentTurnRequest = {
-      turnId,
-      sessionId: session.id,
-      cwd: session.projectPath,
-      sessionDir: join(this.config.dataDir, "sessions"),
-      sessionFile: nativePath,
-      ...(skills ? { skills } : {}),
-      provider: provider
-        ? {
-            id: provider.id,
-            name: provider.name,
-            baseUrl: provider.baseUrl,
-            apiKey: provider.authKind === "api_key" ? (apiKey ?? null) : null,
-            authKind: provider.authKind,
-            protocol: provider.protocol,
-            models: provider.models
-          }
-        : undefined,
-      modelId: session.modelId ?? undefined,
-      thinkingLevel: session.thinkingLevel ?? undefined,
-      text,
-      images: images as never,
-      extensions: {
-        registry: this.extensions,
-        hostId: this.hostId,
-        publish: snapshot => exited ? Promise.resolve() : this.publishExtensionSnapshot(session.id, turnId, snapshot)
-      },
-      onSessionReadOnly: async (reason) => {
-        await this.sessionLocks.run(session.id, async () => {
-          await this.updateSessionWriteState(await this.requireSession(session.id), reason);
-        }).catch(() => undefined);
-      },
-      requestApproval: async (toolName: string, toolInput: unknown) => {
-        const currentSession = await this.requireSession(session.id);
-        if (this.shuttingDown || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return false;
-        if (currentSession.permissionMode === "auto") return true;
-        return this.requestApproval(currentSession, turnId, toolName, toolInput);
-      },
-      onEvent: (event) => {
-        if (exited || this.executingDrivers.get(session.id) !== turnId) return;
-        const prev = this.turnEventChains.get(turnId) ?? Promise.resolve();
-        const next = prev.then(async () => {
-          if (this.executingDrivers.get(session.id) !== turnId) return;
-          await this.handleAgentEvent(session.id, turnId, event);
-        }).catch((err) => {
-          console.error("handleAgentEvent error:", err);
-        });
-        this.turnEventChains.set(turnId, next);
-      }
-    };
-    // A driver can publish its initial extension snapshot from inside start().
-    this.executingDrivers.set(session.id, turnId);
-    let handle: AgentTurnHandle;
-    try {
-      handle = this.driver.start(request);
-    } catch (error) {
-      this.executingDrivers.delete(session.id);
-      this.turnEventChains.delete(turnId);
-      throw error;
-    }
-    turn.handle = handle;
-    const settled = this.trackWork(handle.wait().then(() => false, () => true).then(async failed => {
-      exited = true;
-      await (this.turnEventChains.get(turn.id) ?? Promise.resolve());
-      this.turnEventChains.delete(turn.id);
-      const current = this.turns.get(turn.id);
-      // A stop request drives its own terminal state. If the driver omitted
-      // its terminal event, settle after draining all of its output.
-      if (current && ACTIVE_TURN_STATUSES.has(current.status) && !current.stopRequested) {
-        await this.handleAgentEvent(session.id, turn.id, {
-          kind: failed ? "turn.failed" : "turn.completed",
-          payload: failed ? { error: "Agent turn failed; sensitive error details withheld" } : {}
-        });
-      }
-    }).finally(() => {
-      delete turn.handle;
-      if (this.executingDrivers.get(session.id) === turn.id) this.executingDrivers.delete(session.id);
-      if (!turn.stopRequested) void this.drainQueue(session.id);
-    }));
-    // A short turn may finish before the RPC response is sent. Join only work
-    // that is already queued; a turn still running settles later, not inline.
-    await Promise.race([
-      settled,
-      this.sessionLocks.run(session.id, async () => undefined)
-    ]);
-    if (exited) await settled;
-    return turn;
-  }
-
-  private toRecord(turn: TurnState): TurnRecord {
-    return {
-      id: turn.id,
-      sessionId: turn.sessionId,
-      status: turn.status,
-      createdAt: turn.createdAt,
-      settledAt: turn.settledAt,
-      ...(turn.settledReason ? { settledReason: turn.settledReason } : {})
-    };
-  }
-
-  /**
-   * Move a turn to a terminal state exactly once, persist it, drop its live
-   * output, settle its approvals, and let the queue advance. A turn that is
-   * already terminal keeps its first terminal status.
-   */
-  private async settleTurn(turnId: string, status: string, settledReason?: string, fromDriver = false): Promise<boolean> {
-    const turn = this.turns.get(turnId);
-    if (!turn) return false;
-    return this.sessionLocks.run(turn.sessionId, async () => {
-      if (!ACTIVE_TURN_STATUSES.has(turn.status) || (fromDriver && turn.stopRequested)) return false;
-      turn.status = status;
-      turn.settledAt = new Date().toISOString();
-      if (settledReason) turn.settledReason = settledReason;
-      this.liveItems.delete(turnId);
-      this.settleApprovalsForTurn(turnId);
-      await this.turnStore.upsert(this.toRecord(turn));
-      return true;
-    });
-  }
-
-  /** Contract-shaped turn view without the in-process handle. */
-  private publicTurn(turn: TurnState): Record<string, unknown> {
-    return {
-      id: turn.id,
-      sessionId: turn.sessionId,
-      status: turn.status,
-      createdAt: turn.createdAt,
-      settledAt: turn.settledAt,
-      ...(turn.settledReason ? { settledReason: turn.settledReason } : {})
-    };
-  }
-
-  private trackLiveItem(turnId: string, payload: Record<string, unknown>, tool = false): void {
-    const itemId = typeof payload.itemId === "string" ? payload.itemId : undefined;
-    if (!itemId) return;
-    let items = this.liveItems.get(turnId);
-    if (!items) {
-      items = new Map();
-      this.liveItems.set(turnId, items);
-    }
-    const existing = items.get(itemId);
-    const delta = typeof payload.delta === "string" ? payload.delta : "";
-    const toolName = typeof payload.toolName === "string" ? payload.toolName : existing?.toolName;
-    items.set(itemId, {
-      itemId,
-      itemType: tool ? "tool" : ((payload.itemType as string | undefined) ?? existing?.itemType ?? "message"),
-      kind: tool ? "tool" : ((payload.kind as string | undefined) ?? existing?.kind ?? "message"),
-      role: existing?.role ?? (tool ? undefined : "assistant"),
-      text: `${existing?.text ?? ""}${delta}`,
-      status: "streaming",
-      ...(toolName ? { toolName } : {})
-    });
-  }
-
-  private removeLiveItem(turnId: string, payload: Record<string, unknown>): void {
-    const itemId = typeof payload.itemId === "string" ? payload.itemId : undefined;
-    if (!itemId) return;
-    this.liveItems.get(turnId)?.delete(itemId);
-  }
-
-  private drainQueue(sessionId: string): Promise<void> {
-    if (this.shuttingDown) return Promise.resolve();
-    return this.trackWork(this.drainQueueOnce(sessionId));
-  }
-
-  private async drainQueueOnce(sessionId: string): Promise<void> {
-    if (this.draining.has(sessionId)) return;
-    this.draining.add(sessionId);
-    try {
-      const next = await this.sessionLocks.run(sessionId, async () => {
-        if (this.shuttingDown || this.activeTurnIdFor(sessionId)) return undefined;
-        const queue = this.queuedStarts.get(sessionId);
-        if (!queue || queue.length === 0) return undefined;
-        const item = queue.shift()!;
-        if (queue.length === 0) this.queuedStarts.delete(sessionId);
-        // Reserve the execution slot before leaving the lock. The turn keeps its
-        // id but is from now on "running" for busy checks; a cancel that arrives
-        // before the driver starts must still be able to stop it.
-        const turn = this.turns.get(item.turnId);
-        if (!turn || turn.status !== "queued") return undefined;
-        turn.status = "running";
-        turn.stopRequested = false;
-        return item;
-      });
-      if (!next) return;
-      try {
-        await next.run();
-      } catch (error) {
-        const queued = this.turns.get(next.turnId);
-        if (queued && !queued.stopRequested && ACTIVE_TURN_STATUSES.has(queued.status)) {
-          await this.settleTurn(next.turnId, "failed", "queue_start_failed").catch(() => undefined);
-          await this.sessionLocks.run(sessionId, () => this.emit("session", "turn.failed", {
-            turn: this.publicTurn(queued),
-            error: error instanceof HostError ? error.message : "Queued turn could not start."
-          }, { sessionId, turnId: next.turnId })).catch(() => undefined);
-        }
-      }
-    } finally {
-      this.draining.delete(sessionId);
-    }
-    void this.drainQueue(sessionId);
-  }
-
-  private async requestApproval(
-    session: SessionMeta,
-    turnId: string,
-    toolName: string,
-    input: unknown
-  ): Promise<boolean> {
-    const turn = this.turns.get(turnId);
-    if (this.shuttingDown || !turn || turn.stopRequested || !ACTIVE_TURN_STATUSES.has(turn.status)) return false;
-    if (this.allowedSessionTools.get(session.id)?.has(toolName)) return true;
-    if ([...this.pendingApprovals.values()].filter(pending => pending.sessionId === session.id).length >= MAX_PENDING_SESSION_APPROVALS) return false;
-    const encoded = Buffer.from(JSON.stringify(input) ?? "null", "utf8");
-    if (encoded.length > MAX_APPROVAL_INPUT_BYTES) return false;
-    if (encoded.length > APPROVAL_INLINE_BYTES) {
-      const pendingBytes = [...this.pendingApprovals.values()].reduce((total, pending) => total + (pending.fullInput?.length ?? 0), 0);
-      if (pendingBytes + encoded.length > MAX_PENDING_APPROVAL_BYTES) return false;
-    }
-    const approvalId = uuid();
-    const revision = ++this.approvalRevision;
-    const fullInput = encoded.length > APPROVAL_INLINE_BYTES ? encoded : undefined;
-    return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingApprovals.delete(approvalId);
-        resolve(false);
-      }, 24 * 60 * 60 * 1000);
-      const pending: PendingApproval = {
-        sessionId: session.id,
-        turnId,
-        toolName,
-        input: fullInput ? { preview: textPreview(encoded.subarray(0, 1024).toString("utf8"), 512) } : input,
-        ...(fullInput ? { fullInput, inputDigest: sha256(fullInput) } : {}),
-        revision,
-        resolve: (allowed) => {
-          clearTimeout(timer);
-          resolve(allowed);
-        }
-      };
-      this.pendingApprovals.set(approvalId, pending);
-      this.trackWork(this.emit(
-        "session",
-        "approval.requested",
-        { approval: this.approvalProjection(approvalId, pending) },
-        { sessionId: session.id, turnId, revision }
-      )).catch(() => {
-        clearTimeout(timer);
-        this.pendingApprovals.delete(approvalId);
-        resolve(false);
-      });
-    });
-  }
-
-  private approvalProjection(id: string, pending: PendingApproval) {
-    return {
-      id,
-      revision: pending.revision,
-      kind: "tool",
-      title: textPreview(pending.toolName, 256),
-      toolName: textPreview(pending.toolName, 256),
-      input: pending.input,
-      expiresAt: null,
-      ...(pending.fullInput ? { inputByteLength: pending.fullInput.length } : {})
-    };
-  }
-
-  private readApproval(params: Record<string, unknown>, auth: AuthContext) {
-    if (auth.device.role !== "owner") throw new HostError("FORBIDDEN", "approval requires owner");
-    const pending = this.pendingApprovals.get(str(params.approvalId, "approvalId"));
-    if (!pending?.fullInput || pending.sessionId !== str(params.sessionId, "sessionId")) {
-      throw new HostError("NOT_FOUND", "approval input is no longer available");
-    }
-    if (params.revision !== pending.revision) throw new HostError("APPROVAL_STALE", "approval revision does not match");
-    const offset = params.offset;
-    if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 || offset >= pending.fullInput.length) {
-      throw new HostError("INVALID_ARGUMENT", "approval input offset is out of range");
-    }
-    return {
-      dataBase64: pending.fullInput.subarray(offset, offset + HISTORY_TEXT_CHUNK_BYTES).toString("base64"),
-      totalBytes: pending.fullInput.length
-    };
-  }
-
-  private async respondApproval(params: Record<string, unknown>, auth: AuthContext) {
-    const approvalId = str(params.approvalId, "approvalId");
-    const pending = this.pendingApprovals.get(approvalId);
-    if (!pending) return { resolved: true, alreadyResolved: true, effectivePermissionMode: "ask" };
-    if (auth.device.role !== "owner") throw new HostError("FORBIDDEN", "approval requires owner");
-    const expectedRevision = typeof params.expectedRevision === "number"
-      ? params.expectedRevision
-      : typeof (params.context as { expectedRevision?: unknown } | undefined)?.expectedRevision === "number"
-      ? (params.context as { expectedRevision: number }).expectedRevision
-      : undefined;
-    if (expectedRevision !== undefined && expectedRevision !== pending.revision) {
-      throw new HostError("APPROVAL_STALE", "approval revision does not match");
-    }
-    const decision = str(params.decision, "decision");
-    const allowed = decision === "allow-once" || decision === "allow-session" || decision === "approve";
-    if (allowed && pending.fullInput && (expectedRevision !== pending.revision || params.inputDigest !== pending.inputDigest)) {
-      throw new HostError("INVALID_ARGUMENT", "review the full approval input before allowing this request");
-    }
-    if (decision === "allow-session") {
-      const tools = this.allowedSessionTools.get(pending.sessionId) ?? new Set<string>();
-      tools.add(pending.toolName);
-      this.allowedSessionTools.set(pending.sessionId, tools);
-    }
-    this.pendingApprovals.delete(approvalId);
-    pending.resolve(allowed);
-    await this.emit(
-      "session",
-      "approval.resolved",
-      { approvalId, status: allowed ? "allowed" : "denied" },
-      { sessionId: pending.sessionId, turnId: pending.turnId, revision: pending.revision }
-    );
-    return { resolved: true, alreadyResolved: false, effectivePermissionMode: "ask" };
-  }
-
-  /**
-   * Drop every pending approval owned by `turnId` and settle its promise as
-   * denied. Called when the turn settles (completed/failed) or is stopped, so a
-   * tool result can never be awaited by a turn that is already gone.
-   */
-  private settleApprovalsForTurn(turnId: string): void {
-    for (const [approvalId, pending] of [...this.pendingApprovals.entries()]) {
-      if (pending.turnId !== turnId) continue;
-      this.pendingApprovals.delete(approvalId);
-      pending.resolve(false);
-      // 客户端只按 `approval.resolved` 收敛卡片。turn 结束时静默丢弃待审批项，会让
-      // 「权限请求」卡片永久留在会话里（用户点它必定失败，而工具早已不在等它）。
-      void this.trackWork(this.emit(
-        "session",
-        "approval.resolved",
-        { approvalId, status: "denied" },
-        { sessionId: pending.sessionId, turnId: pending.turnId, revision: pending.revision }
-      )).catch(error => console.error("approval resolution event failed:", error));
-    }
-  }
-
-  private publishExtensionSnapshot(sessionId: string, turnId: string, snapshot: ExtensionSnapshot): Promise<void> {
-    if (this.executingDrivers.get(sessionId) !== turnId) return Promise.resolve();
-    const previous = this.turnEventChains.get(turnId) ?? Promise.resolve();
-    const next = previous.then(() => this.sessionLocks.run(sessionId, async () => {
-      await this.requireSession(sessionId);
-      const turn = this.turns.get(turnId);
-      if (!turn || this.executingDrivers.get(sessionId) !== turnId || snapshot.turnId !== turnId || snapshot.sessionId !== sessionId || snapshot.hostId !== this.hostId) return;
-      const saved = await this.extensionSnapshots.put(snapshot);
-      if (saved) await this.emit("session", "session.extensions.updated", saved, { sessionId, turnId });
-    }));
-    this.turnEventChains.set(turnId, next.catch(() => undefined));
-    return next;
-  }
-
-  private async handleAgentEvent(sessionId: string, turnId: string, event: AgentEvent) {
-    let payload = event.payload;
-    if (event.kind === "item.delta") {
-      if (typeof payload.delta === "string") payload = { ...payload, delta: textPreview(payload.delta, 32 * 1024) };
-      this.trackLiveItem(turnId, payload);
-    } else if (event.kind === "tool.started" || event.kind === "tool.updated") {
-      if (event.kind === "tool.updated" && typeof payload.delta === "string") {
-        payload = { ...payload, delta: textPreview(payload.delta, 32 * 1024) };
-      } else if (Buffer.byteLength(JSON.stringify(payload)) > LIVE_EVENT_PAYLOAD_BYTES) {
-        payload = { itemId: payload.itemId, toolName: payload.toolName, input: { omitted: "Tool input exceeds the live preview limit" } };
-      }
-      this.trackLiveItem(turnId, payload, true);
-    } else if (event.kind === "item.completed") {
-      const item = payload.item as
-        | { id?: string; role?: string; text?: unknown; content?: unknown }
-        | undefined;
-      const rawContent = item?.content;
-      // Live `item.completed` frames wrap the whole Pi message in `content`,
-      // while the history projection passes the raw content value directly.
-      const contentValue =
-        rawContent && typeof rawContent === "object" && !Array.isArray(rawContent) && "content" in rawContent
-          ? (rawContent as { content: unknown }).content
-          : rawContent;
-      if (item?.id && contentValue !== undefined) {
-        const projected = await projectContent(
-          sessionId,
-          item.id,
-          contentValue,
-          item.role ?? "assistant",
-          this.blobs
-        );
-        const mergedContent =
-          projected.attachments.length > 0 &&
-          rawContent &&
-          typeof rawContent === "object" &&
-          !Array.isArray(rawContent)
-            ? { ...(rawContent as Record<string, unknown>), content: projected.content }
-            : rawContent;
-        payload = {
-          ...payload,
-          item: {
-            ...item,
-            text:
-              typeof item.text === "string" && item.text.length > 0
-                ? item.text
-                : projected.text,
-            attachments: projected.attachments,
-            content: mergedContent
-          }
-        };
-      }
-      const completed = payload.item as Record<string, unknown> | undefined;
-      if (completed && Buffer.byteLength(JSON.stringify(payload)) > LIVE_EVENT_PAYLOAD_BYTES) {
-        const text = typeof completed.text === "string" ? completed.text : "";
-        const length = Buffer.byteLength(text, "utf8");
-        payload = {
-          item: {
-            id: item?.id, historyItemId: completed.historyItemId, itemType: completed.itemType,
-            kind: completed.kind, role: item?.role,
-            text: textPreview(text, HISTORY_TEXT_PREVIEW_BYTES), toolName: completed.toolName,
-            status: completed.status, attachments: Array.isArray(completed.attachments) ? completed.attachments.slice(0, 10) : [],
-            ...(completed.historyItemId && length > HISTORY_TEXT_PREVIEW_BYTES ? { textByteLength: length } : {})
-          }
-        };
-      }
-      if (item?.id) this.removeLiveItem(turnId, { itemId: item.id });
-    } else if (event.kind === "tool.completed") {
-      this.removeLiveItem(turnId, payload);
-      const { historyItemId, ...completion } = payload;
-      payload = completion;
-      if (Buffer.byteLength(JSON.stringify(payload)) > LIVE_EVENT_PAYLOAD_BYTES) {
-        const text = textFromToolResult(payload.result);
-        const length = Buffer.byteLength(text, "utf8");
-        payload = {
-          itemId: payload.itemId,
-          status: payload.status,
-          result: {
-            text: text ? textPreview(text, HISTORY_TEXT_PREVIEW_BYTES) : "Tool result exceeds the live preview limit",
-            ...(length > HISTORY_TEXT_PREVIEW_BYTES ? { historyItemId, textByteLength: length } : {})
-          }
-        };
-      }
-    }
-    if (event.kind === "turn.completed" || event.kind === "turn.failed") {
-      const status = event.kind === "turn.completed" ? "completed" : "failed";
-      if (!await this.settleTurn(turnId, status, undefined, true)) return;
-      const turn = this.turns.get(turnId);
-      payload = {
-        turn: turn ? this.publicTurn(turn) : { id: turnId },
-        ...(event.kind === "turn.failed" ? { error: payload.error } : {})
-      };
-    }
-    // Emit under the session lock so a concurrent snapshot capture observes a
-    // single, ordered state point (contract §6.2 step 6).
-    await this.sessionLocks.run(sessionId, () =>
-      this.emit("session", event.kind, payload, { sessionId, turnId })
-    );
-    if ((event.kind === "turn.completed" || event.kind === "turn.failed") && !this.executingDrivers.has(sessionId)) {
-      void this.drainQueue(sessionId);
-    }
-  }
-
-  private getTurn(turnId: string) {
-    const turn = this.turns.get(turnId);
-    if (!turn) throw new HostError("NOT_FOUND", "turn not found");
-    return turn;
-  }
-
-  private stopTurn(turnId: string, status: "interrupted" | "canceled") {
-    return this.turnStopLocks.run(turnId, () => this.stopTurnOnce(turnId, status));
-  }
-
-  private async stopTurnOnce(turnId: string, status: "interrupted" | "canceled") {
-    const turn = this.getTurn(turnId);
-    // Repeating an interrupt on an already-terminal turn returns the same
-    // terminal state without a second execution or event (contract §8.2).
-    if (!ACTIVE_TURN_STATUSES.has(turn.status) && turn.status !== "queued") {
-      return { turn: this.publicTurn(turn) };
-    }
-    if (turn.status === "queued") {
-      this.removeQueuedStart(turn.sessionId, turnId);
-      if (!await this.settleTurn(turnId, "canceled")) return { turn: this.publicTurn(turn) };
-      await this.sessionLocks.run(turn.sessionId, () =>
-        this.emit(
-          "session",
-          "turn.completed",
-          { turn: this.publicTurn(turn) },
-          { sessionId: turn.sessionId, turnId }
-        )
-      );
-      return { turn: this.publicTurn(turn) };
-    }
-    turn.stopRequested = true;
-    const handle = turn.handle;
-    if (handle) {
-      this.settleApprovalsForTurn(turnId);
-      await handle.abort();
-      // Release any tool approval the execution is blocked on, otherwise its
-      // `wait` never settles (deadlock). Then wait for it to actually stop; the
-      // driver resolves `wait` once its terminal event has been routed.
-      this.settleApprovalsForTurn(turnId);
-      await handle.wait().catch(() => undefined);
-      await (this.turnEventChains.get(turnId) ?? Promise.resolve());
-    }
-    // An interrupt stops the session's backlog. Cancel targets one turn, even after promotion.
-    const queued = this.queuedStarts.get(turn.sessionId);
-    if (status === "interrupted" && queued && queued.length > 0) {
-      this.queuedStarts.delete(turn.sessionId);
-      for (const entry of queued) {
-        const queuedTurn = this.turns.get(entry.turnId);
-        if (!queuedTurn || !await this.settleTurn(entry.turnId, "canceled")) continue;
-        await this.sessionLocks.run(turn.sessionId, () =>
-          this.emit(
-            "session",
-            "turn.completed",
-            { turn: this.publicTurn(queuedTurn) },
-            { sessionId: turn.sessionId, turnId: entry.turnId }
-          )
-        );
-      }
-    }
-    if (!await this.settleTurn(turnId, status)) return { turn: this.publicTurn(turn) };
-    // The frozen event list has no `turn.canceled`; cancel reuses turn.completed,
-    // matching the pre-existing behaviour, while the turn status stays `canceled`.
-    const eventKind = status === "interrupted" ? "turn.interrupted" : "turn.completed";
-    await this.sessionLocks.run(turn.sessionId, () =>
-      this.emit("session", eventKind, { turn: this.publicTurn(turn) }, { sessionId: turn.sessionId, turnId })
-    );
-    void this.drainQueue(turn.sessionId);
-    return { turn: this.publicTurn(turn) };
-  }
-
   private async createAttachment(params: Record<string, unknown>) {
-    const session = await this.requireSession(str(params.sessionId, "sessionId"));
+    const session = await this.sessionService.requireSession(str(params.sessionId, "sessionId"));
     const record = await this.blobs.create({
       sessionId: session.id,
       fileName: str(params.fileName, "fileName"),

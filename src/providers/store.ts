@@ -44,6 +44,7 @@ const EMPTY: ProviderFile = { version: 1, providers: [] };
  */
 export class ProviderStore {
   private pending: Promise<void> = Promise.resolve();
+  private cache: ProviderFile | null = null;
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.then(work);
@@ -61,13 +62,21 @@ export class ProviderStore {
   }
 
   private async load(): Promise<ProviderFile> {
+    if (this.cache) return this.cache;
     const value = await readJsonFile<ProviderFile>(this.index, structuredClone(EMPTY));
     if (value.version !== 1) throw new HostError("INTERNAL", "unsupported provider store");
+    this.cache = value;
     return value;
   }
 
   private async save(value: ProviderFile): Promise<void> {
-    await writeJsonFileAtomic(this.index, value, 0o600);
+    try {
+      await writeJsonFileAtomic(this.index, value, 0o600);
+      this.cache = value;
+    } catch (error) {
+      this.cache = null;
+      throw error;
+    }
   }
 
   private view(record: ProviderRecord) {

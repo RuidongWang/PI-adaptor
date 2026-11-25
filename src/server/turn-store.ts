@@ -15,6 +15,7 @@ export type TurnRecord = {
 type TurnFile = { version: 1; turns: TurnRecord[] };
 
 const EMPTY: TurnFile = { version: 1, turns: [] };
+const MAX_TERMINAL_TURNS = 1000;
 
 /** Statuses that mean "the host still owns a running execution". */
 export const ACTIVE_TURN_STATUSES = new Set([
@@ -35,6 +36,7 @@ export const ACTIVE_TURN_STATUSES = new Set([
 export class TurnStore {
   private readonly path: string;
   private pending: Promise<void> = Promise.resolve();
+  private cache: TurnFile | null = null;
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.then(work);
@@ -47,17 +49,42 @@ export class TurnStore {
   }
 
   private async load(): Promise<TurnFile> {
+    if (this.cache) return this.cache;
     const value = await readJsonFile<TurnFile>(this.path, structuredClone(EMPTY));
     if (value.version !== 1) throw new HostError("INTERNAL", "unsupported turn store");
+    this.cache = value;
     return value;
   }
 
   private async save(value: TurnFile): Promise<void> {
-    await writeJsonFileAtomic(this.path, value, 0o600);
+    this.pruneTerminalTurns(value);
+    try {
+      await writeJsonFileAtomic(this.path, value, 0o600);
+      this.cache = value;
+    } catch (error) {
+      this.cache = null;
+      throw error;
+    }
+  }
+
+  private pruneTerminalTurns(value: TurnFile): void {
+    const active: TurnRecord[] = [];
+    const terminal: TurnRecord[] = [];
+    for (const turn of value.turns) {
+      if (ACTIVE_TURN_STATUSES.has(turn.status)) active.push(turn);
+      else terminal.push(turn);
+    }
+    if (terminal.length <= MAX_TERMINAL_TURNS) return;
+    terminal.sort((left, right) => {
+      const a = Date.parse(left.settledAt ?? left.createdAt) || 0;
+      const b = Date.parse(right.settledAt ?? right.createdAt) || 0;
+      return a - b;
+    });
+    value.turns = [...active, ...terminal.slice(terminal.length - MAX_TERMINAL_TURNS)];
   }
 
   async all(): Promise<TurnRecord[]> {
-    return (await this.load()).turns;
+    return this.serialized(async () => (await this.load()).turns.map((turn) => ({ ...turn })));
   }
 
   async upsert(record: TurnRecord): Promise<void> {
@@ -76,6 +103,7 @@ export class TurnStore {
    */
   async reconcileAfterRestart(now = new Date()): Promise<TurnRecord[]> {
     return this.serialized(async () => {
+      this.cache = null;
       const data = await this.load();
       for (const turn of data.turns) {
         if (!ACTIVE_TURN_STATUSES.has(turn.status)) continue;
@@ -84,7 +112,7 @@ export class TurnStore {
         turn.settledReason = "agent_restarted_unconfirmed";
       }
       await this.save(data);
-      return data.turns;
+      return data.turns.map((turn) => ({ ...turn }));
     });
   }
 }

@@ -68,11 +68,11 @@ describe("RACP v2 websocket", () => {
     });
     expect(initialized.result.protocolVersion).toBe("2.0.0");
     expect(initialized.result.capabilities).toMatchObject({ directTransport: true, providerDiscovery: true });
-    const legacy = await rpc(anonymous, 10, "connection/initialize", {
+    const rejectedV1 = await rpc(anonymous, 10, "connection/initialize", {
       client: { name: "legacy", version: "1", capabilities: {} },
       protocolVersion: "1.0"
     });
-    expect(legacy.result.protocolVersion).toBe("1.0");
+    expect(rejectedV1.error.data.code).toBe("PROTOCOL_MISMATCH");
     const invalidPair = await rpc(anonymous, 11, "connection/pair", { deviceLabel: "intruder" });
     expect(invalidPair.error.data.code).toBe("PAIRING_FAILED");
     const invalidFrame = new Promise<Frame>((resolve) => anonymous.once("message", (raw) => resolve(JSON.parse(raw.toString()) as Frame)));
@@ -88,46 +88,46 @@ describe("RACP v2 websocket", () => {
     expect(paired.result.deviceToken).toMatch(/^pdt2\./);
     pairingSocket.close();
 
-    const v1Pairing = await service.createPairingToken();
-    const v1PairingSocket = await connect(url, v1Pairing.token);
-    const v1Initialized = await rpc(v1PairingSocket, 12, "connection/initialize", {
-      client: { name: "bootstrap", version: "0.0.2", capabilities: {} },
-      protocolVersion: "1.0"
+    const v2Pairing = await service.createPairingToken();
+    const v2PairingSocket = await connect(url, v2Pairing.token);
+    const v2Initialized = await rpc(v2PairingSocket, 12, "connection/initialize", {
+      client: { name: "bootstrap", version: "0.0.8", capabilities: {} },
+      protocolVersion: "2.0.0"
     });
-    expect(v1Initialized.result.protocolVersion).toBe("1.0");
-    v1PairingSocket.send(JSON.stringify({
+    expect(v2Initialized.result.protocolVersion).toBe("2.0.0");
+    v2PairingSocket.send(JSON.stringify({
       jsonrpc: "2.0",
       method: "notifications/initialized",
       params: {}
     }));
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(v1PairingSocket.readyState).toBe(WebSocket.OPEN);
-    const v1Paired = await rpc(v1PairingSocket, 13, "connection/pair", { deviceLabel: "bootstrap-device" });
-    expect(v1Paired.result.deviceToken).toMatch(/^pdt2\./);
-    v1PairingSocket.close();
+    expect(v2PairingSocket.readyState).toBe(WebSocket.OPEN);
+    const v2Paired = await rpc(v2PairingSocket, 13, "connection/pair", { deviceLabel: "bootstrap-device" });
+    expect(v2Paired.result.deviceToken).toMatch(/^pdt2\./);
+    v2PairingSocket.close();
 
-    // The v1 handshake notification must also be accepted on a device-token
+    // The handshake notification must also be accepted on a device-token
     // connection. Returning INVALID_ARGUMENT made strict clients treat the
     // handshake as failed and close the socket immediately after it opened.
-    const v1DeviceSocket = await connect(url, paired.result.deviceToken);
-    const v1DeviceInitialized = await rpc(v1DeviceSocket, 21, "connection/initialize", {
-      client: { name: "device", version: "0.0.3", capabilities: {} },
-      protocolVersion: "1.0"
+    const deviceSocket = await connect(url, paired.result.deviceToken);
+    const deviceInitialized = await rpc(deviceSocket, 21, "connection/initialize", {
+      client: { name: "device", version: "0.0.8", capabilities: {} },
+      protocolVersion: "2.0.0"
     });
-    expect(v1DeviceInitialized.result.protocolVersion).toBe("1.0");
+    expect(deviceInitialized.result.protocolVersion).toBe("2.0.0");
     const unexpected: Frame[] = [];
-    v1DeviceSocket.on("message", (raw) => unexpected.push(JSON.parse(raw.toString()) as Frame));
-    v1DeviceSocket.send(JSON.stringify({
+    deviceSocket.on("message", (raw) => unexpected.push(JSON.parse(raw.toString()) as Frame));
+    deviceSocket.send(JSON.stringify({
       jsonrpc: "2.0",
       method: "notifications/initialized",
       params: {}
     }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(unexpected).toEqual([]);
-    expect(v1DeviceSocket.readyState).toBe(WebSocket.OPEN);
-    const v1DevicePing = await rpc(v1DeviceSocket, 22, "connection/ping", {});
-    expect(v1DevicePing.result.ok).toBe(true);
-    v1DeviceSocket.close();
+    expect(deviceSocket.readyState).toBe(WebSocket.OPEN);
+    const devicePing = await rpc(deviceSocket, 22, "connection/ping", {});
+    expect(devicePing.result.ok).toBe(true);
+    deviceSocket.close();
 
     const socket = await connect(url, paired.result.deviceToken);
     const projectResult = await rpc(socket, 3, "project/register", {
@@ -467,7 +467,7 @@ describe("RACP v2 websocket", () => {
 });
 
 describe("extension integration", () => {
-  it.each(["1.0", "2.0.0"])("preserves legacy %s chat event cursors, ACK and reconnect replay without client capabilities", async protocolVersion => {
+  it.each(["2.0.0"])("preserves %s chat event cursors, ACK and reconnect replay without client capabilities", async protocolVersion => {
     const fixture = await hostFixture(new SnapshotDriver());
     const server = await startWebSocketServer(fixture.service, 0);
     const sockets: WebSocket[] = [];

@@ -232,7 +232,7 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 | project/register/update/delete | `writeContext` | project 版本/删除结果 |
 | session/create/configure/rename/archive/branch/delete | `writeContext` | session revision |
 | turn/start/interrupt/cancel | `writeContext` | turn 终态/幂等键 |
-| approval/respond、input/respond | `revisionContext` | revision + alreadyResolved |
+| `approval/respond` | `revisionContext` | revision + alreadyResolved |
 | provider/create/update/delete | `writeContext` | provider revision/删除结果 |
 | skill/install/update/delete | `writeContext` | skill 版本/删除结果 |
 | attachment/create/chunk/complete | `writeContext` | 字节数/attachment 状态 |
@@ -365,7 +365,6 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
   "activeTurn": null,
   "queuedTurns": [],
   "pendingApprovals": [],
-  "pendingInputs": [],
   "hasMoreHistory": false,
   "replayComplete": true
 }
@@ -408,7 +407,6 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 | `turn/cancel` | owner | 是 | 取消排队 turn |
 | `approval/respond` | owner | 是 | 审批 |
 | `approval/read` | owner | 否 | 读取待审批的大参数原文分段 |
-| `input/respond` | owner | 是 | AskTool 回答 |
 | `provider/list` | owner | 否 | provider 列表（无服务端密钥） |
 | `provider/create` | owner | 是 | 新建 provider |
 | `provider/update` | owner | 是 | 更新 provider 元数据（apiKey 只校验不入库） |
@@ -604,8 +602,6 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 | `tool.completed` | session | `{itemId,status,result}` |
 | `approval.requested` | session | `{approval}` |
 | `approval.resolved` | session | `{approvalId,status}` |
-| `input.requested` | session | `{input}` |
-| `input.resolved` | session | `{inputId,status}` |
 | `turn.completed` | session | `{turn}` |
 | `turn.interrupted` | session | `{turn}` |
 | `turn.failed` | session | `{turn,error}` |
@@ -690,18 +686,6 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 对含 `inputByteLength` 的审批提交允许决策时，客户端须先展示完整参数供用户审阅，再在 `approval/respond` 中携带原文字节的 SHA-256 小写十六进制 `inputDigest` 及对应的 `context.expectedRevision`。缺少有效摘要时返回 `INVALID_ARGUMENT`。拒绝仍可直接提交。Host 会拒绝无法完整审阅的超限参数，单份审批参数上限为 16 MiB。
 
 结果：`{"resolved":true,"alreadyResolved":false,"effectivePermissionMode":"ask"}`。
-
-### 8.4 `input/respond`
-
-```json
-{
-  "inputId": "input_uuid",
-  "answers": [["选项 A"]],
-  "context": {"requestId":"req","idempotencyKey":"key","expectedRevision":14}
-}
-```
-
-结果：`{"resolved":true,"alreadyResolved":false}`。答案必须是该问题声明的选项。
 
 ## 9. Provider 与模型
 

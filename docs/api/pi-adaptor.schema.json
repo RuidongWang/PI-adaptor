@@ -24,16 +24,361 @@
     }
   ],
   "$defs": {
-    "extensionDiagnostic": {"type":"object","properties":{"stage":{"type":"string"},"severity":{"type":"string"},"code":{"type":"string"},"message":{"type":"string","maxLength":1024},"occurredAt":{"type":"string","format":"date-time"}},"required":["stage","severity","code","message","occurredAt"],"additionalProperties":false},
-    "extensionInventoryEntry": {"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"configuredVersion":{"type":["string","null"]},"entryPath":{"type":"string"},"enabled":{"type":"boolean"},"compatibility":{"type":"string"},"entryState":{"type":"string"},"diagnostics":{"type":"array","maxItems":20,"items":{"$ref":"#/$defs/extensionDiagnostic"}}},"required":["id","name","configuredVersion","entryPath","enabled","compatibility","entryState","diagnostics"],"additionalProperties":false},
-    "extensionNames": {"type":"array","maxItems":200,"items":{"type":"string","maxLength":256}},
-    "extensionRuntimeEntry": {"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"configuredVersion":{"type":["string","null"]},"loadState":{"type":"string"},"skipReason":{"type":["string","null"]},"registeredTools":{"$ref":"#/$defs/extensionNames"},"activeTools":{"$ref":"#/$defs/extensionNames"},"registeredCommands":{"$ref":"#/$defs/extensionNames"},"mobileInvocable":{"const":false},"diagnostics":{"type":"array","maxItems":20,"items":{"$ref":"#/$defs/extensionDiagnostic"}}},"required":["id","name","configuredVersion","loadState","skipReason","registeredTools","activeTools","registeredCommands","mobileInvocable","diagnostics"],"additionalProperties":false},
-    "extensionSnapshot": {"type":"object","properties":{"id":{"type":"string"},"hostId":{"type":"string"},"sessionId":{"type":"string"},"turnId":{"type":"string"},"configRevision":{"type":"string"},"revision":{"type":"integer","minimum":1},"startedAt":{"type":"string","format":"date-time"},"completedAt":{"type":["string","null"],"format":"date-time"},"phase":{"type":"string"},"entries":{"type":"array","items":{"$ref":"#/$defs/extensionRuntimeEntry"}},"diagnostics":{"type":"array","maxItems":20,"items":{"$ref":"#/$defs/extensionDiagnostic"}}},"required":["id","hostId","sessionId","turnId","configRevision","revision","startedAt","completedAt","phase","entries","diagnostics"],"additionalProperties":false},
-    "params_extensionList": {"type":"object","properties":{},"additionalProperties":false},
-    "result_extensionList": {"type":"object","properties":{"hostId":{"type":"string"},"configRevision":{"type":"string"},"userLoadingEnabled":{"type":"boolean"},"capturedAt":{"type":"string","format":"date-time"},"entries":{"type":"array","items":{"$ref":"#/$defs/extensionInventoryEntry"}}},"required":["hostId","configRevision","userLoadingEnabled","capturedAt","entries"],"additionalProperties":false},
-    "params_sessionExtensions": {"type":"object","properties":{"sessionId":{"$ref":"#/$defs/id"}},"required":["sessionId"],"additionalProperties":false},
-    "result_sessionExtensions": {"type":"object","properties":{"hostId":{"type":"string"},"sessionId":{"type":"string"},"configRevision":{"type":"string"},"userLoadingEnabled":{"type":"boolean"},"runningTurnId":{"type":["string","null"]},"latestAttempt":{"anyOf":[{"$ref":"#/$defs/extensionSnapshot"},{"type":"null"}]},"previousCompleted":{"anyOf":[{"$ref":"#/$defs/extensionSnapshot"},{"type":"null"}]}},"required":["hostId","sessionId","configRevision","userLoadingEnabled","runningTurnId","latestAttempt","previousCompleted"],"additionalProperties":false},
-    "extensionEvent": {"type":"object","properties":{"scope":{"const":"session"},"kind":{"const":"session.extensions.updated"},"sessionId":{"type":"string"},"turnId":{"type":"string"},"epoch":{"type":"string"},"sequence":{"type":"integer","minimum":0},"afterSequence":{"type":"integer","minimum":0},"revision":{"type":"integer","minimum":0},"payload":{"$ref":"#/$defs/extensionSnapshot"}},"required":["scope","kind","sessionId","turnId","epoch","sequence","payload"],"additionalProperties":false},
+    "extensionDiagnostic": {
+      "type": "object",
+      "properties": {
+        "stage": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "occurredAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "stage",
+        "severity",
+        "code",
+        "message",
+        "occurredAt"
+      ],
+      "additionalProperties": false
+    },
+    "extensionInventoryEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "configuredVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entryPath": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "compatibility": {
+          "type": "string"
+        },
+        "entryState": {
+          "type": "string"
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/extensionDiagnostic"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "configuredVersion",
+        "entryPath",
+        "enabled",
+        "compatibility",
+        "entryState",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "extensionNames": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "string",
+        "maxLength": 256
+      }
+    },
+    "extensionRuntimeEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "configuredVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "loadState": {
+          "type": "string"
+        },
+        "skipReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registeredTools": {
+          "$ref": "#/$defs/extensionNames"
+        },
+        "activeTools": {
+          "$ref": "#/$defs/extensionNames"
+        },
+        "registeredCommands": {
+          "$ref": "#/$defs/extensionNames"
+        },
+        "mobileInvocable": {
+          "const": false
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/extensionDiagnostic"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "configuredVersion",
+        "loadState",
+        "skipReason",
+        "registeredTools",
+        "activeTools",
+        "registeredCommands",
+        "mobileInvocable",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "extensionSnapshot": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "hostId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "configRevision": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extensionRuntimeEntry"
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "$ref": "#/$defs/extensionDiagnostic"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "hostId",
+        "sessionId",
+        "turnId",
+        "configRevision",
+        "revision",
+        "startedAt",
+        "completedAt",
+        "phase",
+        "entries",
+        "diagnostics"
+      ],
+      "additionalProperties": false
+    },
+    "params_extensionList": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "result_extensionList": {
+      "type": "object",
+      "properties": {
+        "hostId": {
+          "type": "string"
+        },
+        "configRevision": {
+          "type": "string"
+        },
+        "userLoadingEnabled": {
+          "type": "boolean"
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/extensionInventoryEntry"
+          }
+        }
+      },
+      "required": [
+        "hostId",
+        "configRevision",
+        "userLoadingEnabled",
+        "capturedAt",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "params_sessionExtensions": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": false
+    },
+    "result_sessionExtensions": {
+      "type": "object",
+      "properties": {
+        "hostId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "configRevision": {
+          "type": "string"
+        },
+        "userLoadingEnabled": {
+          "type": "boolean"
+        },
+        "runningTurnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latestAttempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/extensionSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previousCompleted": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/extensionSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "hostId",
+        "sessionId",
+        "configRevision",
+        "userLoadingEnabled",
+        "runningTurnId",
+        "latestAttempt",
+        "previousCompleted"
+      ],
+      "additionalProperties": false
+    },
+    "extensionEvent": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "const": "session"
+        },
+        "kind": {
+          "const": "session.extensions.updated"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "epoch": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "afterSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "payload": {
+          "$ref": "#/$defs/extensionSnapshot"
+        }
+      },
+      "required": [
+        "scope",
+        "kind",
+        "sessionId",
+        "turnId",
+        "epoch",
+        "sequence",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "id": {
       "type": "string",
       "minLength": 1,
@@ -902,46 +1247,6 @@
         }
       }
     },
-    "inputRequest": {
-      "type": "object",
-      "required": [
-        "id",
-        "revision",
-        "questions"
-      ],
-      "additionalProperties": true,
-      "properties": {
-        "id": {
-          "$ref": "#/$defs/id"
-        },
-        "revision": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "questions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": [
-              "prompt",
-              "options"
-            ],
-            "properties": {
-              "prompt": {
-                "type": "string"
-              },
-              "options": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "minItems": 1
-        }
-      }
-    },
     "snapshot": {
       "type": "object",
       "properties": {
@@ -996,12 +1301,6 @@
             "$ref": "#/$defs/approvalRequest"
           }
         },
-        "pendingInputs": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/inputRequest"
-          }
-        },
         "hasMoreHistory": {
           "type": "boolean"
         },
@@ -1018,7 +1317,6 @@
         "activeTurn",
         "queuedTurns",
         "pendingApprovals",
-        "pendingInputs",
         "hasMoreHistory",
         "replayComplete"
       ],
@@ -1120,7 +1418,9 @@
     },
     "event": {
       "oneOf": [
-        {"$ref":"#/$defs/extensionEvent"},
+        {
+          "$ref": "#/$defs/extensionEvent"
+        },
         {
           "type": "object",
           "properties": {
@@ -1752,170 +2052,6 @@
               },
               "required": [
                 "approvalId",
-                "status"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "required": [
-            "scope",
-            "kind",
-            "payload"
-          ],
-          "additionalProperties": false,
-          "anyOf": [
-            {
-              "required": [
-                "epoch",
-                "sequence"
-              ],
-              "properties": {
-                "epoch": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "sequence": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              }
-            },
-            {
-              "required": [
-                "afterSequence"
-              ],
-              "properties": {
-                "afterSequence": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              }
-            }
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "scope": {
-              "const": "session"
-            },
-            "kind": {
-              "const": "input.requested"
-            },
-            "sessionId": {
-              "type": "string"
-            },
-            "epoch": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sequence": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "afterSequence": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "revision": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "turnId": {
-              "type": "string"
-            },
-            "payload": {
-              "type": "object",
-              "properties": {
-                "input": {
-                  "$ref": "#/$defs/inputRequest"
-                }
-              },
-              "required": [
-                "input"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "required": [
-            "scope",
-            "kind",
-            "payload"
-          ],
-          "additionalProperties": false,
-          "anyOf": [
-            {
-              "required": [
-                "epoch",
-                "sequence"
-              ],
-              "properties": {
-                "epoch": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "sequence": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              }
-            },
-            {
-              "required": [
-                "afterSequence"
-              ],
-              "properties": {
-                "afterSequence": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              }
-            }
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "scope": {
-              "const": "session"
-            },
-            "kind": {
-              "const": "input.resolved"
-            },
-            "sessionId": {
-              "type": "string"
-            },
-            "epoch": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sequence": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "afterSequence": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "revision": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "turnId": {
-              "type": "string"
-            },
-            "payload": {
-              "type": "object",
-              "properties": {
-                "inputId": {
-                  "$ref": "#/$defs/id"
-                },
-                "status": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "inputId",
                 "status"
               ],
               "additionalProperties": false
@@ -2752,7 +2888,18 @@
         "capabilities": {
           "type": "object",
           "properties": {
-            "extensionInventory": {"const":true}, "sessionExtensions": {"const":true}, "extensionManagement": {"const":false}, "extensionUI": {"const":false},
+            "extensionInventory": {
+              "const": true
+            },
+            "sessionExtensions": {
+              "const": true
+            },
+            "extensionManagement": {
+              "const": false
+            },
+            "extensionUI": {
+              "const": false
+            },
             "attachments": {
               "type": "boolean"
             },
@@ -3386,10 +3533,18 @@
         "textRange": {
           "type": "object",
           "properties": {
-            "itemId": { "$ref": "#/$defs/id" },
-            "offset": { "type": "integer", "minimum": 0 }
+            "itemId": {
+              "$ref": "#/$defs/id"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
-          "required": ["itemId", "offset"],
+          "required": [
+            "itemId",
+            "offset"
+          ],
           "additionalProperties": false
         }
       },
@@ -3425,10 +3580,19 @@
         "textChunk": {
           "type": "object",
           "properties": {
-            "dataBase64": { "type": "string", "maxLength": 87384 },
-            "totalBytes": { "type": "integer", "minimum": 0 }
+            "dataBase64": {
+              "type": "string",
+              "maxLength": 87384
+            },
+            "totalBytes": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
-          "required": ["dataBase64", "totalBytes"],
+          "required": [
+            "dataBase64",
+            "totalBytes"
+          ],
           "additionalProperties": false
         }
       },
@@ -3732,10 +3896,18 @@
         "providerBinding": {
           "type": "object",
           "properties": {
-            "providerId": { "$ref": "#/$defs/id" },
-            "baseUrl": { "type": "string", "minLength": 1 }
+            "providerId": {
+              "$ref": "#/$defs/id"
+            },
+            "baseUrl": {
+              "type": "string",
+              "minLength": 1
+            }
           },
-          "required": ["providerId", "baseUrl"],
+          "required": [
+            "providerId",
+            "baseUrl"
+          ],
           "additionalProperties": false
         },
         "input": {
@@ -3919,69 +4091,47 @@
     "params_approvalRead": {
       "type": "object",
       "properties": {
-        "sessionId": { "$ref": "#/$defs/id" },
-        "approvalId": { "$ref": "#/$defs/id" },
-        "revision": { "type": "integer", "minimum": 0 },
-        "offset": { "type": "integer", "minimum": 0, "maximum": 16777215 }
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "approvalId": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        }
       },
-      "required": ["sessionId", "approvalId", "revision", "offset"],
+      "required": [
+        "sessionId",
+        "approvalId",
+        "revision",
+        "offset"
+      ],
       "additionalProperties": false
     },
     "result_approvalRead": {
       "type": "object",
       "properties": {
-        "dataBase64": { "type": "string", "minLength": 4, "maxLength": 87384 },
-        "totalBytes": { "type": "integer", "exclusiveMinimum": 4096, "maximum": 16777216 }
-      },
-      "required": ["dataBase64", "totalBytes"],
-      "additionalProperties": false
-    },
-    "params_inputRespond": {
-      "type": "object",
-      "properties": {
-        "inputId": {
-          "$ref": "#/$defs/id"
+        "dataBase64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 87384
         },
-        "answers": {
-          "type": "array",
-          "items": {
-            "oneOf": [
-              {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "context": {
-          "$ref": "#/$defs/revisionContext"
+        "totalBytes": {
+          "type": "integer",
+          "exclusiveMinimum": 4096,
+          "maximum": 16777216
         }
       },
       "required": [
-        "inputId",
-        "answers",
-        "context"
-      ],
-      "additionalProperties": false
-    },
-    "result_inputRespond": {
-      "type": "object",
-      "properties": {
-        "resolved": {
-          "type": "boolean"
-        },
-        "alreadyResolved": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "resolved",
-        "alreadyResolved"
+        "dataBase64",
+        "totalBytes"
       ],
       "additionalProperties": false
     },
@@ -4475,8 +4625,54 @@
     },
     "request": {
       "oneOf": [
-        {"type":"object","properties":{"jsonrpc":{"$ref":"#/$defs/jsonRpc"},"id":{"$ref":"#/$defs/requestId"},"method":{"const":"extension/list"},"params":{"$ref":"#/$defs/params_extensionList"}},"required":["jsonrpc","id","method","params"],"additionalProperties":false},
-        {"type":"object","properties":{"jsonrpc":{"$ref":"#/$defs/jsonRpc"},"id":{"$ref":"#/$defs/requestId"},"method":{"const":"session/extensions"},"params":{"$ref":"#/$defs/params_sessionExtensions"}},"required":["jsonrpc","id","method","params"],"additionalProperties":false},
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "extension/list"
+            },
+            "params": {
+              "$ref": "#/$defs/params_extensionList"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jsonrpc": {
+              "$ref": "#/$defs/jsonRpc"
+            },
+            "id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "method": {
+              "const": "session/extensions"
+            },
+            "params": {
+              "$ref": "#/$defs/params_sessionExtensions"
+            }
+          },
+          "required": [
+            "jsonrpc",
+            "id",
+            "method",
+            "params"
+          ],
+          "additionalProperties": false
+        },
         {
           "type": "object",
           "required": [
@@ -5247,17 +5443,6 @@
         },
         {
           "type": "object",
-          "required": ["jsonrpc", "id", "method", "params"],
-          "additionalProperties": false,
-          "properties": {
-            "jsonrpc": { "$ref": "#/$defs/jsonRpc" },
-            "id": { "$ref": "#/$defs/requestId" },
-            "method": { "const": "approval/read" },
-            "params": { "$ref": "#/$defs/params_approvalRead" }
-          }
-        },
-        {
-          "type": "object",
           "required": [
             "jsonrpc",
             "id",
@@ -5273,10 +5458,10 @@
               "$ref": "#/$defs/requestId"
             },
             "method": {
-              "const": "input/respond"
+              "const": "approval/read"
             },
             "params": {
-              "$ref": "#/$defs/params_inputRespond"
+              "$ref": "#/$defs/params_approvalRead"
             }
           }
         },
@@ -5659,8 +5844,12 @@
         },
         "result": {
           "anyOf": [
-            {"$ref":"#/$defs/result_extensionList"},
-            {"$ref":"#/$defs/result_sessionExtensions"},
+            {
+              "$ref": "#/$defs/result_extensionList"
+            },
+            {
+              "$ref": "#/$defs/result_sessionExtensions"
+            },
             {
               "$ref": "#/$defs/result_initialize"
             },
@@ -5759,9 +5948,6 @@
             },
             {
               "$ref": "#/$defs/result_approvalRead"
-            },
-            {
-              "$ref": "#/$defs/result_inputRespond"
             },
             {
               "$ref": "#/$defs/result_providerList"

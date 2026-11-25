@@ -71,8 +71,12 @@ export async function createProviderRuntime(
   await runtime.setRuntimeApiKey(providerId, apiKey);
   const stream = runtime.stream.bind(runtime);
   const streamSimple = runtime.streamSimple.bind(runtime);
+  const complete = runtime.complete.bind(runtime);
+  const completeSimple = runtime.completeSimple.bind(runtime);
   runtime.stream = (...args) => modelOrigin.run(origin, () => stream(...args));
   runtime.streamSimple = (...args) => modelOrigin.run(origin, () => streamSimple(...args));
+  runtime.complete = (...args) => modelOrigin.run(origin, () => complete(...args));
+  runtime.completeSimple = (...args) => modelOrigin.run(origin, () => completeSimple(...args));
   return runtime;
 }
 

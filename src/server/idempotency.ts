@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { HostError } from "../errors.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
@@ -25,6 +26,7 @@ type IdempotencyFile = { version: 1; records: IdempotencyRecord[] };
 const EMPTY: IdempotencyFile = { version: 1, records: [] };
 /** Keys older than this are forgotten; a retry after the window is a new request. */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_DONE_RECORDS = 5000;
 
 /** Deterministic JSON encoding so two equivalent param objects share a digest. */
 function stableStringify(value: unknown): string {
@@ -75,6 +77,7 @@ export class IdempotencyStore {
   private readonly path: string;
   private pending: Promise<void> = Promise.resolve();
   private readonly requests = new KeyedMutex();
+  private cache: { data: IdempotencyFile; mtimeMs: number | null; size: number | null } | null = null;
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.then(work);
@@ -86,7 +89,21 @@ export class IdempotencyStore {
     this.path = join(dataDir, "meta", "idempotency.json");
   }
 
+  private async fileStamp(): Promise<{ mtimeMs: number | null; size: number | null }> {
+    try {
+      const info = await stat(this.path);
+      return { mtimeMs: info.mtimeMs, size: info.size };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { mtimeMs: null, size: null };
+      throw error;
+    }
+  }
+
   private async load(): Promise<IdempotencyFile> {
+    const stamp = await this.fileStamp();
+    if (this.cache && this.cache.mtimeMs === stamp.mtimeMs && this.cache.size === stamp.size) {
+      return this.cache.data;
+    }
     const value = await readJsonFile<IdempotencyFile>(this.path, structuredClone(EMPTY));
     if (value.version !== 1) throw new HostError("INTERNAL", "unsupported idempotency store");
     // Sanitize: results that carry plaintext credentials must never persist on
@@ -97,11 +114,24 @@ export class IdempotencyStore {
       (record) =>
         record.method !== "connection/rotate-token" && record.method !== "device/pairing-token"
     );
+    this.cache = { data: value, ...stamp };
     return value;
   }
 
   private async save(value: IdempotencyFile): Promise<void> {
-    await writeJsonFileAtomic(this.path, value, 0o600);
+    const pendingRecords = value.records.filter((record) => record.state === "pending");
+    const doneRecords = value.records.filter((record) => record.state !== "pending");
+    if (doneRecords.length > MAX_DONE_RECORDS) {
+      doneRecords.sort((left, right) => (Date.parse(left.createdAt) || 0) - (Date.parse(right.createdAt) || 0));
+      value.records = [...pendingRecords, ...doneRecords.slice(doneRecords.length - MAX_DONE_RECORDS)];
+    }
+    try {
+      await writeJsonFileAtomic(this.path, value, 0o600);
+      this.cache = { data: value, ...(await this.fileStamp()) };
+    } catch (error) {
+      this.cache = null;
+      throw error;
+    }
   }
 
   /**

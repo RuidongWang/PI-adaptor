@@ -138,7 +138,9 @@ it("applies the endpoint policy in test-named data directories and to resolved c
 });
 
 function makeService(config: ReturnType<typeof parseHostConfig>, driver: AgentDriver): HostService {
-  const service = new HostService(config, driver);
+  const service = new HostService(config, driver, {
+    testOnly: { lookup: async () => [{ address: "93.184.216.34" }] }
+  });
   onTestFinished(() => service.shutdown());
   return service;
 }

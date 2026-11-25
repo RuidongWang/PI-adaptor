@@ -128,7 +128,7 @@ async function makeDirectFixture(overrides: Partial<HostConfig["direct"]> = {}):
 
 function connectDirect(
   fixture: DirectFixture,
-  protocol = V1,
+  protocol = V2,
   token = fixture.device.deviceToken
 ): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
@@ -181,7 +181,7 @@ function notifyInitialized(socket: WebSocket): void {
   socket.send(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }));
 }
 
-async function initializeDirect(socket: WebSocket, id: number, protocolVersion: "1.0" | "2.0.0"): Promise<Frame> {
+async function initializeDirect(socket: WebSocket, id: number, protocolVersion: "2.0.0" = "2.0.0"): Promise<Frame> {
   const initialized = await rpc(socket, id, "connection/initialize", { protocolVersion });
   expect(initialized.error).toBeUndefined();
   notifyInitialized(socket);
@@ -204,7 +204,7 @@ function upgradeError(
         Upgrade: "websocket",
         "Sec-WebSocket-Version": "13",
         "Sec-WebSocket-Key": randomBytes(16).toString("base64"),
-        "Sec-WebSocket-Protocol": options.protocol ?? V1,
+        "Sec-WebSocket-Protocol": options.protocol ?? V2,
         ...(options.token === undefined ? {} : { Authorization: `Bearer ${options.token}` })
       }
     }, (response) => {
@@ -375,36 +375,29 @@ describe("native direct HTTPS/WSS entry", () => {
     expect((await upgradeError(fixture, { token: "not-a-device-token" })).status).toBe(401);
     expect((await upgradeError(fixture, { path: `${DIRECT_PATH}?token=secret` })).status).toBe(404);
     expect((await upgradeError(fixture, { path: `${DIRECT_PATH}/` })).status).toBe(404);
+    expect((await upgradeError(fixture, { protocol: V1 })).status).toBe(400);
     expect((await upgradeError(fixture, { protocol: "pi-racp.v3.jsonrpc" })).status).toBe(400);
 
-    const v1 = await connectDirect(fixture, V1);
-    const initialized = await rpc(v1, 1, "connection/initialize", { protocolVersion: "1.0" });
-    expect(initialized.result.protocolVersion).toBe("1.0");
+    const v2 = await connectDirect(fixture, V2);
+    const initialized = await rpc(v2, 1, "connection/initialize", { protocolVersion: "2.0.0" });
+    expect(initialized.result.protocolVersion).toBe("2.0.0");
     expect(initialized.result.capabilities.directTransport).toBe(true);
     expect(initialized.result.capabilities.providerDiscovery).toBe(true);
-    notifyInitialized(v1);
-    const ping = await rpc(v1, 2, "connection/ping");
+    expect((await rpc(v2, 5, "connection/initialize", { protocolVersion: "1.0" })).error.data.code).toBe("PROTOCOL_MISMATCH");
+    notifyInitialized(v2);
+    const ping = await rpc(v2, 2, "connection/ping");
     expect(ping.result).toMatchObject({ ok: true, pong: true, hostId: fixture.service.hostId });
     expect(Date.parse(ping.result.serverTime)).toBeGreaterThan(0);
-    const wrongV1 = await rpc(v1, 3, "connection/initialize", { protocolVersion: "2.0.0" });
-    expect(wrongV1.error.data.code).toBe("PROTOCOL_MISMATCH");
-
-    const v2 = await connectDirect(fixture, V2);
-    expect((await rpc(v2, 4, "connection/initialize", { protocolVersion: "2.0.0" })).result.protocolVersion).toBe("2.0.0");
-    notifyInitialized(v2);
-    expect((await rpc(v2, 5, "connection/initialize", { protocolVersion: "1.0" })).error.data.code).toBe("PROTOCOL_MISMATCH");
 
     const devicesBefore = (await fixture.service.tokens.listDevices()).length;
-    const pairClosed = new Promise<number>((resolve) => v1.once("close", (code) => resolve(code)));
-    const pair = await rpc(v1, 6, "connection/pair", { deviceLabel: "must-not-pair" });
+    const pairClosed = new Promise<number>((resolve) => v2.once("close", (code) => resolve(code)));
+    const pair = await rpc(v2, 6, "connection/pair", { deviceLabel: "must-not-pair" });
     expect(pair.error.data.code).toBe("FORBIDDEN");
     expect(await pairClosed).toBe(1008);
     expect((await fixture.service.tokens.listDevices()).length).toBe(devicesBefore);
     await expect(fixture.service.tokens.pair(fixture.pairingToken, "still-available")).resolves.toMatchObject({
       deviceId: expect.any(String)
     });
-
-    await closeSocket(v2);
   });
 });
 
@@ -442,7 +435,7 @@ describe("direct admission, frames, and shared revocation", () => {
   it("enforces R after upgrade with a structured error and rate-limited close", async () => {
     const fixture = await makeDirectFixture({ messageRateCount: 4, messageRateWindowMs: 1_000 });
     const socket = await connectDirect(fixture);
-    await initializeDirect(socket, 10, "1.0");
+    await initializeDirect(socket, 10, "2.0.0");
     await rpc(socket, 1, "connection/ping");
     await rpc(socket, 2, "connection/ping");
     const closed = new Promise<{ code: number; reason: string }>((resolve) => {
@@ -466,7 +459,7 @@ describe("direct admission, frames, and shared revocation", () => {
     });
     const socket = await connectDirect(fixture);
     try {
-      await initializeDirect(socket, 1, "1.0");
+      await initializeDirect(socket, 1, "2.0.0");
       const digest = createHash("sha256");
       let offset = 0;
       let request = 2;
@@ -502,7 +495,7 @@ describe("direct admission, frames, and shared revocation", () => {
     await fixture.service.meta.updateSession(sessionId, { nativePath: file });
     const socket = await connectDirect(fixture);
     try {
-      await initializeDirect(socket, 1, "1.0");
+      await initializeDirect(socket, 1, "2.0.0");
       const digest = createHash("sha256");
       let request = 2;
       for (let offset = 0; offset < totalBytes;) {
@@ -543,7 +536,7 @@ describe("direct admission, frames, and shared revocation", () => {
     expect(response).toContain("authentication_timeout");
     expect(response).not.toContain("1008");
     const recovered = await connectDirect(fixture);
-    await initializeDirect(recovered, 1, "1.0");
+    await initializeDirect(recovered, 1, "2.0.0");
     await closeSocket(recovered);
   });
 
@@ -620,7 +613,7 @@ describe("direct admission, frames, and shared revocation", () => {
     await expect(startDirectWebSocketServer(fixture.service, fixture.config.direct, fixture.registry)).rejects.toThrow(/EADDRINUSE/);
     expect(fixture.server.port).toBe(fixture.config.direct.port);
     const socket = await connectDirect(fixture);
-    await initializeDirect(socket, 10, "1.0");
+    await initializeDirect(socket, 10, "2.0.0");
     expect((await rpc(socket, 1, "connection/ping")).result.hostId).toBe(fixture.service.hostId);
     await closeSocket(socket);
   });
@@ -636,7 +629,7 @@ describe("direct admission, frames, and shared revocation", () => {
       socket.once("error", reject);
     });
     const direct = await connectDirect(fixture);
-    await initializeDirect(direct, 20, "1.0");
+    await initializeDirect(direct, 20, "2.0.0");
     await rpc(loop, 1, "events/subscribe", { scope: "host" });
     await rpc(direct, 2, "events/subscribe", { scope: "host" });
     const loopClosed = new Promise<{ code: number; reason: string }>((resolve) => {
@@ -670,7 +663,7 @@ describe("direct handshake and credential lifecycle", () => {
     const fixture = await makeDirectFixture();
     const socket = await connectDirect(fixture);
     expect((await rpc(socket, 1, "connection/ping")).error.data.code).toBe("PROTOCOL_MISMATCH");
-    expect((await rpc(socket, 2, "connection/initialize", { protocolVersion: "1.0" })).result.protocolVersion).toBe("1.0");
+    expect((await rpc(socket, 2, "connection/initialize", { protocolVersion: "2.0.0" })).result.protocolVersion).toBe("2.0.0");
     expect((await rpc(socket, 3, "connection/ping")).error.data.code).toBe("PROTOCOL_MISMATCH");
     const frames: Frame[] = [];
     socket.on("message", (raw) => frames.push(JSON.parse(raw.toString()) as Frame));
@@ -687,7 +680,7 @@ describe("direct handshake and credential lifecycle", () => {
   it("closes method-level unauthorized sockets and synchronously releases their subscriptions", async () => {
     const fixture = await makeDirectFixture();
     const socket = await connectDirect(fixture);
-    await initializeDirect(socket, 1, "1.0");
+    await initializeDirect(socket, 1, "2.0.0");
     await rpc(socket, 2, "events/subscribe", { scope: "host" });
     await fixture.service.tokens.revoke(fixture.device.deviceId);
     const closed = new Promise<{ code: number; reason: string }>((resolve) => {
@@ -706,7 +699,7 @@ describe("direct handshake and credential lifecycle", () => {
   it("makes registry unsubscribe and repeated release idempotent without closing the socket", async () => {
     const fixture = await makeDirectFixture();
     const socket = await connectDirect(fixture);
-    await initializeDirect(socket, 1, "1.0");
+    await initializeDirect(socket, 1, "2.0.0");
     const subscribed = await rpc(socket, 2, "events/subscribe", { scope: "host" });
     const id = subscribed.result.subscriptionId as string;
     expect((fixture.service as any).subscriptions.size).toBe(1);
@@ -725,8 +718,8 @@ describe("direct handshake and credential lifecycle", () => {
     const fixture = await makeDirectFixture();
     const owner = await connectDirect(fixture);
     const other = await connectDirect(fixture);
-    await initializeDirect(owner, 1, "1.0");
-    await initializeDirect(other, 2, "1.0");
+    await initializeDirect(owner, 1, "2.0.0");
+    await initializeDirect(other, 2, "2.0.0");
     const subscribed = await rpc(owner, 3, "events/subscribe", { scope: "host" });
     const subscriptionId = subscribed.result.subscriptionId as string;
     const ownerEntry = [...(fixture.registry as any).bySocket.values()]
@@ -745,7 +738,7 @@ describe("direct handshake and credential lifecycle", () => {
       expect((fixture.service as any).subscriptions.has(subscriptionId)).toBe(false);
     });
     const reopened = await connectDirect(fixture);
-    await initializeDirect(reopened, 20, "1.0");
+    await initializeDirect(reopened, 20, "2.0.0");
     const second = await rpc(reopened, 21, "events/subscribe", { scope: "host" });
     const secondId = second.result.subscriptionId as string;
     expect((await rpc(reopened, 22, "events/unsubscribe", { subscriptionId: secondId })).result.unsubscribed).toBe(true);
@@ -758,7 +751,7 @@ describe("direct handshake and credential lifecycle", () => {
   it("closes only the previous credential generation across listeners after rotation confirmation", async () => {
     const fixture = await makeDirectFixture();
     const oldDirect = await connectDirect(fixture);
-    await initializeDirect(oldDirect, 1, "1.0");
+    await initializeDirect(oldDirect, 1, "2.0.0");
     await rpc(oldDirect, 2, "events/subscribe", { scope: "host" });
     const loopback = await startWebSocketServer(fixture.service, 0, fixture.registry);
     onTestFinished(() => loopback.close());
@@ -771,8 +764,8 @@ describe("direct handshake and credential lifecycle", () => {
     });
     await rpc(oldLoop, 3, "events/subscribe", { scope: "host" });
     const rotated = await fixture.service.tokens.rotate(fixture.device.deviceId);
-    const newDirect = await connectDirect(fixture, V1, rotated.deviceToken);
-    await initializeDirect(newDirect, 4, "1.0");
+    const newDirect = await connectDirect(fixture, V2, rotated.deviceToken);
+    await initializeDirect(newDirect, 4, "2.0.0");
     const newSubscription = await rpc(newDirect, 5, "events/subscribe", { scope: "host" });
     const oldEvents: Frame[] = [];
     oldDirect.on("message", (raw) => {

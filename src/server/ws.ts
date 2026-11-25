@@ -10,9 +10,8 @@ import { HISTORY_TEXT_CHUNK_BYTES, HostService } from "./host-service.js";
 import { MAX_IMAGE_BYTES, MAX_READ_CHUNK_BYTES } from "../media/blob-store.js";
 
 const RACP_PATH = "/v1/racp/ws";
-const V1_PROTOCOL = "pi-racp.v1.jsonrpc";
 const V2_PROTOCOL = "pi-racp.v2.jsonrpc";
-type RacpProtocol = typeof V1_PROTOCOL | typeof V2_PROTOCOL;
+type RacpProtocol = typeof V2_PROTOCOL;
 type ListenerKind = "loopback" | "direct";
 type DirectHandshake = { stage: "initialize" | "initialized" | "ready" };
 
@@ -238,7 +237,7 @@ function requestedProtocol(request: IncomingMessage): RacpProtocol | null {
   if (!raw) return null;
   const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
   if (values.length !== 1) return null;
-  return values[0] === V1_PROTOCOL || values[0] === V2_PROTOCOL ? values[0] : null;
+  return values[0] === V2_PROTOCOL ? values[0] : null;
 }
 
 function trustFrom(identity: DirectTlsIdentity): DirectTrustMetadata {
@@ -650,7 +649,7 @@ async function handleMessage(
         return;
       }
       if (handshake.stage === "initialize") {
-        const expected = protocol === V1_PROTOCOL ? "1.0" : "2.0.0";
+        const expected = "2.0.0";
         const actual = (frame.params as { protocolVersion?: unknown } | undefined)?.protocolVersion;
         if (frame.method !== "connection/initialize" || actual !== expected) {
           throw new HostError("PROTOCOL_MISMATCH", "connection/initialize with a matching protocolVersion is required");
@@ -669,13 +668,6 @@ async function handleMessage(
     } else if (!token || !token.startsWith("ppt2.")) {
       throw new HostError("UNAUTHORIZED", "a device or pairing token is required");
     }
-    // The frozen v1 handshake sends `notifications/initialized` (a notification:
-    // no id, no response) after `connection/initialize`. It carries no authority
-    // and must never be dispatched as a business method on the loopback listener.
-    // Returning an INVALID_ARGUMENT error here breaks the contract: strict clients
-    // treat an error frame for the initialization notification as a handshake
-    // failure and close the socket immediately after it was established. Accept it
-    // for both a valid device token (authenticated above) and a pairing token.
     if (listener === "loopback" && frame.method === "notifications/initialized") {
       if (frame.id !== undefined && frame.id !== null) {
         throw new HostError("PROTOCOL_MISMATCH", "notifications/initialized must not carry an id");

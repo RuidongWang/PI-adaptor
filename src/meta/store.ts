@@ -42,6 +42,7 @@ const EMPTY: MetaFile = { version: 1, projects: [], sessions: [] };
 
 export class MetaStore {
   private pending: Promise<void> = Promise.resolve();
+  private cache: MetaFile | null = null;
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
     const result = this.pending.then(work);
@@ -56,13 +57,21 @@ export class MetaStore {
   }
 
   private async load(): Promise<MetaFile> {
+    if (this.cache) return this.cache;
     const value = await readJsonFile<MetaFile>(this.path, structuredClone(EMPTY));
     if (value.version !== 1) throw new HostError("INTERNAL", "unsupported catalog version");
+    this.cache = value;
     return value;
   }
 
   private async save(value: MetaFile): Promise<void> {
-    await writeJsonFileAtomic(this.path, value, 0o600);
+    try {
+      await writeJsonFileAtomic(this.path, value, 0o600);
+      this.cache = value;
+    } catch (error) {
+      this.cache = null;
+      throw error;
+    }
   }
 
   async listProjects(includeArchived = true): Promise<ProjectRecord[]> {

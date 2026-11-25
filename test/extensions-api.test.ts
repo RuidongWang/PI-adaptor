@@ -8,9 +8,10 @@ const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 async function setup(driver = new SnapshotDriver()) { const fixture = await hostFixture(driver); roots.push(fixture.root); return { ...fixture, driver }; }
 describe("extensions API", () => {
-  it("advertises both protocol versions, requires authentication, and returns authoritative null without mutating revision/journal", async () => {
+  it("advertises v2 protocol version, requires authentication, and returns authoritative null without mutating revision/journal", async () => {
     const { service, auth, sessionId } = await setup();
-    for (const protocolVersion of ["1.0", "2.0.0"]) expect((await service.initialize({ protocolVersion })).capabilities).toMatchObject({ extensionInventory: true, sessionExtensions: true, extensionManagement: false, extensionUI: false });
+    expect((await service.initialize({ protocolVersion: "2.0.0" })).capabilities).toMatchObject({ extensionInventory: true, sessionExtensions: true, extensionManagement: false, extensionUI: false });
+    await expect(service.initialize({ protocolVersion: "1.0" })).rejects.toMatchObject({ code: "PROTOCOL_MISMATCH" });
     await expect(service.handle("extension/list", {}, null)).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     const before = await service.meta.getSession(sessionId), cursor = service.journal.currentCursor();
     expect(await service.handle("extension/list", {}, auth)).toMatchObject({ userLoadingEnabled: false, entries: [] });

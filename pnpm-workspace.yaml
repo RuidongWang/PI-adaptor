@@ -6,3 +6,8 @@ strictDepBuilds: false
 overrides:
   undici: ">=8.12.2"
   minimatch: ">=11.0.1"
+
+allowBuilds:
+  '@google/genai': set this to true or false
+  esbuild: set this to true or false
+  protobufjs: set this to true or false
