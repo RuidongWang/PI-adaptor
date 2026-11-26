@@ -297,7 +297,7 @@ export function parseHostConfig(
     pair: args.includes("--pair") || env.PI_ADAPTOR_PAIR === "1" || fileConfig.pair === true,
     hostId: valueAfter(args, "--host-id") ?? env.PI_ADAPTOR_HOST_ID ?? fileConfig.hostId ?? "",
     hostVersion: HOST_VERSION,
-    piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.3.0",
+    piVersion: env.PI_CODING_AGENT_VERSION ?? fileConfig.piVersion ?? "1.6.0",
     direct: parseDirectConfig(args, env, fileConfig),
     extensions: parseExtensionsConfig(fileConfig.extensions)
   };
