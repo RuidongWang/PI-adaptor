@@ -2863,6 +2863,10 @@
                 "$ref": "#/$defs/permissionMode"
               }
             },
+            "allowedSessionModes": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/sessionMode" }
+            },
             "maxImageBytes": {
               "type": "integer",
               "minimum": 1

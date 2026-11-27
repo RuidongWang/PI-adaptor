@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { ensureHostDirectories, loadHostConfig } from "./config.js";
-import { DeterministicAgentDriver, PiAgentDriver } from "./agent/driver.js";
+import { DeterministicAgentDriver } from "./agent/driver.js";
+import { WorkerAgentDriver } from "./agent/worker-driver.js";
 import { applyProviderSeed, loadProviderSeed } from "./providers/seed.js";
 import { directTrustLine, invalidateDirectTrustFile, pairingTokenLine, readyLine, removeDirectTrustFile, removeStaleDirectTrustFile, writeDirectTrustFile, type DirectTrustOutput } from "./bootstrap-output.js";
 import { DirectTlsError } from "./security/direct-tls.js";
@@ -56,7 +57,7 @@ await writeFile(join(config.runDir, "host.pid"), `${process.pid}\n`, { mode: 0o6
 const useDeterministic = process.env.PI_ADAPTOR_DETERMINISTIC === "1";
 const driver = useDeterministic
   ? new DeterministicAgentDriver()
-  : new PiAgentDriver(config.agentDir);
+  : new WorkerAgentDriver(config.agentDir);
 const service = new HostService(config, driver);
 const { removedLegacySecrets } = await service.init();
 // Provider keys are no longer persisted; announce the one-time cleanup by count

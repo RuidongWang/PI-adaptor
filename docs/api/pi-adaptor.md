@@ -98,6 +98,7 @@
   "policy": {
     "defaultPermissionMode": "ask",
     "allowedPermissionModes": ["ask", "auto"],
+    "allowedSessionModes": ["agent"],
     "maxImageBytes": 20971520,
     "maxImagesPerMessage": 10,
     "approvalDisconnectSeconds": 86400
@@ -220,6 +221,8 @@ Host 只持久化令牌 SHA-256 哈希，不保存明文。设备记录至少包
 ```
 
 同一幂等键收到不同参数时返回 `IDEMPOTENCY_CONFLICT`；同参数重试必须返回第一次结果或明确的 `CONFLICT`。过期幂等键也必须返回明确错误，不得当作新请求。
+
+回执窗口为 24 小时。回收过期回执前，Host 先在 `meta/expired-idempotency.sqlite` 持久保存设备与键的联合摘要；备份和恢复必须包含此文件以及 `meta/idempotency.json`。摘要不保存回执、请求正文或凭证。普通写入额度满时，新请求返回 `RATE_LIMITED`，设备撤销不占用这一额度，但仍执行相同的键冲突和重放检查。
 
 幂等矩阵：
 
@@ -510,6 +513,8 @@ Host 对每个会话只允许一个 in-process writer actor。actor 写入顺序
 
 结果：`{"items":[],"hasMore":false,"revision":12}`。
 
+快照、分页和正文分块只返回原生当前叶节点所在分支的历史，不混入兄弟分支。附件回收例外：必须遍历所有分支的持久引用。
+
 若历史项单独超出响应预算，Host 返回正文预览；存在 `textByteLength` 时，该值是原文的 UTF-8 字节数。
 读取原文时发送 `{"sessionId":"session-id","textRange":{"itemId":"item-id","offset":0}}`，不可同时传分页参数。
 原文响应沿用上述字段（`items` 为空、`hasMore` 为 false），增加
@@ -534,6 +539,10 @@ Host 对每个会话只允许一个 in-process writer actor。actor 写入顺序
 
 结果：`{"session":{}}`。运行中会话允许修改未来 turn 的配置，但不得改变当前 turn 的 provider/model；权限模式变更从下一次工具调用开始生效。
 
+切换 provider/model 时按目标模型声明解析思考档位：优先保留支持的请求值或当前值，否则采用有效默认值、首个声明值或 `null`。仅修改权限或模式不重置档位。客户端以响应中的 `session.thinkingLevel` 为准；显式 `null` 表示清空。
+
+新建和修改会话都只接受当前 Host 声明的模式。未实现计划审批执行器的 Host 拒绝 `plan`（`CAPABILITY_UNAVAILABLE`），不自动改为 `agent`；已有 Plan 会话必须显式切换为 Agent 后才能开始轮次。不支持的权限值返回 `INVALID_ARGUMENT`，不增加 revision。
+
 ### 6.7 `session/rename`
 
 请求：`{"sessionId":"session-id","title":"新标题","context":{"requestId":"req","idempotencyKey":"key"}}`。结果：`{"session":{}}`。标题写入 Pi `session_info`。
@@ -546,15 +555,27 @@ Host 对每个会话只允许一个 in-process writer actor。actor 写入顺序
 
 请求：`{"sessionId":"session-id","fromItemId":"item-id","title":"optional","context":{"requestId":"req","idempotencyKey":"key"}}`。结果：`{"session":{}}`。新会话文件为 Pi v3 JSONL，父路径写入 `parentSession`；原会话不改。
 
+普通会话和分支都在元数据提交后发布 `session.created`。同设备同键重试复用原会话；已提交但未确认的通知在 Host 启动时继续处理。
+
 ### 6.10 `session/delete`
 
 请求：`{"sessionId":"session-id","confirmSessionId":"session-id","context":{"requestId":"req","idempotencyKey":"key"}}`。结果：`{"deleted":true,"sessionId":"session-id"}`。
 
 拒绝条件：运行中、有排队 turn、被其他活动会话引用、目标不匹配、JSONL 在校验后发生变化。
 
+删除先持久化 tombstone 和待清理的文件身份，之后才移除原生文件及附属数据。已标记的会话不可再启动或列出；同键重试、Host 启动及周期维护可继续未完成的清理。恢复时不能删除原路径上被替换的新文件。
+
 ### 6.11 项目与会话 tombstone
 
 Host 持久化 project tombstone 与 session archive tombstone。目录扫描只产生候选；被 tombstone 覆盖的原生目录/会话不得重新出现在主列表。恢复显式取消 tombstone 后才可重新注册。原生会话文件外部消失时，Host 将对应会话标记 `session.deleted` 并保留 tombstone，不重建。
+
+列表对账须确认会话空闲、父目录可枚举且原路径确实不存在；根目录离线、扫描遗漏或无权读取本身不能作为删除证据。
+
+只要本次扫描还有未能检查的根目录、子目录或身份不明的文件，仍返回可见会话，但暂不因文件缺失而写入删除标记或清理附件。占位记录所在路径恢复出可验证的真实会话后，列表对账在同一次元数据保存中清退路径占位记录；不删除正文，也不发送 `session.deleted`。
+
+原文件改名后，仅当原路径确认消失且扫描到唯一、可验证的同 ID 文件时才更新路径。身份不明确时不得报告删除成功。
+
+首次写入在配置的 `sessionDir` 创建正文。刷新及首次写入重试会重新关联唯一可验证的原文件，并兼容旧默认目录中的正文。遇到重复 ID 时，列表保留其他会话并在该条目标记 `external_write_conflict`；访问冲突会话返回 `CONFLICT`。
 
 ## 7. 事件
 
@@ -575,6 +596,8 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 `scope:"host"` 时忽略 `sessionId`。
 
 `events/ack`：`{"subscriptionId":"sub_uuid","sequence":42}`。
+
+ACK 仅推进本连接对应订阅的已投递游标。回放和实时事件共享每订阅 512 个未确认事件、2 MiB 未确认字节的上限，并检查 WebSocket 待发送字节。回放超限返回 `CLIENT_TOO_SLOW`；已建立的慢订阅收到 `events/closed`、`CLIENT_TOO_SLOW` 和 `lastSafeCursor`。客户端重建快照或重订阅，不必断开其他订阅。
 
 游标无法满足时返回 `CURSOR_EXPIRED`；客户端必须调用 `session/attach` 或重新拉取目录。
 
@@ -687,6 +710,8 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 
 结果：`{"resolved":true,"alreadyResolved":false,"effectivePermissionMode":"ask"}`。
 
+允许决策先持久化 `approval.resolved`，再唤醒工具或授予会话权限；写入失败不放行。工具审批投影携带 ISO 8601 `expiresAt`，到期自动拒绝，终态事件的 `status` 为 `expired`。收到 `alreadyResolved:true` 的客户端应移除对应卡片。
+
 ## 9. Provider 与模型
 
 ### 9.1 Provider 视图
@@ -749,6 +774,8 @@ Host 持久化 project tombstone 与 session archive tombstone。目录扫描只
 `provider/update` 还需 `providerId`。`apiKey` 只做校验：`authKind==="api_key"` 时必填、`none` 时禁止，校验后即丢弃；Host 从不保存密钥，因此省略 `apiKey` 不会“保留”任何服务端密钥。结果：`{"provider":{}}`。
 
 Host 不自动导入旧 `~/.pi-desktop` provider 或密钥；现有配置必须通过 iOS 重新导入或录入。响应和日志永远不得返回密钥明文。
+
+创建与更新均要求 `vendorKey` 在不同 provider 间唯一；占用其他 provider 的值返回 `CONFLICT`，不改变原记录。
 
 v2 CRUD 首版只接受 `authKind: api_key | none`。若只读外部 provider 带 OAuth 凭据，可出现在列表中但不可由 v2 新建或修改。
 

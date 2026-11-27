@@ -64,7 +64,7 @@ export type AgentTurnRequest = {
   images: ImageContent[];
   requestApproval?: ((toolName: string, input: unknown) => Promise<boolean>) | undefined;
   onSessionReadOnly?(reason: string): Promise<void>;
-  extensions?: { registry: ExtensionRegistry; hostId: string; publish(snapshot: ExtensionSnapshot): Promise<void> };
+  extensions?: { registry: Pick<ExtensionRegistry, "prepare" | "configRevision">; hostId: string; publish(snapshot: ExtensionSnapshot): Promise<void> };
   onEvent(event: AgentEvent): void;
 };
 

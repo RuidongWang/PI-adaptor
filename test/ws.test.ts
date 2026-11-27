@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -45,6 +45,35 @@ function connect(url: string, token: string): Promise<WebSocket> {
 }
 
 describe("RACP v2 websocket", () => {
+  it("bounds replay and live delivery and isolates a non-acking subscriber", async () => {
+    const fixture = await hostFixture();
+    const { service, sessionId } = fixture;
+    const server = await startWebSocketServer(service, 0);
+    const url = `ws://127.0.0.1:${server.port}/v1/racp/ws`;
+    const slow = await connect(url, fixture.token);
+    const fast = await connect(url, fixture.token);
+    const frames: Frame[] = [];
+    slow.on("message", raw => frames.push(JSON.parse(raw.toString()) as Frame));
+    try {
+      const after = service.journal.currentCursor();
+      const scope = { scope: "session", sessionId };
+      const slowID = (await rpc(slow, 1, "events/subscribe", scope)).result.subscriptionId;
+      const fastID = (await rpc(fast, 1, "events/subscribe", scope)).result.subscriptionId;
+      const payload = { text: "x".repeat(256 * 1024) };
+      let last = after;
+      for (let index = 0; index < 10; index++) {
+        const received = new Promise<Frame>(resolve => fast.once("message", raw => resolve(JSON.parse(raw.toString()) as Frame)));
+        await service["emit"]("session", "fixture", payload, { sessionId });
+        const event = (await received).params.event;
+        last = { epoch: event.epoch, sequence: event.sequence };
+        expect((await rpc(fast, index + 2, "events/ack", { subscriptionId: fastID, sequence: last.sequence })).result.acknowledged).toBe(true);
+      }
+      expect(frames.filter(frame => frame.method === "events/closed")).toMatchObject([{ params: { subscriptionId: slowID, code: "CLIENT_TOO_SLOW", lastSafeCursor: after } }]);
+      expect((await rpc(slow, 20, "events/subscribe", { ...scope, after })).error?.data.code).toBe("CLIENT_TOO_SLOW");
+      expect((await rpc(slow, 21, "events/subscribe", { ...scope, after: last })).result.replayComplete).toBe(true);
+      expect((await rpc(fast, 22, "connection/ping")).result.ok).toBe(true);
+    } finally { slow.terminate(); fast.terminate(); await server.close(); await service.shutdown(); await rm(fixture.root, { recursive: true, force: true }); }
+  });
   it("pairs, authenticates, registers a project, and streams a turn", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-ws-"));
     const project = join(root, "project");
@@ -149,9 +178,9 @@ describe("RACP v2 websocket", () => {
       mode: "plan",
       context: { requestId: "configure-plan", idempotencyKey: "configure-plan" }
     });
-    expect(plan.result.session.mode).toBe("plan");
+    expect(plan.error.data.code).toBe("CAPABILITY_UNAVAILABLE");
     const planReadBack = await rpc(socket, 41, "session/get", { sessionId });
-    expect(planReadBack.result.session.mode).toBe("plan");
+    expect(planReadBack.result.session.mode).toBe("agent");
     const agent = await rpc(socket, 42, "session/configure", {
       sessionId,
       mode: "agent",
@@ -285,7 +314,7 @@ describe("RACP v2 websocket", () => {
     await server.close();
   });
 
-  it("acknowledges a device's self-revoke before closing its socket", async () => {
+  it("acknowledges self-revoke and closes the socket even with a full ordinary idempotency window", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-revoke-"));
     const config = parseHostConfig(
       ["--data-dir", join(root, "data"), "--agent-dir", join(root, "agent"), "--port", "0"],
@@ -307,6 +336,8 @@ describe("RACP v2 websocket", () => {
     // tears the device's socket down; otherwise the client sees only a close and
     // reports an offline failure for a revoke that already took effect.
     const socket = await connect(url, paired.result.deviceToken);
+    const records = Array.from({ length: 5000 }, (_, index) => ({ key: String(index), deviceId: paired.result.deviceId, method: "attachment/chunk", digest: "d", result: 1, state: "done", createdAt: new Date().toISOString() }));
+    await writeFile(join(config.dataDir, "meta/idempotency.json"), JSON.stringify({ version: 1, records }));
     const closed = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)));
     const response = await rpc(socket, 2, "connection/revoke", {
       deviceId: paired.result.deviceId,

@@ -52,7 +52,10 @@ const IDEMPOTENT_METHODS = new Set([
 
 export type AuthContext = { device: DeviceRecord };
 export type EventSink = (event: HostEvent) => void;
+export const SUBSCRIPTION_BYTE_LIMIT = 2 * 1024 * 1024;
+export const SUBSCRIPTION_EVENT_LIMIT = 512;
 export type ConnectionEffects = {
+  acknowledge?(id: string, sequence: unknown): void;
   rotationConfirmed?(deviceId: string, previousCredentialHash: string): void;
 };
 
@@ -80,6 +83,7 @@ type Subscription = {
   sessionId: string | undefined;
   sink?: EventSink;
   buffer: HostEvent[];
+  bufferedBytes: number;
 };
 
 function str(value: unknown, field: string): string {
@@ -165,6 +169,8 @@ export class HostService {
       extensionSnapshots: this.extensionSnapshots,
       turnStore: this.turnStore,
       driver: this.driver,
+      hasTransition: (kind, sessionId, turnId) => this.journal.hasTransition(kind, sessionId, turnId),
+      confirmTerminal: turnId => this.journal.confirmTransition(turnId),
       sessionLocks: this.sessionLocks,
       getHostId: () => this.hostId,
       isShuttingDown: () => this.shuttingDown,
@@ -191,13 +197,20 @@ export class HostService {
   async init(): Promise<{ removedLegacySecrets: number }> {
     await this.extensions.initialize();
     await this.blobs.init();
-    await this.journal.load();
+    const recovered = await this.turnStore.reconcileAfterRestart();
+    const creations = (await this.meta.listSessions(true)).filter(session => session.creationEventPending ?? session.branchEventPending);
+    const deletions = await this.meta.pendingDeletions();
+    await this.journal.load(new Set([...recovered.filter(turn => turn.eventPending).map(turn => turn.id),
+      ...creations.map(session => `branch:${session.id}`), ...deletions.map(session => `deleted:${session.id}`)]));
     const hostPath = join(this.config.dataDir, "meta", "host.json");
     const stored = await readJsonFile<{ version: 1; hostId: string } | null>(hostPath, null);
     if (stored?.version === 1 && stored.hostId) this.hostId = stored.hostId;
     else await writeJsonFileAtomic(hostPath, { version: 1, hostId: this.hostId }, 0o600);
     await this.tokens.recoverUnconfirmedRotations();
-    this.turnCoordinator.seedRecoveredTurns(await this.turnStore.reconcileAfterRestart());
+    this.turnCoordinator.seedRecoveredTurns(recovered);
+    for (const record of recovered) if (record.eventPending) await this.turnCoordinator.publishPendingTerminal(record);
+    for (const session of creations) await this.sessionService.notifyCreation(session);
+    await this.sessionService.recoverDeletions();
     await this.extensionSnapshots.recover(new Set((await this.meta.listSessions(true)).map((session) => session.id)));
     const removedLegacySecrets = await this.providers.purgeLegacySecrets();
     return { removedLegacySecrets };
@@ -219,6 +232,7 @@ export class HostService {
       await this.turnCoordinator.shutdown();
       while (this.inFlight.size) await Promise.allSettled([...this.inFlight]);
       await this.tokens.waitForWrites();
+      this.idempotency.close();
     })();
     return this.shutdownPromise;
   }
@@ -240,26 +254,39 @@ export class HostService {
   }
 
   private async performMaintenance(now: Date): Promise<number> {
+    let expired = 0;
     try {
-      const { ids, hashes } = await this.collectReferencedAttachments();
-      return await this.blobs.gc(ids, hashes, now);
+      await this.sessionService.recoverDeletions();
+      expired = await this.blobs.expireUploads(now);
+      const { ids, hashes, protectedSessions } = await this.collectReferencedAttachments();
+      return expired + await this.blobs.gc(ids, hashes, now, protectedSessions);
     } catch (error) {
-      console.warn("maintenance run aborted due to history read failure:", error);
-      return 0;
+      console.warn("attachment maintenance did not finish:", error);
+      return expired;
     }
   }
 
-  private async collectReferencedAttachments(): Promise<{ ids: Set<string>; hashes: Set<string> }> {
+  private async collectReferencedAttachments() {
     const ids = new Set<string>();
     const hashes = new Set<string>();
+    const protectedSessions = new Set<string>();
     for (const session of await this.meta.listSessions(true)) {
+      if (session.nativePathConflict) { protectedSessions.add(session.id); continue; }
       if (!session.nativePath) continue;
-      const entries = await this.catalog.history(session.nativePath, session.id);
+      let entries;
+      try {
+        entries = await this.catalog.allEntriesForMaintenance(session.nativePath, session.id);
+      } catch {
+        protectedSessions.add(session.id);
+        console.warn("attachment GC retained media for unreadable session:", session.id);
+        continue;
+      }
       for (const entry of entries) {
         if (entry.type !== "message") continue;
         const content = (entry.message as { content?: unknown }).content;
         if (!Array.isArray(content)) continue;
         for (const part of content) {
+          if (!part || typeof part !== "object") continue;
           const block = part as { attachmentId?: unknown; type?: unknown; data?: unknown };
           if (typeof block.attachmentId === "string") ids.add(block.attachmentId);
           if (block.type === "image" && typeof block.data === "string") {
@@ -268,7 +295,7 @@ export class HostService {
         }
       }
     }
-    return { ids, hashes };
+    return { ids, hashes, protectedSessions };
   }
 
   async initialize(params: Record<string, unknown>) {
@@ -288,6 +315,7 @@ export class HostService {
       policy: {
         defaultPermissionMode: "ask",
         allowedPermissionModes: ["ask", "auto"],
+        allowedSessionModes: ["agent"],
         maxImageBytes: 20 * 1024 * 1024,
         maxImagesPerMessage: 10,
         approvalDisconnectSeconds: 86400
@@ -356,12 +384,20 @@ export class HostService {
       const key = idempotencyKeyFrom(params);
       if (key) {
         if (method === "session/create") return this.sessionService.createSessionWithKey(params, auth.device.deviceId, key);
+        if (method === "session/branch") {
+          const digest = requestDigest(params);
+          const id = sha256(JSON.stringify([method, auth.device.deviceId, key, digest]));
+          const branch = async (recoverOnly = false) => ({ session: this.sessionService.summarize(await this.sessionService.branchSession(params, id, recoverOnly)) });
+          return this.idempotency.run(key, method, digest, branch, auth.device.deviceId, undefined, () => branch(true));
+        }
         return this.idempotency.run(
           key,
           method,
           requestDigest(params),
           () => this.dispatch(method, params, auth, effects),
-          auth.device.deviceId
+          auth.device.deviceId,
+          undefined,
+          method === "session/delete" ? () => this.sessionService.deleteSession(params) : undefined
         );
       }
     }
@@ -452,6 +488,7 @@ export class HostService {
         str(params.subscriptionId, "subscriptionId");
         return { unsubscribed: true };
       case "events/ack":
+        effects?.acknowledge?.(str(params.subscriptionId, "subscriptionId"), params.sequence);
         return { acknowledged: true };
       case "turn/start":
         return this.turnCoordinator.startTurn(params);
@@ -673,15 +710,16 @@ export class HostService {
     const starting = this.journal.currentCursor();
     const replay = after ? this.journal.replay(scope, sessionId, after) : [];
     const id = uuid();
-    this.subscriptions.set(id, { id, scope, sessionId, buffer: [] });
+    this.subscriptions.set(id, { id, scope, sessionId, buffer: [], bufferedBytes: 0 });
     return { subscriptionId: id, starting, replayComplete: true, replay };
   }
 
   setSubscriptionSink(id: string, sink: EventSink): void {
     const subscription = this.subscriptions.get(id);
-    if (!subscription) return;
+    if (!subscription) throw new HostError("CLIENT_TOO_SLOW", "subscription is no longer active");
     subscription.sink = sink;
     const pending = subscription.buffer.splice(0);
+    subscription.bufferedBytes = 0;
     for (const event of pending) {
       sink(event);
     }
@@ -702,9 +740,12 @@ export class HostService {
       if (subscription.scope !== scope) continue;
       if (scope === "session" && subscription.sessionId !== extra.sessionId) continue;
       if (subscription.sink) {
-        subscription.sink(event);
+        try { subscription.sink(event); } catch { this.removeSubscription(subscription.id); }
       } else {
-        subscription.buffer.push(event);
+        subscription.bufferedBytes += Buffer.byteLength(JSON.stringify(event));
+        if (subscription.buffer.length >= SUBSCRIPTION_EVENT_LIMIT || subscription.bufferedBytes > SUBSCRIPTION_BYTE_LIMIT) {
+          this.removeSubscription(subscription.id);
+        } else subscription.buffer.push(event);
       }
     }
     return event;

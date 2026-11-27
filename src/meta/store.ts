@@ -28,6 +28,12 @@ export type SessionMeta = {
   createdAt: string;
   updatedAt: string;
   nativePath?: string | null;
+  previousNativePaths?: string[];
+  nativePathConflict?: boolean;
+  creationEventPending?: boolean;
+  branchEventPending?: boolean;
+  parentSession?: string;
+  deletion?: { version: string | null };
   deletedAt?: string;
   readOnlyReason?: string | null;
 };
@@ -141,18 +147,33 @@ export class MetaStore {
     return (await this.load()).sessions.filter((session) => !session.deletedAt && (includeArchived || !session.archived));
   }
 
-  async importDiscoveredSessions(sessions: SessionMeta[]): Promise<void> {
+  async importDiscoveredSessions(sessions: SessionMeta[], namedSessions: Set<string>, titlesBeforeScan: Map<string, string>): Promise<void> {
     if (sessions.length === 0) return;
     await this.serialized(async () => {
       const data = await this.load();
       const known = new Map(data.sessions.map((session) => [session.id, session]));
-      let changed = false;
+      const observedIds = new Set(sessions.map(session => session.id));
+      const superseded = new Set<string>();
+      for (const session of sessions) {
+        if (!session.nativePath || session.readOnlyReason || observedIds.has(session.nativePath)) continue;
+        const placeholder = known.get(session.nativePath);
+        if (placeholder && !placeholder.deletedAt && placeholder.nativePath === placeholder.id &&
+            placeholder.projectPath === "" && placeholder.readOnlyReason) superseded.add(placeholder.id);
+      }
+      if (superseded.size) data.sessions = data.sessions.filter(session => !superseded.has(session.id));
+      let changed = superseded.size > 0;
       for (const session of sessions) {
         const existing = known.get(session.id);
         if (existing) {
-          if (!existing.deletedAt && existing.nativePath === session.nativePath
-              && !existing.readOnlyReason && session.readOnlyReason) {
-            existing.readOnlyReason = session.readOnlyReason;
+          if (existing.deletedAt || existing.nativePath !== session.nativePath) continue;
+          const title = !session.readOnlyReason && namedSessions.has(session.id) && titlesBeforeScan.get(session.id) === existing.title
+            ? session.title : existing.title;
+          const updatedAt = session.updatedAt > existing.updatedAt ? session.updatedAt : existing.updatedAt;
+          const readOnlyReason = existing.readOnlyReason ?? session.readOnlyReason;
+          const parentChanged = session.parentSession !== undefined && session.parentSession !== existing.parentSession;
+          if (title !== existing.title || updatedAt !== existing.updatedAt || readOnlyReason !== (existing.readOnlyReason ?? null) || parentChanged) {
+            Object.assign(existing, { title, updatedAt, readOnlyReason });
+            if (session.parentSession !== undefined) existing.parentSession = session.parentSession;
             existing.revision += 1;
             changed = true;
           }
@@ -197,15 +218,30 @@ export class MetaStore {
     });
   }
 
-  async deleteSession(sessionId: string, now = new Date()): Promise<SessionMeta> {
+  async pendingDeletions(): Promise<SessionMeta[]> {
+    return (await this.load()).sessions.filter(session => session.deletion);
+  }
+
+  async finishDeletion(sessionId: string): Promise<void> {
+    await this.serialized(async () => {
+      const data = await this.load();
+      const next = data.sessions.map(session => {
+        if (session.id !== sessionId) return session;
+        const { deletion: _deletion, ...tombstone } = session;
+        return tombstone;
+      });
+      await this.save({ ...data, sessions: next });
+    });
+  }
+
+  async deleteSession(sessionId: string, now = new Date(), deletion?: { version: string | null }): Promise<SessionMeta> {
     return this.serialized(async () => {
       const data = await this.load();
       const session = data.sessions.find((entry) => entry.id === sessionId);
       if (!session) throw new HostError("NOT_FOUND", "session not found");
-      session.deletedAt = now.toISOString();
-      session.updatedAt = now.toISOString();
-      await this.save(data);
-      return session;
+      const deleted = { ...session, deletedAt: now.toISOString(), updatedAt: now.toISOString(), ...(deletion ? { deletion } : {}) };
+      await this.save({ ...data, sessions: data.sessions.map(entry => entry.id === sessionId ? deleted : entry) });
+      return deleted;
     });
   }
 }

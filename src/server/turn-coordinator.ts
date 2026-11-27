@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { AgentDriver, textFromToolResult, type AgentEvent, type AgentTurnHandle, type AgentTurnRequest } from "../agent/driver.js";
 import type { HostConfig } from "../config.js";
 import { HostError } from "../errors.js";
@@ -54,6 +53,8 @@ export type TurnState = {
 };
 
 export type PendingApproval = {
+  expiresAt: number;
+  retryDenial: () => void;
   sessionId: string;
   turnId: string;
   toolName: string;
@@ -118,6 +119,8 @@ export type TurnCoordinatorDeps = {
   turnStore: TurnStore;
   driver: AgentDriver;
   sessionLocks: KeyedMutex;
+  hasTransition: (kind: string, sessionId: string, turnId: string) => boolean;
+  confirmTerminal: (turnId: string) => void;
   getHostId: () => string;
   isShuttingDown: () => boolean;
   trackWork: <T>(work: Promise<T>) => Promise<T>;
@@ -128,6 +131,8 @@ export type TurnCoordinatorDeps = {
 
 export class TurnCoordinator {
   readonly executingDrivers = new Map<string, string>();
+  private readonly admittedTurns = new Map<string, string>();
+  private readonly settlements = new Map<string, { status: string; reason?: string; error?: unknown; settledAt: string; timer: NodeJS.Timeout | undefined }>();
   readonly turns = new Map<string, TurnState>();
   readonly turnEventChains = new Map<string, Promise<void>>();
   readonly liveItems = new Map<string, Map<string, LiveItem>>();
@@ -153,25 +158,29 @@ export class TurnCoordinator {
     }
   }
 
+  async publishPendingTerminal(turn: TurnState, error?: unknown): Promise<void> {
+    const kind = turn.status === "failed" ? "turn.failed" : turn.status === "interrupted" ? "turn.interrupted" : "turn.completed";
+    if (!this.deps.hasTransition(kind, turn.sessionId, turn.id)) {
+      await this.deps.emit("session", kind, { turn: this.publicTurn(turn), ...(error ? { error } : {}) }, { sessionId: turn.sessionId, turnId: turn.id });
+    }
+    for (const id of await this.deps.turnStore.upsert({ ...this.toRecord(turn), eventPending: false })) this.turns.delete(id);
+    this.deps.confirmTerminal(turn.id);
+  }
+
   async shutdown(): Promise<void> {
+    for (const entry of this.settlements.values()) clearTimeout(entry.timer);
     const active = [...this.turns.values()].filter((turn) => ACTIVE_TURN_STATUSES.has(turn.status));
     await Promise.allSettled(active.map((turn) => this.stopTurn(turn.id, "interrupted")));
     for (const turnId of this.executingDrivers.values()) {
-      this.settleApprovalsForTurn(turnId);
+      const turn = this.turns.get(turnId);
+      if (turn) await this.deps.sessionLocks.run(turn.sessionId, () => this.settleApprovalsForTurn(turnId));
       const handle = this.turns.get(turnId)?.handle;
       if (handle) this.deps.trackWork(handle.abort());
     }
   }
 
   activeTurnIdFor(sessionId: string): string | null {
-    const executing = this.executingDrivers.get(sessionId);
-    if (executing) return executing;
-    for (const turn of this.turns.values()) {
-      if (turn.sessionId === sessionId && turn.status !== "queued" && ACTIVE_TURN_STATUSES.has(turn.status)) {
-        return turn.id;
-      }
-    }
-    return null;
+    return this.executingDrivers.get(sessionId) ?? this.admittedTurns.get(sessionId) ?? null;
   }
 
   sessionBusy(sessionId: string): boolean {
@@ -278,6 +287,7 @@ export class TurnCoordinator {
 
     const plan = await this.deps.sessionLocks.run(sessionId, async () => {
       const session = await this.deps.requireSession(sessionId);
+      if (session.mode === "plan") throw new HostError("CAPABILITY_UNAVAILABLE", "Select Agent mode before starting a turn");
       if (session.readOnlyReason) throw new HostError("SESSION_READ_ONLY", session.readOnlyReason);
       const provider = await this.sessionProvider(session);
       this.assertProviderKey(provider, apiKey, params.providerBinding);
@@ -314,6 +324,7 @@ export class TurnCoordinator {
           attachmentCount: attachments.length,
           run: async () => {
             const fresh = await this.deps.requireSession(sessionId);
+            if (fresh.mode === "plan") throw new HostError("CAPABILITY_UNAVAILABLE", "Select Agent mode before starting a turn");
             if (fresh.readOnlyReason) throw new HostError("SESSION_READ_ONLY", fresh.readOnlyReason);
             const currentProvider = await this.sessionProvider(fresh);
             if (apiKey && providerCredentialScope(currentProvider) !== keyScope) {
@@ -344,6 +355,7 @@ export class TurnCoordinator {
         settledAt: null
       };
       this.turns.set(turnId, placeholder);
+      this.admittedTurns.set(sessionId, turnId);
       return { kind: "running" as const, turnId, session, provider };
     });
 
@@ -399,9 +411,20 @@ export class TurnCoordinator {
 
   async respondApproval(params: Record<string, unknown>, deviceRole: string) {
     const approvalId = str(params.approvalId, "approvalId");
+    if (deviceRole !== "owner") throw new HostError("FORBIDDEN", "approval requires owner");
     const pending = this.pendingApprovals.get(approvalId);
     if (!pending) return { resolved: true, alreadyResolved: true, effectivePermissionMode: "ask" };
-    if (deviceRole !== "owner") throw new HostError("FORBIDDEN", "approval requires owner");
+    return this.deps.sessionLocks.run(pending.sessionId, () => this.respondApprovalLocked(approvalId, pending, params));
+  }
+
+  private async respondApprovalLocked(approvalId: string, pending: PendingApproval, params: Record<string, unknown>) {
+    if (this.pendingApprovals.get(approvalId) !== pending) return { resolved: true, alreadyResolved: true, effectivePermissionMode: "ask" };
+    if (Date.now() >= pending.expiresAt) {
+      await this.finishApproval(approvalId, pending, "expired");
+      throw new HostError("APPROVAL_EXPIRED", "approval expired");
+    }
+    const turn = this.turns.get(pending.turnId);
+    if (this.deps.isShuttingDown() || !turn || !ACTIVE_TURN_STATUSES.has(turn.status) || turn.stopRequested) throw new HostError("APPROVAL_STALE", "turn is stopping");
     const expectedRevision =
       typeof params.expectedRevision === "number"
         ? params.expectedRevision
@@ -412,24 +435,25 @@ export class TurnCoordinator {
       throw new HostError("APPROVAL_STALE", "approval revision does not match");
     }
     const decision = str(params.decision, "decision");
-    const allowed = decision === "allow-once" || decision === "allow-session" || decision === "approve";
+    if (!["allow-once", "allow-session", "deny"].includes(decision)) throw new HostError("INVALID_ARGUMENT", "unsupported tool approval decision");
+    const allowed = decision !== "deny";
     if (allowed && pending.fullInput && (expectedRevision !== pending.revision || params.inputDigest !== pending.inputDigest)) {
       throw new HostError("INVALID_ARGUMENT", "review the full approval input before allowing this request");
     }
-    if (decision === "allow-session") {
+    await this.finishApproval(approvalId, pending, allowed ? "allowed" : "denied", decision === "allow-session");
+    return { resolved: true, alreadyResolved: false, effectivePermissionMode: "ask" };
+  }
+
+  private async finishApproval(approvalId: string, pending: PendingApproval, status: "expired" | "denied" | "allowed", remember = false) {
+    await this.deps.emit("session", "approval.resolved", { approvalId, status },
+      { sessionId: pending.sessionId, turnId: pending.turnId, revision: pending.revision });
+    if (remember) {
       const tools = this.allowedSessionTools.get(pending.sessionId) ?? new Set<string>();
       tools.add(pending.toolName);
       this.allowedSessionTools.set(pending.sessionId, tools);
     }
     this.pendingApprovals.delete(approvalId);
-    pending.resolve(allowed);
-    await this.deps.emit(
-      "session",
-      "approval.resolved",
-      { approvalId, status: allowed ? "allowed" : "denied" },
-      { sessionId: pending.sessionId, turnId: pending.turnId, revision: pending.revision }
-    );
-    return { resolved: true, alreadyResolved: false, effectivePermissionMode: "ask" };
+    pending.resolve(status === "allowed");
   }
 
   private removeQueuedStart(sessionId: string, turnId: string): void {
@@ -442,7 +466,7 @@ export class TurnCoordinator {
 
   private async persistTurnBeforeStart(turn: TurnState): Promise<void> {
     try {
-      await this.deps.turnStore.upsert(this.toRecord(turn));
+      await this.saveTurn(turn);
     } catch {
       throw new HostError(
         "CAPABILITY_UNAVAILABLE",
@@ -460,6 +484,10 @@ export class TurnCoordinator {
       settledAt: turn.settledAt,
       ...(turn.settledReason ? { settledReason: turn.settledReason } : {})
     };
+  }
+
+  private async saveTurn(turn: TurnState): Promise<void> {
+    for (const id of await this.deps.turnStore.upsert(this.toRecord(turn))) this.turns.delete(id);
   }
 
   private async launchTurn(
@@ -484,7 +512,9 @@ export class TurnCoordinator {
       if (turn.stopRequested) return;
       let path = (await this.deps.requireSession(session.id)).nativePath;
       if (!path) {
-        path = await this.deps.catalog.createFile(session.projectPath, join(this.deps.config.dataDir, "sessions"), session.id);
+        const matches = (await this.deps.catalog.scan()).filter(item => item.id === session.id);
+        path = await this.deps.catalog.uniquePath(session.id, matches) ??
+          await this.deps.catalog.createFile(session.projectPath, this.deps.config.sessionRoots[0]!, session.id, new Date(session.createdAt));
         await this.deps.meta.updateSession(session.id, { nativePath: path });
       }
       if (!turn.stopRequested && !this.deps.driver.appendsPrompt && text) {
@@ -499,7 +529,7 @@ export class TurnCoordinator {
       turnId,
       sessionId: session.id,
       cwd: session.projectPath,
-      sessionDir: join(this.deps.config.dataDir, "sessions"),
+      sessionDir: this.deps.config.sessionRoots[0]!,
       sessionFile: nativePath,
       ...(skills ? { skills } : {}),
       provider: provider
@@ -595,18 +625,36 @@ export class TurnCoordinator {
     turnId: string,
     status: string,
     settledReason?: string,
-    fromDriver = false
+    fromDriver = false,
+    error?: unknown
   ): Promise<boolean> {
     const turn = this.turns.get(turnId);
     if (!turn) return false;
     return this.deps.sessionLocks.run(turn.sessionId, async () => {
       if (!ACTIVE_TURN_STATUSES.has(turn.status) || (fromDriver && turn.stopRequested)) return false;
-      turn.status = status;
-      turn.settledAt = new Date().toISOString();
-      if (settledReason) turn.settledReason = settledReason;
+      const pending = this.settlements.get(turnId) ?? { status, ...(settledReason ? { reason: settledReason } : {}), error, settledAt: new Date().toISOString(), timer: undefined };
+      this.settlements.set(turnId, pending);
+      const candidate = { ...turn, status: pending.status, settledAt: pending.settledAt, ...(pending.reason ? { settledReason: pending.reason } : {}) };
+      try {
+        for (const id of await this.deps.turnStore.upsert({ ...this.toRecord(candidate), eventPending: true })) this.turns.delete(id);
+        await this.publishPendingTerminal(candidate, pending.error);
+      } catch (failure) {
+        if (!pending.timer && !this.deps.isShuttingDown()) {
+          pending.timer = setTimeout(() => {
+            pending.timer = undefined;
+            if (!this.deps.isShuttingDown()) void this.deps.trackWork(this.settleTurn(turnId, pending.status).then(() => this.drainQueue(turn.sessionId))).catch(() => undefined);
+          }, 1000);
+          pending.timer.unref();
+        }
+        throw failure;
+      }
+      clearTimeout(pending.timer);
+      this.settlements.delete(turnId);
+      Object.assign(turn, this.toRecord(candidate));
+      this.removeQueuedStart(turn.sessionId, turnId);
       this.liveItems.delete(turnId);
-      this.settleApprovalsForTurn(turnId);
-      await this.deps.turnStore.upsert(this.toRecord(turn));
+      await this.settleApprovalsForTurn(turnId);
+      if (this.admittedTurns.get(turn.sessionId) === turnId) this.admittedTurns.delete(turn.sessionId);
       return true;
     });
   }
@@ -652,11 +700,13 @@ export class TurnCoordinator {
         if (this.deps.isShuttingDown() || this.activeTurnIdFor(sessionId)) return undefined;
         const queue = this.queuedStarts.get(sessionId);
         if (!queue || queue.length === 0) return undefined;
+        if (this.settlements.has(queue[0]!.turnId)) return undefined;
         const item = queue.shift()!;
         if (queue.length === 0) this.queuedStarts.delete(sessionId);
         const turn = this.turns.get(item.turnId);
         if (!turn || turn.status !== "queued") return undefined;
         turn.status = "running";
+        this.admittedTurns.set(sessionId, turn.id);
         turn.stopRequested = false;
         return item;
       });
@@ -666,20 +716,7 @@ export class TurnCoordinator {
       } catch (error) {
         const queued = this.turns.get(next.turnId);
         if (queued && !queued.stopRequested && ACTIVE_TURN_STATUSES.has(queued.status)) {
-          await this.settleTurn(next.turnId, "failed", "queue_start_failed").catch(() => undefined);
-          await this.deps.sessionLocks
-            .run(sessionId, () =>
-              this.deps.emit(
-                "session",
-                "turn.failed",
-                {
-                  turn: this.publicTurn(queued),
-                  error: error instanceof HostError ? error.message : "Queued turn could not start."
-                },
-                { sessionId, turnId: next.turnId }
-              )
-            )
-            .catch(() => undefined);
+          await this.settleTurn(next.turnId, "failed", "queue_start_failed", false, error instanceof HostError ? error.message : "Queued turn could not start.").catch(() => undefined);
         }
       }
     } finally {
@@ -716,11 +753,28 @@ export class TurnCoordinator {
     const revision = ++this.approvalRevision;
     const fullInput = encoded.length > APPROVAL_INLINE_BYTES ? encoded : undefined;
     return new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingApprovals.delete(approvalId);
-        resolve(false);
-      }, 24 * 60 * 60 * 1000);
+      const lifetime = 24 * 60 * 60 * 1000;
+      const deny = (status: "expired" | "denied") => {
+        void this.deps.trackWork(this.deps.sessionLocks.run(session.id, async () => {
+          if (this.pendingApprovals.get(approvalId) === pending) await this.finishApproval(approvalId, pending, status);
+        })).catch(() => {
+          if (this.pendingApprovals.get(approvalId) === pending) {
+            resolve(false);
+            clearTimeout(timer);
+            timer = setTimeout(() => deny(status), 1000);
+            timer.unref();
+          }
+        });
+      };
+      let timer = setTimeout(() => deny("expired"), lifetime);
       const pending: PendingApproval = {
+        retryDenial: () => {
+          clearTimeout(timer);
+          resolve(false);
+          timer = setTimeout(() => deny("denied"), 1000);
+          timer.unref();
+        },
+        expiresAt: Date.now() + lifetime,
         sessionId: session.id,
         turnId,
         toolName,
@@ -758,26 +812,19 @@ export class TurnCoordinator {
       title: textPreview(pending.toolName, 256),
       toolName: textPreview(pending.toolName, 256),
       input: pending.input,
-      expiresAt: null,
+      expiresAt: new Date(pending.expiresAt).toISOString(),
       ...(pending.fullInput ? { inputByteLength: pending.fullInput.length } : {})
     };
   }
 
-  private settleApprovalsForTurn(turnId: string): void {
+  private async settleApprovalsForTurn(turnId: string): Promise<void> {
     for (const [approvalId, pending] of [...this.pendingApprovals.entries()]) {
       if (pending.turnId !== turnId) continue;
-      this.pendingApprovals.delete(approvalId);
-      pending.resolve(false);
-      void this.deps
-        .trackWork(
-          this.deps.emit(
-            "session",
-            "approval.resolved",
-            { approvalId, status: "denied" },
-            { sessionId: pending.sessionId, turnId: pending.turnId, revision: pending.revision }
-          )
-        )
-        .catch((error) => console.error("approval resolution event failed:", error));
+      try { await this.finishApproval(approvalId, pending, "denied"); }
+      catch (error) {
+        pending.retryDenial();
+        console.error("approval cancellation event failed:", error);
+      }
     }
   }
 
@@ -894,19 +941,12 @@ export class TurnCoordinator {
     }
     if (event.kind === "turn.completed" || event.kind === "turn.failed") {
       const status = event.kind === "turn.completed" ? "completed" : "failed";
-      if (!(await this.settleTurn(turnId, status, undefined, true))) return;
-      const turn = this.turns.get(turnId);
-      payload = {
-        turn: turn ? this.publicTurn(turn) : { id: turnId },
-        ...(event.kind === "turn.failed" ? { error: payload.error } : {})
-      };
+      await this.settleTurn(turnId, status, undefined, true, payload.error);
+      return;
     }
     await this.deps.sessionLocks.run(sessionId, () =>
       this.deps.emit("session", event.kind, payload, { sessionId, turnId })
     );
-    if ((event.kind === "turn.completed" || event.kind === "turn.failed") && !this.executingDrivers.has(sessionId)) {
-      void this.drainQueue(sessionId);
-    }
   }
 
   private async stopTurnOnce(turnId: string, status: "interrupted" | "canceled") {
@@ -915,48 +955,26 @@ export class TurnCoordinator {
       return { turn: this.publicTurn(turn) };
     }
     if (turn.status === "queued") {
-      this.removeQueuedStart(turn.sessionId, turnId);
-      if (!(await this.settleTurn(turnId, "canceled"))) return { turn: this.publicTurn(turn) };
-      await this.deps.sessionLocks.run(turn.sessionId, () =>
-        this.deps.emit(
-          "session",
-          "turn.completed",
-          { turn: this.publicTurn(turn) },
-          { sessionId: turn.sessionId, turnId }
-        )
-      );
+      await this.settleTurn(turnId, "canceled");
       return { turn: this.publicTurn(turn) };
     }
-    turn.stopRequested = true;
+    await this.deps.sessionLocks.run(turn.sessionId, async () => {
+      turn.stopRequested = true;
+      await this.settleApprovalsForTurn(turnId);
+    });
     const handle = turn.handle;
     if (handle) {
-      this.settleApprovalsForTurn(turnId);
       await handle.abort();
-      this.settleApprovalsForTurn(turnId);
       await handle.wait().catch(() => undefined);
       await (this.turnEventChains.get(turnId) ?? Promise.resolve());
     }
     const queued = this.queuedStarts.get(turn.sessionId);
     if (status === "interrupted" && queued && queued.length > 0) {
-      this.queuedStarts.delete(turn.sessionId);
       for (const entry of queued) {
-        const queuedTurn = this.turns.get(entry.turnId);
-        if (!queuedTurn || !(await this.settleTurn(entry.turnId, "canceled"))) continue;
-        await this.deps.sessionLocks.run(turn.sessionId, () =>
-          this.deps.emit(
-            "session",
-            "turn.completed",
-            { turn: this.publicTurn(queuedTurn) },
-            { sessionId: turn.sessionId, turnId: entry.turnId }
-          )
-        );
+        await this.settleTurn(entry.turnId, "canceled");
       }
     }
     if (!(await this.settleTurn(turnId, status))) return { turn: this.publicTurn(turn) };
-    const eventKind = status === "interrupted" ? "turn.interrupted" : "turn.completed";
-    await this.deps.sessionLocks.run(turn.sessionId, () =>
-      this.deps.emit("session", eventKind, { turn: this.publicTurn(turn) }, { sessionId: turn.sessionId, turnId })
-    );
     void this.drainQueue(turn.sessionId);
     return { turn: this.publicTurn(turn) };
   }

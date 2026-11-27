@@ -19,6 +19,8 @@ describe("provider store", () => {
     const store = new ProviderStore(await mkdtemp(join(tmpdir(), "pi-adaptor-provider-race-")), { allowPrivateHosts: true });
     const input = { name: "mock", type: "openai_compatible", protocol: "openai_compatible", baseUrl: "https://example.com", authKind: "none" as const, models: [] };
     const [first, second] = await Promise.all([store.create({ ...input, vendorKey: "one" }), store.create({ ...input, vendorKey: "two" })]);
+    await expect(store.update(second.id, { ...input, vendorKey: "one" })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await store.list()).map(entry => entry.vendorKey)).toEqual(["one", "two"]);
     await store.delete(second.id);
     expect((await store.list()).find((entry) => entry.id === first.id)?.isDefault).toBe(true);
   });

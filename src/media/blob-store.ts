@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { link, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { link, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { HostError } from "../errors.js";
 import { JsonCommitUncertainError, readJsonFile, syncDirectory, writeJsonFileAtomic } from "../util/json-file.js";
@@ -93,6 +93,26 @@ export class BlobStore {
     return join(this.blobs, hash);
   }
 
+  private async expireParts(index: MediaIndex, now: Date): Promise<number> {
+    let expired = 0;
+    for (const record of index.attachments) {
+      if (!(record.state === "uploading" && record.expiresAt && Date.parse(record.expiresAt) <= now.getTime())) continue;
+      await rm(this.partPath(record.id), { force: true });
+      record.state = "failed";
+      expired++;
+    }
+    return expired;
+  }
+
+  async expireUploads(now: Date): Promise<number> {
+    return this.serialized(async () => {
+      const index = await this.load();
+      const expired = await this.expireParts(index, now);
+      if (expired) await this.save(index);
+      return expired;
+    });
+  }
+
   private async readyAttachment(id: string): Promise<AttachmentRecord> {
     const record = (await this.load()).attachments.find((entry) => entry.id === id && entry.state === "ready");
     if (!record || !isSha256Hex(record.sha256)) throw new HostError("NOT_FOUND", "attachment not found");
@@ -135,12 +155,7 @@ export class BlobStore {
       // Expired uploads still occupy disk until GC. Purge them before measuring
       // the quota, and count every remaining staging file regardless of its
       // expiresAt so the budget reflects real disk usage.
-      for (const entry of data.attachments) {
-        if (entry.state === "uploading" && entry.expiresAt && Date.parse(entry.expiresAt) <= now.getTime()) {
-          await rm(this.partPath(entry.id), { force: true });
-          entry.state = "failed";
-        }
-      }
+      await this.expireParts(data, now);
       const stagingBytes = data.attachments
         .filter((entry) => entry.state === "uploading")
         .reduce((total, entry) => total + entry.byteLength, 0);
@@ -186,16 +201,29 @@ export class BlobStore {
         throw new HostError("ATTACHMENT_INCOMPLETE", "upload expired");
       }
       const chunk = Buffer.from(dataBase64, "base64");
-      const current = await readFile(this.partPath(id));
-      if (offset !== current.length) {
-        if (offset < current.length && current.subarray(offset, offset + chunk.length).equals(chunk)) return current.length;
-        throw new HostError("ATTACHMENT_INVALID", "non-contiguous chunk");
+      const part = await open(this.partPath(id), "r+");
+      try {
+        const { size } = await part.stat();
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > size || offset + chunk.length > record.byteLength) {
+          throw new HostError("ATTACHMENT_INVALID", "invalid chunk range");
+        }
+        const overlap = Math.min(size - offset, chunk.length);
+        if (overlap > 0) {
+          const previous = Buffer.alloc(overlap);
+          const { bytesRead } = await part.read(previous, 0, overlap, offset);
+          if (bytesRead !== overlap || !previous.equals(chunk.subarray(0, overlap))) {
+            throw new HostError("ATTACHMENT_INVALID", "conflicting chunk");
+          }
+        }
+        for (let written = overlap; written < chunk.length;) {
+          const { bytesWritten } = await part.write(chunk, written, chunk.length - written, offset + written);
+          if (!bytesWritten) throw new Error("attachment write made no progress");
+          written += bytesWritten;
+        }
+        return Math.max(size, offset + chunk.length);
+      } finally {
+        await part.close();
       }
-      if (current.length + chunk.length > record.byteLength) {
-        throw new HostError("ATTACHMENT_INVALID", "upload exceeds declared size");
-      }
-      await writeFile(this.partPath(id), Buffer.concat([current, chunk]), { mode: 0o600 });
-      return current.length + chunk.length;
     });
   }
 
@@ -315,14 +343,22 @@ export class BlobStore {
           entry.kind === input.kind &&
           entry.state === "ready"
       );
-      if (existing) return existing;
-  
       const destination = this.blobPath(digest);
+      let valid = false;
       try {
-        await stat(destination);
-      } catch {
-        await writeFile(destination, bytes, { mode: 0o600, flag: "wx" });
+        valid = (await stat(destination)).size === bytes.length && (await readFile(destination)).equals(bytes);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+      if (!valid) {
+        const temporary = join(this.blobs, `.${uuid()}.tmp`);
+        try {
+          await writeFile(temporary, bytes, { mode: 0o600, flag: "wx", flush: true });
+          await rename(temporary, destination);
+          await syncDirectory(this.blobs);
+        } finally { await rm(temporary, { force: true }); }
+      }
+      if (existing) return existing;
       const record: AttachmentRecord = {
         id: uuid(),
         sessionId: input.sessionId,
@@ -346,8 +382,9 @@ export class BlobStore {
       const hashes = new Set<string>();
       let removed = 0;
       for (const record of data.attachments) {
-        if (record.sessionId !== sessionId || record.state === "deleted") continue;
+        if (record.sessionId !== sessionId) continue;
         hashes.add(record.sha256);
+        if (record.state === "deleted") continue;
         if (record.state === "uploading") await rm(this.partPath(record.id), { force: true });
         record.state = "deleted";
         removed++;
@@ -368,7 +405,8 @@ export class BlobStore {
   async gc(
     referencedIds: Set<string>,
     referencedHashesOrNow?: Set<string> | Date,
-    maybeNow = new Date()
+    maybeNow = new Date(),
+    protectedSessions: ReadonlySet<string> = new Set()
   ): Promise<number> {
     const referencedHashes =
       referencedHashesOrNow instanceof Set ? referencedHashesOrNow : new Set<string>();
@@ -377,13 +415,7 @@ export class BlobStore {
       const index = await this.load();
       let removed = 0;
       for (const record of index.attachments) {
-        if (record.state === "uploading" && record.expiresAt && Date.parse(record.expiresAt) <= now.getTime()) {
-          await rm(this.partPath(record.id), { force: true });
-          record.state = "failed";
-          removed++;
-          continue;
-        }
-        if (record.state === "ready") {
+        if (record.state === "ready" && !protectedSessions.has(record.sessionId)) {
           const isReferenced = referencedIds.has(record.id) || referencedHashes.has(record.sha256);
           if (!isReferenced) {
             const age = now.getTime() - Date.parse(record.createdAt);
@@ -400,7 +432,7 @@ export class BlobStore {
       // A blob is kept if ANY record in index with that sha256 is still "ready"
       // (whether referenced or still within protection window), or explicitly referenced by hash.
       const liveHashes = new Set(
-        index.attachments.filter((a) => a.state === "ready").map((a) => a.sha256)
+        index.attachments.filter((a) => a.state === "ready" || protectedSessions.has(a.sessionId)).map((a) => a.sha256)
       );
       for (const hash of referencedHashes) {
         liveHashes.add(hash);

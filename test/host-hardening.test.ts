@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -251,12 +251,15 @@ describe("write idempotency", () => {
     await expect(service.handle("session/create", params, auth)).rejects.toThrow("journal unavailable");
     const committed = (await service.meta.listSessions()).find(session => session.title === params.title);
     expect(committed).toBeDefined();
+    await service.shutdown();
     const restarted = makeService(config, new ControlledDriver());
     await restarted.init();
     await expect(restarted.handle("session/create", params, auth))
       .resolves.toMatchObject({ session: { id: committed!.id } });
     const sessions = await restarted.meta.listSessions();
     expect(sessions.filter((session) => session.title === params.title)).toHaveLength(1);
+    expect(restarted.journal.replay("host", undefined, { epoch: restarted.journal.epoch, sequence: 0 })
+      .filter(event => event.kind === "session.created" && event.sessionId === committed!.id)).toHaveLength(1);
   });
 
   it("returns the first result for a repeated key and rejects a changed request", async () => {
@@ -283,6 +286,317 @@ describe("write idempotency", () => {
 });
 
 describe("session single-writer admission", () => {
+  it.each([false, true])("recovers a committed terminal outbox on restart, event already appended=%s", async appended => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const record = { id: "finished", sessionId, status: "completed", createdAt: new Date(0).toISOString(), settledAt: new Date().toISOString() };
+    await service["turnStore"].upsert({ ...record, eventPending: true });
+    if (appended) await service.journal.append("session", "turn.completed", { turn: record }, { sessionId, turnId: record.id });
+    await service.shutdown();
+    const restarted = makeService(config, new ControlledDriver()); await restarted.init();
+    await expect(restarted.handle("turn/get", { turnId: record.id }, auth)).resolves.toMatchObject({ turn: record });
+    expect(restarted.journal.replay("session", sessionId, { epoch: restarted.journal.epoch, sequence: 0 }).filter(event => event.turnId === record.id)).toHaveLength(1);
+    expect((await restarted["turnStore"].all()).find(turn => turn.id === record.id)?.eventPending).toBe(false);
+  });
+  it("keeps the committed turn visible until failed terminal storage recovers", async () => {
+    const driver = new ControlledDriver();
+    const { service, config, auth, sessionId } = await setup(driver);
+    const after = service.journal.currentCursor();
+    const { turn } = await service.handle("turn/start", { sessionId, input: { text: "once" } }, auth) as { turn: { id: string } };
+    const store = service["turnStore"];
+    const write = store.upsert.bind(store);
+    let blocked = true, failures = 0;
+    vi.spyOn(store, "upsert").mockImplementation(async record => {
+      if (blocked && record.status === "failed") { failures++; throw new Error("fixture terminal write failure"); }
+      return write(record);
+    });
+    driver.requestFor(turn.id)!.onEvent({ kind: "turn.failed", payload: { error: "fixture" } });
+    driver.finishWithoutTerminalEvent(turn.id);
+    await vi.waitFor(() => expect(failures).toBeGreaterThan(0));
+    await expect(service.handle("turn/get", { turnId: turn.id }, auth)).resolves.toMatchObject({ turn: { status: "running" } });
+    expect((await store.all()).find(record => record.id === turn.id)?.status).toBe("running");
+    expect(service.journal.replay("session", sessionId, after).some(event => event.kind === "turn.failed")).toBe(false);
+    await expect(service.handle("turn/start", { sessionId, input: { text: "late" } }, auth)).rejects.toMatchObject({ code: "SESSION_BUSY" });
+    blocked = false;
+    await waitForTurnStatus(service, auth, turn.id, "failed");
+    expect(service.journal.replay("session", sessionId, after).filter(event => event.kind === "turn.failed")).toHaveLength(1);
+    await service.shutdown();
+    const restarted = makeService(config, new ControlledDriver()); await restarted.init();
+    await expect(restarted.handle("turn/get", { turnId: turn.id }, auth)).resolves.toMatchObject({ turn: { status: "failed" } });
+  });
+
+  it.each([false, true])("resumes interrupted deletion with the original key, restart=%s", async restart => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const nativePath = await service.catalog.createFile(config.home, join(config.dataDir, "sessions"), sessionId);
+    await service.meta.updateSession(sessionId, { nativePath });
+    const attachment = await uploadPng(service, auth, sessionId);
+    const params = { sessionId, confirmSessionId: sessionId, context: { idempotencyKey: "delete-once" } };
+    vi.spyOn(service.blobs, "deleteSession").mockRejectedValueOnce(new Error("fixture media write failure"));
+    await expect(service.handle("session/delete", params, auth)).rejects.toThrow("fixture media write failure");
+    await expect(readFile(nativePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [] });
+    expect(await service.meta.pendingDeletions()).toHaveLength(1);
+    let host = service;
+    if (restart) { await host.shutdown(); host = makeService(config, new ControlledDriver()); await host.init(); }
+    const result = { deleted: true, sessionId };
+    await expect(host.handle("session/delete", params, auth)).resolves.toEqual(result);
+    await expect(host.handle("session/delete", params, auth)).resolves.toEqual(result);
+    expect(await host.meta.pendingDeletions()).toEqual([]);
+    await expect(host.blobs.read(attachment, 0, 1)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(host.journal.replay("host", undefined, { epoch: host.journal.epoch, sequence: 0 }).filter(event => event.kind === "session.deleted")).toHaveLength(1);
+  });
+
+  it("protects a running native child when deleting its parent", async () => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const nativePath = await service.catalog.createFile(config.home, join(config.dataDir, "sessions"), sessionId);
+    await service.meta.updateSession(sessionId, { nativePath });
+    const { entryId } = await service.catalog.appendUserMessage(nativePath, "branch point");
+    const after = service.journal.currentCursor();
+    const paramsBranch = { sessionId, fromItemId: entryId, context: { idempotencyKey: "branch-once" } };
+    vi.spyOn(service.journal, "append").mockRejectedValueOnce(new Error("fixture event unavailable"));
+    await expect(service.handle("session/branch", paramsBranch, auth)).rejects.toThrow("fixture event unavailable");
+    const { session: child } = await service.handle("session/branch", paramsBranch, auth) as { session: { id: string } };
+    await expect(service.handle("session/branch", paramsBranch, auth)).resolves.toMatchObject({ session: { id: child.id } });
+    expect((await service.catalog.scan()).filter(item => item.parentSession === nativePath)).toHaveLength(1);
+    expect(service.journal.replay("host", undefined, after).filter(event => event.kind === "session.created" && event.sessionId === child.id)).toHaveLength(1);
+    const { turn } = await service.handle("turn/start", { sessionId: child.id, input: { text: "hold" } }, auth) as { turn: { id: string } };
+    const params = { sessionId, confirmSessionId: sessionId };
+    await expect(service.handle("session/delete", params, auth)).rejects.toMatchObject({ code: "SESSION_BUSY" });
+    expect(await readFile(nativePath, "utf8")).toContain(entryId);
+    await service.handle("turn/interrupt", { turnId: turn.id }, auth);
+    await expect(service.handle("session/delete", params, auth)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it("does not unlink a replacement file when resuming a prepared deletion", async () => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const nativePath = await service.catalog.createFile(config.home, join(config.dataDir, "sessions"), sessionId);
+    await service.meta.updateSession(sessionId, { nativePath });
+    vi.spyOn(service.catalog, "deleteFile").mockRejectedValueOnce(new Error("fixture before unlink"));
+    const params = { sessionId, confirmSessionId: sessionId, context: { idempotencyKey: "delete-prepared" } };
+    await expect(service.handle("session/delete", params, auth)).rejects.toThrow("fixture before unlink");
+    const replacement = (await readFile(nativePath, "utf8")) + "\n";
+    await writeFile(nativePath + ".new", replacement);
+    await rename(nativePath + ".new", nativePath);
+    await expect(service.handle("session/delete", params, auth)).rejects.toMatchObject({ code: "SESSION_READ_ONLY" });
+    expect(await readFile(nativePath, "utf8")).toBe(replacement);
+    expect(await service.meta.pendingDeletions()).toHaveLength(1);
+    await expect(service.handle("session/get", { sessionId }, auth)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("rebinds a moved file, refuses duplicate identities and deletes only the verified file", async () => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const original = await service.catalog.createFile(config.home, config.sessionRoots[0]!, sessionId);
+    await service.catalog.appendUserMessage(original, "still here", Date.now(), sessionId);
+    await service.meta.updateSession(sessionId, { nativePath: original });
+    const moved = original + ".moved.jsonl";
+    await rename(original, moved);
+    await service.handle("session/list", {}, auth);
+    await expect(service.handle("session/attach", { sessionId }, auth)).resolves.toMatchObject({ session: { nativePath: moved }, snapshot: { items: [expect.anything()] } });
+    await writeFile(original, await readFile(moved));
+    const { session: other } = await service.handle("session/create", { title: "unaffected" }, auth) as { session: { id: string } };
+    const listed = await service.handle("session/list", {}, auth) as { sessions: { id: string }[] };
+    expect(listed.sessions).toEqual(expect.arrayContaining([expect.objectContaining({ id: other.id }), expect.objectContaining({ id: sessionId, readOnlyReason: "external_write_conflict" })]));
+    await expect(service.handle("session/attach", { sessionId }, auth)).rejects.toMatchObject({ code: "CONFLICT" });
+    const params = { sessionId, confirmSessionId: sessionId };
+    await expect(service.handle("session/delete", params, auth)).rejects.toMatchObject({ code: "CONFLICT" });
+    await rm(moved);
+    await expect(service.handle("session/delete", params, auth)).resolves.toMatchObject({ deleted: true });
+    await expect(readFile(original)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("completes an unannounced branch on restart without a second client request", async () => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const original = await service.catalog.createFile(config.home, config.sessionRoots[0]!, sessionId);
+    await service.meta.updateSession(sessionId, { nativePath: original });
+    const { entryId } = await service.catalog.appendUserMessage(original, "branch point");
+    const params = { sessionId, fromItemId: entryId, context: { idempotencyKey: "recover-branch" } };
+    vi.spyOn(service.journal, "append").mockRejectedValueOnce(new Error("fixture failed"));
+    await expect(service.handle("session/branch", params, auth)).rejects.toThrow("fixture failed");
+    await service.shutdown();
+    const restarted = makeService(config, new ControlledDriver());
+    await restarted.init();
+    const events = () => restarted.journal.replay("host", undefined, { epoch: restarted.journal.epoch, sequence: 0 }).filter(event => event.kind === "session.created" && event.sessionId !== sessionId);
+    expect(events()).toHaveLength(1);
+    await expect(restarted.handle("session/branch", params, auth)).resolves.toMatchObject({ session: { id: events()[0]!.sessionId } });
+    expect(events()).toHaveLength(1);
+  });
+
+  it.each([true, false])("reuses an unbound native file after restart with refresh=%s", async refresh => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    vi.spyOn(service.meta, "updateSession").mockRejectedValueOnce(new Error("fixture path commit failed"));
+    const input = { sessionId, input: { text: "test" } };
+    await expect(service.handle("turn/start", input, auth)).rejects.toThrow("fixture path commit failed");
+    const [orphan] = await service.catalog.scan();
+    expect(orphan!.id).toBe(sessionId);
+    await service.shutdown();
+    const restarted = makeService(config, new ControlledDriver());
+    await restarted.init();
+    if (refresh) {
+      await restarted.handle("session/list", {}, auth);
+      expect((await restarted.meta.getSession(sessionId))?.nativePath).toBe(orphan!.path);
+    }
+    await restarted.handle("turn/start", input, auth);
+    expect((await restarted.catalog.scan()).map(item => item.path)).toEqual([orphan!.path]);
+    expect((await restarted.meta.getSession(sessionId))?.nativePath).toBe(orphan!.path);
+  });
+
+  it("uses the configured session directory and can branch legacy sessions", async () => {
+    const { service, root, auth, sessionId } = await setup(new ControlledDriver());
+    const legacyPath = await service.catalog.createFile(root, service.config.sessionRoots[0]!, sessionId);
+    await service.meta.updateSession(sessionId, { nativePath: legacyPath });
+    await service.shutdown();
+    const directory = join(root, "override");
+    const config = parseHostConfig(["--data-dir", service.config.dataDir, "--agent-dir", service.config.agentDir, "--session-dir", directory], {}, root);
+    const driver = new ControlledDriver();
+    const restarted = makeService(config, driver);
+    await restarted.init();
+    const { session } = await restarted.handle("session/create", {}, auth) as { session: { id: string } };
+    const { turn } = await restarted.handle("turn/start", { sessionId: session.id, input: { text: "note" } }, auth) as { turn: { id: string } };
+    expect(driver.requestFor(turn.id)?.sessionDir).toBe(directory);
+    await restarted.handle("turn/interrupt", { turnId: turn.id }, auth);
+    const path = (await restarted.meta.getSession(session.id))!.nativePath!;
+    expect(path.startsWith(directory + "/")).toBe(true);
+    for (const [id, file] of [[sessionId, legacyPath], [session.id, path]] as const) {
+      const { entryId } = await restarted.catalog.appendUserMessage(file, "branch point", Date.now(), id);
+      const result = await restarted.handle("session/branch", { sessionId: id, fromItemId: entryId }, auth) as { session: { id: string } };
+      await expect(restarted.handle("session/attach", { sessionId: result.session.id }, auth)).resolves.toMatchObject({ session: { parentSession: file } });
+    }
+  });
+
+  it("serializes project deletion with creation after the busy snapshot", async () => {
+    const { service, auth, sessionId } = await setup(new ControlledDriver());
+    const projectId = (await service.meta.getSession(sessionId))!.projectId!;
+    const list = service.meta.listSessions.bind(service.meta);
+    let captured!: () => void, resume!: () => void;
+    const entered = new Promise<void>(resolve => { captured = resolve; });
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    vi.spyOn(service.meta, "listSessions").mockImplementationOnce(async archived => {
+      const result = await list(archived);
+      captured(); await gate; return result;
+    });
+    const deletion = service.handle("project/delete", { projectId, confirmProjectId: projectId }, auth);
+    await entered;
+    const creation = service.handle("session/create", { projectId }, auth);
+    const failed = expect(creation).rejects.toMatchObject({ code: "NOT_FOUND" });
+    resume();
+    await expect(deletion).resolves.toMatchObject({ deleted: true });
+    await failed;
+  });
+
+  it.skipIf(process.getuid?.() === 0)("defers external deletion when a moved session may be inside an unreadable directory", async () => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const directory = config.sessionRoots[0]!;
+    const original = await service.catalog.createFile(config.home, directory, sessionId);
+    await service.meta.updateSession(sessionId, { nativePath: original });
+    const media = await uploadPng(service, auth, sessionId);
+    const archive = join(directory, "archive");
+    await mkdir(archive);
+    const moved = join(archive, "moved.jsonl");
+    await rename(original, moved);
+    const after = service.journal.currentCursor();
+    await chmod(archive, 0);
+    try {
+      await expect(readdir(archive)).rejects.toMatchObject({ code: "EACCES" });
+      await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [{ id: sessionId }] });
+      expect((await service.meta.getSession(sessionId))?.deletedAt).toBeUndefined();
+      expect(service.journal.replay("host", undefined, after).some(event => event.kind === "session.deleted")).toBe(false);
+      await expect(service.blobs.read(media, 0, 1)).resolves.toBeTruthy();
+    } finally { await chmod(archive, 0o700); }
+    await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [{ id: sessionId, nativePath: moved }] });
+  });
+
+  it("retires only placeholder metadata after a repaired header is discovered across restart", async () => {
+    const { service, config, auth } = await setup(new ControlledDriver());
+    const file = await service.catalog.createFile(config.home, config.sessionRoots[0]!, "restored");
+    const bytes = await readFile(file);
+    await writeFile(file, "");
+    await service.handle("session/list", {}, auth);
+    expect((await service.meta.getSession(file))?.nativePath).toBe(file);
+    await writeFile(file, bytes);
+    await service.shutdown();
+    const restarted = makeService(config, new ControlledDriver());
+    await restarted.init();
+    const after = restarted.journal.currentCursor();
+    for (let pass = 0; pass < 2; pass++) {
+      const result = await restarted.handle("session/list", {}, auth) as { sessions: { id: string; nativePath: string }[] };
+      expect(result.sessions.filter(session => session.nativePath === file).map(session => session.id)).toEqual(["restored"]);
+    }
+    expect(await restarted.meta.getSession(file)).toBeNull();
+    expect(await readFile(file)).toEqual(bytes);
+    expect(restarted.journal.replay("host", undefined, after).some(event => event.kind === "session.deleted")).toBe(false);
+    await restarted.shutdown();
+    const reopened = makeService(config, new ControlledDriver());
+    await reopened.init();
+    expect(await reopened.meta.getSession(file)).toBeNull();
+    await expect(reopened.handle("session/attach", { sessionId: "restored" }, auth)).resolves.toMatchObject({ session: { nativePath: file, readOnlyReason: null } });
+  });
+
+  it("only tombstones confirmed external disappearance and does not rediscover a deleted id", async () => {
+    const { service, config, auth, sessionId } = await setup(new ControlledDriver());
+    const nativePath = await service.catalog.createFile(config.home, join(config.dataDir, "sessions"), sessionId);
+    const bytes = await readFile(nativePath);
+    await service.meta.updateSession(sessionId, { nativePath });
+    const after = service.journal.currentCursor();
+    vi.spyOn(service.catalog, "scanWithCoverage").mockResolvedValueOnce({ sessions: [], uninspected: new Set() });
+    await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [{ id: sessionId }] });
+    const directory = join(config.dataDir, "sessions");
+    await rename(directory, directory + ".offline");
+    await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [{ id: sessionId }] });
+    await rename(directory + ".offline", directory);
+    await rm(nativePath);
+    await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [] });
+    await writeFile(nativePath, bytes);
+    await expect(service.handle("session/list", {}, auth)).resolves.toMatchObject({ sessions: [] });
+    expect(service.journal.replay("host", undefined, after).filter(event => event.kind === "session.deleted")).toHaveLength(1);
+    expect(await readFile(nativePath)).toEqual(bytes);
+  });
+  it("normalizes thinking levels on model changes and passes the cleared value to the driver", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver);
+    const base = { displayName: "test", contextWindow: 4096, maxTokens: 512, supportsImages: false };
+    const provider = await service.providers.create({ name: "test", vendorKey: "levels", type: "openai_compatible", protocol: "openai_compatible", baseUrl: TEST_PROVIDER_URL, authKind: "none", models: [
+      { ...base, id: "reason", thinkingLevels: ["high"], defaultThinkingLevel: null },
+      { ...base, id: "limited", thinkingLevels: ["off", "low"], defaultThinkingLevel: "low" },
+      { ...base, id: "plain", thinkingLevels: [], defaultThinkingLevel: null }
+    ] });
+    const configure = (params: Record<string, unknown>) => service.handle("session/configure", { sessionId, ...params }, auth);
+    await expect(configure({ providerId: provider.id, modelId: "reason", thinkingLevel: "high" })).resolves.toMatchObject({ session: { thinkingLevel: "high" } });
+    await expect(configure({ permissionMode: "ask" })).resolves.toMatchObject({ session: { thinkingLevel: "high" } });
+    await expect(configure({ modelId: "limited" })).resolves.toMatchObject({ session: { thinkingLevel: "low" } });
+    await expect(configure({ modelId: "plain" })).resolves.toMatchObject({ session: { thinkingLevel: null } });
+    const { turn } = await service.handle("turn/start", { sessionId, input: { text: "check" } }, auth) as { turn: { id: string } };
+    expect(driver.requestFor(turn.id)).toMatchObject({ modelId: "plain", thinkingLevel: undefined });
+  });
+  it("evicts the same terminal turn from memory and disk", async () => {
+    const { config, service, auth, sessionId } = await setup(new ControlledDriver());
+    await service.shutdown();
+    const path = join(config.dataDir, "meta", "turns.json");
+    const turns = Array.from({ length: 1000 }, (_, index) => ({ id: String(index), sessionId, status: "completed", createdAt: new Date(index).toISOString(), settledAt: new Date(index).toISOString() }));
+    await writeFile(path, JSON.stringify({ version: 1, turns }));
+    const driver = new ControlledDriver();
+    const restarted = makeService(config, driver);
+    await restarted.init();
+    const { turn } = await restarted.handle("turn/start", { sessionId, input: { text: "next" } }, auth) as { turn: { id: string } };
+    driver.finishWithoutTerminalEvent(turn.id);
+    await vi.waitFor(async () => {
+      await expect(restarted.handle("turn/get", { turnId: "0" }, auth)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    });
+    const disk = JSON.parse(await readFile(path, "utf8")).turns as Array<{ id: string }>;
+    expect(disk).toHaveLength(1000);
+    expect(disk.map(record => record.id)).not.toContain("0");
+  });
+  it("rejects unsupported modes without mutating permissions or executing a legacy plan", async () => {
+    const driver = new ControlledDriver();
+    const { service, auth, sessionId } = await setup(driver);
+    const start = vi.spyOn(driver, "start");
+    await service.handle("session/configure", { sessionId, permissionMode: "auto" }, auth);
+    const before = await service.handle("session/get", { sessionId }, auth);
+    await expect(service.handle("session/configure", { sessionId, permissionMode: "accept-edits" }, auth)).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    await expect(service.handle("session/create", { mode: "plan" }, auth)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+    expect(await service.handle("session/get", { sessionId }, auth)).toEqual(before);
+    await service.meta.updateSession(sessionId, { mode: "plan" });
+    await expect(service.handle("turn/start", { sessionId, input: { text: "legacy" } }, auth)).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+    expect(start).not.toHaveBeenCalled();
+  });
   it("registers only directories that still exist and are accessible", async () => {
     const { root, service, auth } = await setup(new ControlledDriver());
     const missing = join(root, "missing");
@@ -520,6 +834,35 @@ describe("restart reconciliation", () => {
 });
 
 describe("media gc wiring", () => {
+  it("shows only the active branch but retains attachments from inactive branches", async () => {
+    const { service, auth, config, sessionId } = await setup(new ControlledDriver());
+    const file = await service.catalog.createFile(config.home, join(config.dataDir, "sessions"), sessionId);
+    await service.meta.updateSession(sessionId, { nativePath: file });
+    const attachment = await service.blobs.importImageBase64({ sessionId, dataBase64: PNG_BASE64, mimeType: "image/png", fileName: "sibling.png", kind: "input", now: new Date(0) });
+    for (const [id, parentId] of [["root", null], ["old", "root"], ["current", "root"]]) {
+      const content = id === "old" ? [{ type: "image", mimeType: "image/png", data: PNG_BASE64 }] : id;
+      await appendFile(file, JSON.stringify({ type: "message", id, parentId, timestamp: new Date().toISOString(), message: { role: "user", content, timestamp: Date.now() } }) + "\n");
+    }
+    const expected = [{ id: "root" }, { id: "current" }];
+    await expect(service.handle("session/attach", { sessionId }, auth)).resolves.toMatchObject({ snapshot: { items: expected } });
+    await expect(service.handle("session/history", { sessionId }, auth)).resolves.toMatchObject({ items: expected });
+    await expect(service.handle("session/history", { sessionId, textRange: { itemId: "old", offset: 0 } }, auth)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await service.runMaintenance();
+    expect((await service.blobs.read(attachment.id, 0, 1024)).dataBase64).toBe(PNG_BASE64);
+  });
+
+  it("isolates missing history while reclaiming expired uploads and unrelated orphan media", async () => {
+    const { service, config, sessionId } = await setup(new ControlledDriver());
+    await service.meta.updateSession(sessionId, { nativePath: join(config.home, "missing.jsonl") });
+    const image = { sessionId, dataBase64: PNG_BASE64, mimeType: "image/png", fileName: "keep.png", kind: "input" as const, now: new Date(0) };
+    const keep = await service.blobs.importImageBase64(image);
+    const orphan = await service.blobs.importImageBase64({ ...image, sessionId: "unrelated", dataBase64: Buffer.from("fixture").toString("base64") });
+    const pending = await service.blobs.create({ sessionId, fileName: "part.png", mimeType: "image/png", byteLength: 1, sha256: "0".repeat(64) }, new Date(0));
+    expect(await service.runMaintenance()).toBe(2);
+    await expect(readFile(join(config.dataDir, "staging", `${pending.id}.part`))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(service.blobs.read(orphan.id, 0, 1024)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await service.blobs.read(keep.id, 0, 1024)).dataBase64).toBe(PNG_BASE64);
+  });
   it("reclaims an old unreferenced blob and keeps a fresh one", async () => {
     const { service } = await setup(new DeterministicAgentDriver());
     const now = new Date("2026-05-01T00:00:00Z");
@@ -866,12 +1209,28 @@ describe("session history pagination", () => {
     const { service, auth, sessionId } = await setup(new ControlledDriver());
     const changes = await Promise.all([
       service.handle("session/rename", { sessionId, title: "renamed" }, auth),
-      service.handle("session/configure", { sessionId, mode: "plan" }, auth),
+      service.handle("session/configure", { sessionId, permissionMode: "auto" }, auth),
       service.handle("session/archive", { sessionId, archived: true }, auth)
     ]) as Array<{ session: { revision: number } }>;
     expect(changes.map(result => result.session.revision).sort()).toEqual([2, 3, 4]);
     await expect(service.meta.getSession(sessionId))
-      .resolves.toMatchObject({ revision: 4, title: "renamed", mode: "plan", archived: true });
+      .resolves.toMatchObject({ revision: 4, title: "renamed", permissionMode: "auto", archived: true });
+  });
+
+  it("returns the renamed native title and timestamp from session/list without replacing Host settings", async () => {
+    const { service, config, auth } = await setup(new ControlledDriver());
+    const sessionId = "native-listed";
+    const path = await service.catalog.createFile(config.home, join(config.dataDir, "sessions"), sessionId);
+    const list = async () => ((await service.handle("session/list", {}, auth)) as { sessions: Array<{ id: string; revision: number }> }).sessions.find(session => session.id === sessionId)!;
+    await list();
+    await service.handle("session/configure", { sessionId, permissionMode: "auto", modelId: "selected" }, auth);
+    await service.handle("session/archive", { sessionId, archived: true }, auth);
+    await appendFile(path, JSON.stringify({ type: "session_info", id: "name", parentId: null, name: "Native rename", timestamp: new Date().toISOString() }) + "\n");
+    const changed = new Date(Math.ceil(Date.now() / 1000) * 1000 + 5000);
+    await utimes(path, changed, changed);
+    const summary = await list();
+    expect(summary).toMatchObject({ title: "Native rename", updatedAt: changed.toISOString(), permissionMode: "auto", modelId: "selected", archived: true });
+    expect((await list()).revision).toBe(summary.revision);
   });
 
   it("keeps a concurrently saved config during a native session list refresh", async () => {
@@ -883,13 +1242,13 @@ describe("session history pagination", () => {
     const listSessions = service.meta.listSessions.bind(service.meta);
     vi.spyOn(service.meta, "listSessions").mockImplementationOnce(async (...args) => {
       const snapshot = await listSessions(...args);
-      await service.handle("session/configure", { sessionId, mode: "plan" }, auth);
+      await service.handle("session/configure", { sessionId, permissionMode: "auto" }, auth);
       return snapshot;
     });
     await service.handle("session/list", {}, auth);
 
     await expect(service.handle("session/get", { sessionId }, auth))
-      .resolves.toMatchObject({ session: { mode: "plan", revision: 2 } });
+      .resolves.toMatchObject({ session: { permissionMode: "auto", revision: 2 } });
   });
 
   it("preserves session files and sidecars when native history no longer matches the catalog", async () => {

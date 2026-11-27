@@ -129,6 +129,9 @@ export class ProviderStore {
       const data = await this.load();
       const record = data.providers.find((entry) => entry.id === id);
       if (!record) throw new HostError("NOT_FOUND", "provider not found");
+      if (data.providers.some(entry => entry.id !== id && entry.vendorKey === input.vendorKey)) {
+        throw new HostError("CONFLICT", "provider vendorKey already exists");
+      }
       if (input.authKind === "none" && input.apiKey) {
         throw new HostError("INVALID_ARGUMENT", "apiKey is forbidden for none provider");
       }

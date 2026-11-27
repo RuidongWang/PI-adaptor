@@ -6,8 +6,9 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { DirectConfig } from "../config.js";
 import { HostError, asHostError } from "../errors.js";
 import { loadDirectTlsIdentity, type DirectTlsIdentity } from "../security/direct-tls.js";
-import { HISTORY_TEXT_CHUNK_BYTES, HostService } from "./host-service.js";
+import { HISTORY_TEXT_CHUNK_BYTES, HostService, SUBSCRIPTION_BYTE_LIMIT, SUBSCRIPTION_EVENT_LIMIT } from "./host-service.js";
 import { MAX_IMAGE_BYTES, MAX_READ_CHUNK_BYTES } from "../media/blob-store.js";
+import type { Cursor, HostEvent } from "../events/journal.js";
 
 const RACP_PATH = "/v1/racp/ws";
 const V2_PROTOCOL = "pi-racp.v2.jsonrpc";
@@ -28,8 +29,9 @@ type RegistryEntry = {
   deviceId: string;
   listener: ListenerKind;
   credentialHash: string;
-  subscriptions: Set<string>;
+  subscriptions: Map<string, { safe: Cursor; frames: Array<{ sequence: number; bytes: number }>; bytes: number }>;
 };
+
 
 /** One registry instance must be shared by both listeners of a HostService. */
 export class SocketDeviceRegistry {
@@ -53,15 +55,51 @@ export class SocketDeviceRegistry {
       deviceId,
       listener,
       credentialHash,
-      subscriptions: new Set()
+      subscriptions: new Map()
     };
     this.bySocket.set(socket, entry);
     this.byIdentity.set(entry.identity, entry);
     return entry;
   }
 
-  addSubscription(socket: WebSocket, subscriptionId: string): void {
-    this.bySocket.get(socket)?.subscriptions.add(subscriptionId);
+  addSubscription(socket: WebSocket, subscriptionId: string, safe: Cursor): void {
+    const subscriptions = this.bySocket.get(socket)?.subscriptions;
+    if (!subscriptions || subscriptions.size >= 8) {
+      this.service.removeSubscription(subscriptionId);
+      throw new HostError("RATE_LIMITED", "too many subscriptions");
+    }
+    subscriptions.set(subscriptionId, { safe, frames: [], bytes: 0 });
+  }
+
+  sendEvent(socket: WebSocket, id: string, event: HostEvent): boolean {
+    const window = this.bySocket.get(socket)?.subscriptions.get(id);
+    if (!window || socket.readyState !== socket.OPEN) return false;
+    const text = JSON.stringify({ jsonrpc: "2.0", method: "events/event", params: { event } });
+    const bytes = Buffer.byteLength(text);
+    if (socket.bufferedAmount + bytes > SUBSCRIPTION_BYTE_LIMIT || window.bytes + bytes > SUBSCRIPTION_BYTE_LIMIT || window.frames.length >= SUBSCRIPTION_EVENT_LIMIT) return false;
+    socket.send(text);
+    if (event.sequence !== undefined) {
+      window.frames.push({ sequence: event.sequence, bytes });
+      window.bytes += bytes;
+    }
+    return true;
+  }
+
+  acknowledge(socket: WebSocket, id: string, sequence: unknown): void {
+    const window = this.bySocket.get(socket)?.subscriptions.get(id);
+    if (!window) throw new HostError("CURSOR_EXPIRED", "subscription is no longer active");
+    if (typeof sequence !== "number" || !Number.isSafeInteger(sequence) || sequence < 0) throw new HostError("INVALID_ARGUMENT", "invalid ACK sequence");
+    if (sequence <= window.safe.sequence) return;
+    const index = window.frames.findIndex(frame => frame.sequence === sequence);
+    if (index < 0) throw new HostError("INVALID_ARGUMENT", "ACK does not refer to a delivered event");
+    for (const frame of window.frames.splice(0, index + 1)) window.bytes -= frame.bytes;
+    window.safe = { epoch: window.safe.epoch, sequence };
+  }
+
+  closeSlowSubscription(socket: WebSocket, id: string): void {
+    const lastSafeCursor = this.bySocket.get(socket)?.subscriptions.get(id)?.safe;
+    if (!this.removeSubscription(socket, id)) return;
+    send(socket, { jsonrpc: "2.0", method: "events/closed", params: { subscriptionId: id, code: "CLIENT_TOO_SLOW", message: "refresh subscription", lastSafeCursor } });
   }
 
   removeSubscription(socket: WebSocket, subscriptionId: string): boolean {
@@ -77,12 +115,12 @@ export class SocketDeviceRegistry {
     // Identity comparison makes a delayed close harmless if an entry was replaced.
     this.bySocket.delete(socket);
     if (this.byIdentity.get(entry.identity) === entry) this.byIdentity.delete(entry.identity);
-    for (const id of entry.subscriptions) this.service.removeSubscription(id);
+    for (const id of entry.subscriptions.keys()) this.service.removeSubscription(id);
     entry.subscriptions.clear();
   }
 
   private closeEntry(entry: RegistryEntry): void {
-    for (const subscriptionId of entry.subscriptions) {
+    for (const subscriptionId of entry.subscriptions.keys()) {
       send(entry.socket, {
         jsonrpc: "2.0",
         method: "events/closed",
@@ -681,6 +719,7 @@ async function handleMessage(
       auth,
       listener === "loopback" && frame.method === "connection/pair" && token?.startsWith("ppt2.") ? token : undefined,
       {
+        acknowledge: (id, sequence) => registry.acknowledge(socket, id, sequence),
         rotationConfirmed: (deviceId, previousCredentialHash) => {
           rotatedCredential = { deviceId, credentialHash: previousCredentialHash };
         }
@@ -696,18 +735,25 @@ async function handleMessage(
       closeRevokedSockets = revoked === true && typeof targetDevice === "string";
     }
     if (frame.method === "events/subscribe" && result && typeof result === "object") {
-      const subscription = result as { subscriptionId: string; replay?: unknown[] };
+      const subscription = result as { subscriptionId: string; starting: Cursor; replay?: HostEvent[] };
       if (socket.readyState !== socket.OPEN) {
         service.removeSubscription(subscription.subscriptionId);
         return;
       }
-      registry.addSubscription(socket, subscription.subscriptionId);
-      for (const event of subscription.replay ?? []) {
-        send(socket, { jsonrpc: "2.0", method: "events/event", params: { event } });
-      }
-      service.setSubscriptionSink(subscription.subscriptionId, (event) => {
-        send(socket, { jsonrpc: "2.0", method: "events/event", params: { event } });
-      });
+      const id = subscription.subscriptionId;
+      const after = (frame.params as { after?: Cursor } | undefined)?.after;
+      registry.addSubscription(socket, id, after ?? subscription.starting);
+      let subscribed = false;
+      const deliver = (event: HostEvent) => {
+        if (registry.sendEvent(socket, id, event)) return;
+        if (subscribed) registry.closeSlowSubscription(socket, id);
+        else throw new HostError("CLIENT_TOO_SLOW", "replay exceeds delivery window; refresh snapshot");
+      };
+      try {
+        for (const event of subscription.replay ?? []) deliver(event);
+        service.setSubscriptionSink(id, deliver);
+        subscribed = true;
+      } catch (error) { registry.removeSubscription(socket, id); throw error; }
       delete subscription.replay;
     }
     if (frame.method === "events/unsubscribe") {

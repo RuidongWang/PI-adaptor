@@ -1,8 +1,42 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { IdempotencyStore, requestDigest } from "../src/server/idempotency.js";
+
+it("retains recent results after 5000 completed writes and restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-retry-window-"));
+  try {
+    const createdAt = new Date(Date.now() - 5_000).toISOString();
+    const records = Array.from({ length: 5000 }, (_, index) => ({ key: String(index), method: "turn/start", digest: "d", createdAt, state: "done", result: "original" }));
+    await mkdir(join(root, "meta"));
+    await writeFile(join(root, "meta/idempotency.json"), JSON.stringify({ version: 1, records }));
+    const extra = vi.fn(async () => 1);
+    await expect(new IdempotencyStore(root).run("new", "attachment/chunk", "c", extra)).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    expect(extra).not.toHaveBeenCalled();
+    const work = vi.fn(async () => "duplicate");
+    expect(await new IdempotencyStore(root).run("0", "turn/start", "d", work)).toBe("original");
+    expect(work).not.toHaveBeenCalled();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it.each(["done", "pending"])("rejects expired %s keys after capacity cleanup and restart without repeating work", async expiredState => {
+  const root = await mkdtemp(join(tmpdir(), "pi-expired-key-"));
+  const first = new IdempotencyStore(root);
+  const restarted = new IdempotencyStore(root);
+  try {
+    const now = Date.now();
+    const records = Array.from({ length: 5000 }, (_, index) => ({ key: String(index), deviceId: "owner", method: "turn/start", digest: "d", result: "done", state: index ? "done" : expiredState, createdAt: new Date(index ? now : now - 25 * 3_600_000).toISOString() }));
+    await mkdir(join(root, "meta"));
+    await writeFile(join(root, "meta/idempotency.json"), JSON.stringify({ version: 1, records }));
+    await first.run("new", "turn/start", "d", async () => "accepted", "owner");
+    first.close();
+    const duplicate = vi.fn(async () => "duplicate");
+    await expect(restarted.run("0", "turn/start", "d", duplicate, "owner")).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(duplicate).not.toHaveBeenCalled();
+    expect(await restarted.run("0", "connection/revoke", "different", async () => true, "other")).toBe(true);
+  } finally { first.close(); restarted.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 it("lets an unrelated request finish while a slow request and its retry wait", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-adaptor-idempotency-"));
@@ -12,7 +46,7 @@ it("lets an unrelated request finish while a slow request and its retry wait", a
   const slow = vi.fn(() => gate);
   const original = store.run("slow", "skill/install", "first", slow, "device");
   const retry = store.run("slow", "skill/install", "first", slow, "device");
-  const quick = store.run("quick", "turn/start", "second", async () => ({ accepted: true }), "device");
+  const quick = store.run("quick", "turn/start", "second", async () => ({ accepted: true }), "device", new Date(Date.now() + 25 * 3_600_000));
   let advanced = false;
   void quick.then(() => { advanced = true; }, () => undefined);
   try {

@@ -7,6 +7,21 @@ import { BlobStore, MAX_IMAGE_BYTES } from "../src/media/blob-store.js";
 import { JsonCommitUncertainError } from "../src/util/json-file.js";
 
 describe("blob store", () => {
+  it("repairs missing and same-length corrupt blobs on reimport without changing attachment identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-media-repair-"));
+    onTestFinished(() => rm(root, { recursive: true, force: true }));
+    const store = new BlobStore(root);
+    await store.init();
+    const bytes = Buffer.from("original");
+    const input = { sessionId: "s", dataBase64: bytes.toString("base64"), mimeType: "image/png", fileName: "x.png", kind: "output" as const };
+    const first = await store.importImageBase64(input);
+    const path = join(root, "media", "blobs", first.sha256);
+    for (const damage of [() => rm(path), () => writeFile(path, Buffer.alloc(bytes.length))]) {
+      await damage();
+      expect((await store.importImageBase64(input)).id).toBe(first.id);
+      expect((await store.readForTurn(first.id, "s")).dataBase64).toBe(input.dataBase64);
+    }
+  });
   it("retries completion after the index rename without losing the staged or ready bytes", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-media-commit-"));
     onTestFinished(() => rm(root, { recursive: true, force: true }));
@@ -54,6 +69,9 @@ describe("blob store", () => {
       byteLength: bytes.length,
       sha256: hash
     });
+    expect(await store.appendChunk(created.id, 0, bytes.subarray(0, 3).toString("base64"))).toBe(3);
+    await expect(store.appendChunk(created.id, 1, "AA==")).rejects.toMatchObject({ code: "ATTACHMENT_INVALID" });
+    expect(await store.appendChunk(created.id, 1, bytes.subarray(1).toString("base64"))).toBe(bytes.length);
     expect(await store.appendChunk(created.id, 0, bytes.toString("base64"))).toBe(bytes.length);
     const ready = await store.complete(created.id, hash);
     expect(ready.state).toBe("ready");

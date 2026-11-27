@@ -10,6 +10,7 @@ import type { ExtensionSnapshot } from "../src/extensions/types.js";
 import { ensureHostDirectories, parseHostConfig } from "../src/config.js";
 import { NativeSessionCatalog } from "../src/pi/session-catalog.js";
 import { HostService } from "../src/server/host-service.js";
+import { WorkerAgentDriver } from "../src/agent/worker-driver.js";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -60,6 +61,17 @@ export default pi => {
 }
 
 describe("extensions driver", () => {
+  it("runs verified writes off the Host thread and relays approvals and completion", async () => {
+    const fixture = await driverFixture();
+    const catalog = new NativeSessionCatalog([fixture.request.sessionDir]);
+    fixture.request.sessionFile = await catalog.createFile(fixture.root, fixture.request.sessionDir, fixture.request.sessionId);
+    const approve = vi.fn(async () => false);
+    await new WorkerAgentDriver(fixture.agentDir).start({ ...fixture.request, requestApproval: approve }).wait();
+    expect(approve).toHaveBeenCalled();
+    expect(await readFile(fixture.marker, "utf8")).not.toContain("execute");
+    expect(fixture.events.at(-1)?.kind).toBe("turn.completed");
+    expect(await catalog.history(fixture.request.sessionFile)).not.toHaveLength(0);
+  });
   it("links ordinary completed SDK messages to the verified native entries", async () => {
     const fixture = await driverFixture();
     const catalog = new NativeSessionCatalog([fixture.request.sessionDir]);

@@ -272,9 +272,8 @@ export function parseHostConfig(
   const fileSessionDir = typeof fileConfig.sessionDir === "string" ? fileConfig.sessionDir : undefined;
   const configuredSessionDir =
     valueAfter(args, "--session-dir") ?? env.PI_ADAPTOR_SESSION_DIR ?? env.PI_SESSION_DIR ?? fileSessionDir;
-  const sessionRoots = configuredSessionDir
-    ? [resolve(configuredSessionDir)]
-    : [join(dataDir, "sessions")];
+  const defaultSessionDir = join(dataDir, "sessions");
+  const sessionRoots = [...new Set([resolve(configuredSessionDir ?? defaultSessionDir), defaultSessionDir])];
 
   const rawPort = valueAfter(args, "--port") ?? env.PI_ADAPTOR_PORT ?? fileConfig.port ?? 0;
   const port = numberFromPort(rawPort, "port");

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
@@ -13,6 +13,22 @@ async function makeStore() {
 }
 
 describe("token store", () => {
+  it("authenticates alternating devices without writes and tolerates read-only metadata", async () => {
+    const { root, store } = await makeStore();
+    const first = await store.pair((await store.createPairingToken()).token, "one");
+    const second = await store.pair((await store.createPairingToken()).token, "two");
+    const path = join(root, "meta", "tokens.json");
+    const inode = (await stat(path)).ino;
+    for (const device of [first, second, first, second]) await store.authenticate(device.deviceToken);
+    await store.waitForWrites();
+    expect((await stat(path)).ino).toBe(inode);
+    await chmod(join(root, "meta"), 0o500);
+    try {
+      const cold = new TokenStore(root);
+      expect((await cold.authenticate(first.deviceToken, new Date(Date.now() + 120_000))).deviceId).toBe(first.deviceId);
+      await cold.waitForWrites();
+    } finally { await chmod(join(root, "meta"), 0o700); }
+  });
   it("serializes simultaneous pair and revoke operations", async () => {
     const { store } = await makeStore();
     const pairing = await store.createPairingToken();

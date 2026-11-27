@@ -10,6 +10,7 @@ export type TurnRecord = {
   createdAt: string;
   settledAt: string | null;
   settledReason?: string;
+  eventPending?: boolean;
 };
 
 type TurnFile = { version: 1; turns: TurnRecord[] };
@@ -56,44 +57,46 @@ export class TurnStore {
     return value;
   }
 
-  private async save(value: TurnFile): Promise<void> {
-    this.pruneTerminalTurns(value);
+  private async save(value: TurnFile): Promise<string[]> {
+    const evicted = this.pruneTerminalTurns(value);
     try {
       await writeJsonFileAtomic(this.path, value, 0o600);
       this.cache = value;
+      return evicted;
     } catch (error) {
       this.cache = null;
       throw error;
     }
   }
 
-  private pruneTerminalTurns(value: TurnFile): void {
+  private pruneTerminalTurns(value: TurnFile): string[] {
     const active: TurnRecord[] = [];
     const terminal: TurnRecord[] = [];
     for (const turn of value.turns) {
-      if (ACTIVE_TURN_STATUSES.has(turn.status)) active.push(turn);
+      if (ACTIVE_TURN_STATUSES.has(turn.status) || turn.eventPending) active.push(turn);
       else terminal.push(turn);
     }
-    if (terminal.length <= MAX_TERMINAL_TURNS) return;
+    if (terminal.length <= MAX_TERMINAL_TURNS) return [];
     terminal.sort((left, right) => {
       const a = Date.parse(left.settledAt ?? left.createdAt) || 0;
       const b = Date.parse(right.settledAt ?? right.createdAt) || 0;
       return a - b;
     });
     value.turns = [...active, ...terminal.slice(terminal.length - MAX_TERMINAL_TURNS)];
+    return terminal.slice(0, -MAX_TERMINAL_TURNS).map(turn => turn.id);
   }
 
   async all(): Promise<TurnRecord[]> {
     return this.serialized(async () => (await this.load()).turns.map((turn) => ({ ...turn })));
   }
 
-  async upsert(record: TurnRecord): Promise<void> {
+  async upsert(record: TurnRecord): Promise<string[]> {
     return this.serialized(async () => {
       const data = await this.load();
       const index = data.turns.findIndex((entry) => entry.id === record.id);
       if (index >= 0) data.turns[index] = { ...data.turns[index], ...record };
       else data.turns.push(record);
-      await this.save(data);
+      return this.save(data);
     });
   }
 

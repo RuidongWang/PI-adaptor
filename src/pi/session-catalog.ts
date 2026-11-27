@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { isMainThread, parentPort, workerData } from "node:worker_threads";
+import { moduleWorker } from "../util/module-worker.js";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync, unlinkSync, writeSync, type BigIntStats } from "node:fs";
 import { mkdir, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { SessionManager, type FileEntry, type SessionEntry, type SessionHeader } from "@earendil-works/pi-coding-agent";
 import { HostError } from "../errors.js";
 import { publicAssistantMessage } from "../providers/runtime.js";
@@ -12,6 +14,8 @@ export type NativeSession = {
   path: string;
   cwd: string;
   title: string;
+  hasNativeTitle?: boolean;
+  parentSession?: string;
   messageCount: number;
   createdAt: string;
   updatedAt: string;
@@ -25,13 +29,29 @@ export type NativeWriteResult = {
   fingerprintAfter: string;
 };
 
-async function walkJsonl(root: string): Promise<string[]> {
+type CatalogWrite = { path: string; expectedId: string | undefined } & (
+  { operation: "user"; text: string; now: number } | { operation: "title"; title: string }
+);
+
+function writeOffThread(work: CatalogWrite & { operation: "user" }): Promise<NativeWriteResult>;
+function writeOffThread(work: CatalogWrite & { operation: "title" }): Promise<string>;
+function writeOffThread(work: CatalogWrite): Promise<NativeWriteResult | string> {
+  const worker = moduleWorker(import.meta.url, { catalogWrite: work });
+  return new Promise((resolve, reject) => {
+    worker.once("error", reject);
+    worker.once("message", reply => reply.reason ? reject(new HostError("SESSION_READ_ONLY", reply.reason)) : resolve(reply.result));
+    worker.once("exit", () => reject(new Error("Native session writer stopped before replying")));
+  });
+}
+
+async function walkJsonl(root: string, uninspected: Set<string>): Promise<string[]> {
   const result: string[] = [];
   async function visit(path: string): Promise<void> {
     let entries;
     try {
       entries = await readdir(path, { withFileTypes: true });
     } catch {
+      uninspected.add(path);
       return;
     }
     for (const entry of entries) {
@@ -45,8 +65,6 @@ async function walkJsonl(root: string): Promise<string[]> {
 }
 
 function titleFromEntries(entries: SessionEntry[], fallback: string): string {
-  const info = [...entries].reverse().find((entry) => entry.type === "session_info" && entry.name);
-  if (info && info.type === "session_info" && info.name) return info.name;
   const user = entries.find(
     (entry) => entry.type === "message" && (entry.message as { role?: string }).role === "user"
   );
@@ -65,6 +83,10 @@ function titleFromEntries(entries: SessionEntry[], fallback: string): string {
 function sameVersion(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size
     && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function deletionStamp(version: BigIntStats): string {
+  return [version.dev, version.ino, version.size, version.mtimeNs, version.ctimeNs].join(":");
 }
 
 export function messageText(content: unknown): string {
@@ -122,6 +144,10 @@ async function readSession(path: string) {
 function syncDirectory(path: string): void {
   const directory = openSync(dirname(path), constants.O_RDONLY);
   try { fsyncSync(directory); } finally { closeSync(directory); }
+}
+
+function activeBranch(header: SessionHeader, entries: FileEntry[]): SessionEntry[] {
+  return SessionManager.inMemory(header.cwd, undefined, entries).getBranch();
 }
 
 function hashPrefix(fd: number, size: number, buffer: Buffer): string {
@@ -198,33 +224,55 @@ const MAX_CACHED_TEXT_BYTES = 32 * 1024 * 1024;
 const MAX_CACHED_TEXT_ITEMS = 16;
 
 export class NativeSessionCatalog {
+  private readonly summaries = new Map<string, { version: BigIntStats; summary: NativeSession }>();
   private readonly textCache = new Map<string, { sessionId: string; version: BigIntStats; body: Buffer }>();
   private cachedTextBytes = 0;
 
   constructor(private readonly roots: string[]) {}
 
   async scan(): Promise<NativeSession[]> {
+    return (await this.scanWithCoverage()).sessions;
+  }
+
+  async scanWithCoverage(): Promise<{ sessions: NativeSession[]; uninspected: Set<string> }> {
     const paths = new Set<string>();
+    const uninspected = new Set<string>();
+    const visitedRoots = new Set<string>();
     for (const root of this.roots) {
-      for (const path of await walkJsonl(resolve(root))) paths.add(path);
+      const canonical = await realpath(root).catch(() => undefined);
+      if (!canonical) { uninspected.add(root); continue; }
+      if (visitedRoots.has(canonical)) continue;
+      visitedRoots.add(canonical);
+      for (const path of await walkJsonl(resolve(root), uninspected)) paths.add(path);
     }
     const sessions: NativeSession[] = [];
+    for (const cached of this.summaries.keys()) if (!paths.has(cached)) this.summaries.delete(cached);
     for (const path of paths) {
       try {
+        const cached = this.summaries.get(path);
+        if (cached && sameVersion(cached.version, await stat(path, { bigint: true }))) {
+          sessions.push({ ...cached.summary });
+          continue;
+        }
         const { header, entries, version, readOnlyReason } = await readSession(path);
         const manager = header?.version === 3 ? SessionManager.inMemory(header.cwd, undefined, entries) : undefined;
         const messages = manager?.getEntries() ?? [];
-        sessions.push({
+        const summary = {
           id: header?.id ?? path,
           path,
           cwd: header?.cwd ?? "",
+          ...(header?.parentSession ? { parentSession: resolve(dirname(path), header.parentSession) } : {}),
           title: manager?.getSessionName() ?? titleFromEntries(messages, header?.id ?? path),
+          hasNativeTitle: messages.some(entry => entry.type === "session_info"),
           messageCount: messages.filter((entry) => entry.type === "message").length,
           createdAt: header?.timestamp ?? new Date(0).toISOString(),
           updatedAt: version.mtime.toISOString(),
           readOnlyReason
-        });
+        };
+        this.summaries.set(path, { version, summary });
+        sessions.push({ ...summary });
       } catch (error) {
+        uninspected.add(path);
         if (error instanceof HostError && error.message === "external_write_conflict") continue;
         sessions.push({
           id: path,
@@ -238,7 +286,17 @@ export class NativeSessionCatalog {
         });
       }
     }
-    return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    for (const session of sessions) if (session.id === session.path && session.readOnlyReason) uninspected.add(session.path);
+    return { sessions: sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)), uninspected };
+  }
+
+  async uniquePath(id: string, matches: NativeSession[]): Promise<string | undefined> {
+    if (!matches.length) return undefined;
+    const candidate = matches[0]!;
+    if (matches.length !== 1 || candidate.readOnlyReason || !await this.deletionVersion(candidate.path, id)) {
+      throw new HostError("CONFLICT", "native session identity is ambiguous or unavailable");
+    }
+    return candidate.path;
   }
 
   async createFile(cwd: string, sessionDir: string, id: string, now = new Date()): Promise<string> {
@@ -260,6 +318,7 @@ export class NativeSessionCatalog {
     now = Date.now(),
     expectedId?: string
   ): Promise<NativeWriteResult> {
+    if (isMainThread) return writeOffThread({ operation: "user", path: sessionPath, text, now, expectedId });
     const beforeBytes = await readFile(sessionPath);
     const manager = await openNativeSessionForWrite(sessionPath, expectedId);
     const entryId = manager.appendMessage({ role: "user", content: text, timestamp: now });
@@ -272,16 +331,22 @@ export class NativeSessionCatalog {
   }
 
   async appendSessionInfo(sessionPath: string, title: string, expectedId?: string): Promise<string> {
+    if (isMainThread) return writeOffThread({ operation: "title", path: sessionPath, title, expectedId });
     return (await openNativeSessionForWrite(sessionPath, expectedId)).appendSessionInfo(title);
   }
 
-  async branch(sessionPath: string, fromEntryId: string, expectedId?: string): Promise<string> {
+  async branch(sessionPath: string, fromEntryId: string, expectedId?: string, title?: string, childId?: string): Promise<string> {
     const manager = await openNativeSessionForWrite(sessionPath, expectedId);
     if (!manager.getEntry(fromEntryId)) throw new HostError("NOT_FOUND", "branch item not found");
     manager.createBranchedSession(fromEntryId);
-    const header = { ...manager.getHeader()!, parentSession: sessionPath };
+    const header = { ...manager.getHeader()!, ...(childId ? { id: childId } : {}), parentSession: sessionPath };
     const child = join(dirname(sessionPath), `${header.timestamp.replace(/[:.]/g, "-")}_${header.id}.jsonl`);
-    const entries = [header, ...manager.getEntries()];
+    let entries = [header, ...manager.getEntries()];
+    if (title !== undefined) {
+      const named = SessionManager.inMemory(header.cwd, undefined, entries);
+      named.appendSessionInfo(title);
+      entries = [header, ...named.getEntries()];
+    }
     await writeFile(child, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""), { mode: 0o600, flag: "wx", flush: true });
     syncDirectory(child);
     return child;
@@ -291,13 +356,19 @@ export class NativeSessionCatalog {
     return (await this.historySnapshot(sessionPath, expectedId)).entries;
   }
 
+  async allEntriesForMaintenance(sessionPath: string, expectedId: string): Promise<SessionEntry[]> {
+    const { header, entries, readOnlyReason } = await readSession(sessionPath);
+    if (readOnlyReason || header?.id !== expectedId) throw new HostError("SESSION_READ_ONLY", readOnlyReason ?? "external_write_conflict");
+    return entries.slice(1) as SessionEntry[];
+  }
+
   private async historySnapshot(sessionPath: string, expectedId?: string): Promise<{ entries: SessionEntry[]; version: BigIntStats }> {
     const { header, entries, version } = await readSession(sessionPath);
     if (header?.version !== 3) throw new HostError("SESSION_READ_ONLY", "unsupported_session_version");
     if (expectedId !== undefined && header.id !== expectedId) {
       throw new HostError("SESSION_READ_ONLY", "external_write_conflict");
     }
-    return { entries: entries.slice(1) as SessionEntry[], version };
+    return { entries: activeBranch(header, entries), version };
   }
 
   async historyTextChunk(sessionPath: string, sessionId: string, itemId: string, offset: number, length: number) {
@@ -336,13 +407,13 @@ export class NativeSessionCatalog {
     this.cachedTextBytes -= cached.body.length;
   }
 
-  async deleteFile(sessionPath: string, sessionId: string): Promise<void> {
+  async deletionVersion(sessionPath: string, sessionId: string): Promise<string | null> {
     // A retry after a successful unlink must still be able to clean sidecars.
     let version: BigIntStats;
     try {
       version = lstatSync(sessionPath, { bigint: true });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw new HostError("SESSION_READ_ONLY", "lease_unavailable");
     }
     try {
@@ -352,13 +423,31 @@ export class NativeSessionCatalog {
           || !sameVersion(version, lstatSync(sessionPath, { bigint: true }))) {
         throw new HostError("SESSION_READ_ONLY", "external_write_conflict");
       }
-      // Keep the final identity check adjacent to unlink; external Pi writers
-      // do not acquire the Host's per-session mutex.
-      unlinkSync(sessionPath);
+      return deletionStamp(version);
     } catch (error) {
       if (error instanceof HostError) throw error;
       throw new HostError("SESSION_READ_ONLY", "lease_unavailable");
     }
+  }
+
+  async deleteFile(sessionPath: string, sessionId: string, expected: string): Promise<void> {
+    const current = await this.deletionVersion(sessionPath, sessionId);
+    if (current === null) { syncDirectory(sessionPath); return; }
+    const version = lstatSync(sessionPath, { bigint: true });
+    if (current !== expected || deletionStamp(version) !== expected) {
+      throw new HostError("SESSION_READ_ONLY", "external_write_conflict");
+    }
+    unlinkSync(sessionPath);
+    syncDirectory(sessionPath);
+  }
+
+  async confirmedMissing(path: string): Promise<boolean> {
+    try {
+      if (!(await readdir(dirname(path))).includes(basename(path))) {
+        try { lstatSync(path); } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+      }
+    } catch { /* An unavailable directory is not proof of deletion. */ }
+    return false;
   }
 
   forgetHistoryText(sessionId: string): void {
@@ -371,9 +460,22 @@ export class NativeSessionCatalog {
     try {
       const { header, entries, readOnlyReason } = await readSession(sessionPath);
       if (header && header.id !== expectedId) return { entries: [], readOnlyReason: "external_write_conflict" };
-      return { entries: header?.version === 3 ? entries.slice(1) as SessionEntry[] : [], readOnlyReason };
+      return { entries: header?.version === 3 ? activeBranch(header, entries) : [], readOnlyReason };
     } catch (error) {
       return { entries: [], readOnlyReason: error instanceof HostError ? error.message : "lease_unavailable" };
     }
   }
+}
+
+if (parentPort && workerData?.catalogWrite) {
+  const work: CatalogWrite = workerData.catalogWrite;
+  const catalog = new NativeSessionCatalog([]);
+  try {
+    const result = work.operation === "user" ? await catalog.appendUserMessage(work.path, work.text, work.now, work.expectedId)
+      : await catalog.appendSessionInfo(work.path, work.title, work.expectedId);
+    parentPort.postMessage({ result });
+  } catch (error) {
+    parentPort.postMessage({ reason: error instanceof HostError ? error.message : "lease_unavailable" });
+  }
+  parentPort.close();
 }

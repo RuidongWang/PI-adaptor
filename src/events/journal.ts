@@ -1,9 +1,10 @@
-import { appendFile, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { HostError } from "../errors.js";
 import { uuid } from "../util/id.js";
+import { readJsonFile, syncDirectory, writeJsonFileAtomic } from "../util/json-file.js";
 
 export type Cursor = { epoch: string; sequence: number };
 
@@ -43,6 +44,9 @@ export class EventJournal {
   /// Disk retention: the active JSONL is rotated once it reaches this size and
   /// only the newest `maxFiles` rotated files are kept.
   private bytesWritten = 0;
+  private rollbackSize: number | undefined;
+  private readonly unconfirmedTransitions = new Set<string>();
+  private checkpointExists = false;
 
   constructor(
     dataDir: string,
@@ -58,6 +62,10 @@ export class EventJournal {
   }
 
   private async rotate(): Promise<void> {
+    if (this.unconfirmedTransitions.size || this.checkpointExists) {
+      await writeJsonFileAtomic(`${this.path}.pending-transitions.json`, [...this.unconfirmedTransitions]);
+      this.checkpointExists = this.unconfirmedTransitions.size > 0;
+    }
     // Drop the oldest, shift the rest, then move the active file aside.
     await rm(this.rotatedPath(this.maxFiles), { force: true });
     for (let index = this.maxFiles - 1; index >= 1; index -= 1) {
@@ -77,13 +85,17 @@ export class EventJournal {
     this.bytesWritten = 0;
   }
 
-  async load(): Promise<void> {
+  async load(pendingTransitions: ReadonlySet<string> = new Set()): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     this.events = [];
+    this.bytesWritten = 0;
     this.sequence = 0;
     this.droppedHostSequence = 0;
     this.droppedSessionSequence.clear();
-    let hadCorruptedTail = false;
+    this.unconfirmedTransitions.clear();
+    const saved = await readJsonFile<string[]>(`${this.path}.pending-transitions.json`, []);
+    this.checkpointExists = saved.length > 0;
+    for (const id of saved) if (pendingTransitions.has(id)) this.unconfirmedTransitions.add(id);
     // Read rotated files oldest-first, then the active file. Only the last
     // `maxEvents` events stay in memory; the file is streamed line by line so a
     // long-lived journal does not have to fit in RAM at startup.
@@ -93,7 +105,10 @@ export class EventJournal {
     for (const file of files) {
       try {
         const info = await stat(file);
-        if (file === this.path) this.bytesWritten = info.size;
+        if (file === this.path) {
+          this.bytesWritten = info.size;
+          if (info.size) await this.repairTail();
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw error;
@@ -104,28 +119,60 @@ export class EventJournal {
           if (!line.trim()) continue;
           try {
             const event = JSON.parse(line) as HostEvent;
+            if (!Number.isSafeInteger(event?.sequence) || !event.payload || typeof event.payload !== "object") continue;
             this.events.push(event);
             this.sequence = Math.max(this.sequence, event.sequence ?? 0);
-            if (event.sequence === undefined || typeof event.payload !== "object" || event.payload === null) {
-              hadCorruptedTail = true;
-            }
+            const id = this.transitionKey(event);
+            if (id && pendingTransitions.has(id)) this.unconfirmedTransitions.add(id);
             if (this.events.length > this.maxEvents) this.trim();
-          } catch {
-            if (file === this.path) hadCorruptedTail = true;
-          }
+          } catch { continue; }
         }
       } finally {
         reader.close();
       }
     }
-    if (hadCorruptedTail) {
-      // Rewrite only the active file with the surviving suffix; rotated files
-      // are retained as-is because they are already bounded and immutable.
-      const sanitized = this.events.length > 0 ? this.events.map((event) => JSON.stringify(event)).join("\n") + "\n" : "";
-      await writeFile(this.path, sanitized, { mode: 0o600 });
-      this.bytesWritten = Buffer.byteLength(sanitized, "utf8");
-    }
     this.trim();
+  }
+
+  private transitionKey(event: Pick<HostEvent, "kind" | "turnId" | "sessionId">): string | undefined {
+    if (["turn.completed", "turn.failed", "turn.interrupted"].includes(event.kind)) return event.turnId;
+    if (event.kind === "session.created" && event.sessionId) return `branch:${event.sessionId}`;
+    if (event.kind === "session.deleted" && event.sessionId) return `deleted:${event.sessionId}`;
+    return undefined;
+  }
+
+  confirmTransition(id: string): void { this.unconfirmedTransitions.delete(id); }
+
+  private async repairTail(): Promise<void> {
+    const handle = await open(this.path, "r+");
+    try {
+      const last = Buffer.alloc(1);
+      await handle.read(last, 0, 1, this.bytesWritten - 1);
+      if (last[0] === 10) return;
+      const bytes = await readFile(this.path);
+      const start = bytes.lastIndexOf(10) + 1;
+      let complete = false;
+      try { complete = Number.isSafeInteger(JSON.parse(bytes.toString("utf8", start))?.sequence); } catch { /* torn record */ }
+      if (complete) {
+        await handle.write(Buffer.from("\n"), 0, 1, this.bytesWritten);
+        this.bytesWritten++;
+      } else {
+        await handle.truncate(start);
+        this.bytesWritten = start;
+      }
+      await handle.sync();
+    } finally { await handle.close(); }
+  }
+
+  private async rollbackAppend(): Promise<void> {
+    if (this.rollbackSize === undefined) return;
+    const handle = await open(this.path, "a+", 0o600);
+    try {
+      await handle.truncate(this.rollbackSize);
+      await handle.sync();
+    } finally { await handle.close(); }
+    await syncDirectory(dirname(this.path));
+    this.rollbackSize = undefined;
   }
 
   /** Drop the oldest buffered events past `maxEvents`, advancing watermarks. */
@@ -154,6 +201,7 @@ export class EventJournal {
     extra: Partial<HostEvent> = {}
   ): Promise<HostEvent> {
     const result = this.pending.then(async () => {
+      await this.rollbackAppend();
       const nextSequence = this.sequence + 1;
       const event: HostEvent = {
         scope,
@@ -168,10 +216,20 @@ export class EventJournal {
       if (this.bytesWritten > 0 && this.bytesWritten + lineBytes > this.maxFileBytes) {
         await this.rotate();
       }
-      await appendFile(this.path, line, { mode: 0o600 });
+      const transition = this.transitionKey(event);
+      const durable = !!transition || ["approval.resolved", "session.deleted", "turn.completed", "turn.failed", "turn.interrupted"].includes(kind);
+      try {
+        await appendFile(this.path, line, { mode: 0o600, flush: durable });
+        if (durable) await syncDirectory(dirname(this.path));
+      } catch (error) {
+        this.rollbackSize = this.bytesWritten;
+        await this.rollbackAppend();
+        throw error;
+      }
       this.bytesWritten += lineBytes;
       this.sequence = nextSequence;
       this.events.push(event);
+      if (transition) this.unconfirmedTransitions.add(transition);
       this.trim();
       return event;
     });
@@ -205,5 +263,11 @@ export class EventJournal {
 
   currentCursor(): Cursor {
     return { epoch: this.epoch, sequence: this.sequence };
+  }
+
+  hasTransition(kind: string, sessionId: string, turnId?: string): boolean {
+    const key = this.transitionKey({ kind, sessionId, ...(turnId ? { turnId } : {}) });
+    if (key && this.unconfirmedTransitions.has(key)) return true;
+    return this.events.some(event => event.kind === kind && event.sessionId === sessionId && event.turnId === turnId);
   }
 }

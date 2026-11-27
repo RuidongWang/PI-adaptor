@@ -104,7 +104,7 @@ export class TokenStore {
         const device = data.devices.find((entry) => entry.deviceId === deviceId);
         if (!device || device.revokedAt) return;
         device.lastUsedAt = now.toISOString();
-        await this.save(data);
+        await writeJsonFileAtomic(this.path, data, 0o600);
       } catch {
         // best-effort only
       }
@@ -152,8 +152,9 @@ export class TokenStore {
   async authenticate(token: string, now = new Date()): Promise<DeviceRecord> {
     const tokenHash = sha256(token);
     const cached = this.authCache.get(tokenHash);
-    if (cached && now.getTime() - cached.cachedAt < 5_000) {
-      const last = this.lastUsedPersistedAt.get(cached.device.deviceId) ?? 0;
+    if (cached && now.getTime() - cached.cachedAt < 5_000 &&
+        (cached.device.tokenHash === tokenHash || Date.parse(cached.device.previousValidUntil ?? "") > now.getTime())) {
+      const last = this.lastUsedPersistedAt.get(cached.device.deviceId) ?? Date.parse(cached.device.lastUsedAt);
       if (now.getTime() - last > 60_000) this.touchLastUsed(cached.device.deviceId, now);
       return cached.device;
     }
@@ -170,9 +171,8 @@ export class TokenStore {
               digestEquals(entry.previousTokenHash, hash)))
       );
       if (!device) throw new HostError("UNAUTHORIZED", "device token is invalid or revoked");
-      device.lastUsedAt = now.toISOString();
-      this.lastUsedPersistedAt.set(device.deviceId, now.getTime());
-      await this.save(data);
+      const last = this.lastUsedPersistedAt.get(device.deviceId) ?? Date.parse(device.lastUsedAt);
+      if (now.getTime() - last > 60_000) this.touchLastUsed(device.deviceId, now);
       this.authCache.set(tokenHash, { device, cachedAt: now.getTime() });
       return device;
     });

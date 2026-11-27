@@ -7,6 +7,8 @@
 export class KeyedMutex {
   private readonly chains = new Map<string, Promise<unknown>>();
 
+  has(key: string): boolean { return this.chains.has(key); }
+
   run<T>(key: string, work: () => Promise<T>): Promise<T> {
     const previous = this.chains.get(key) ?? Promise.resolve();
     const result = previous.then(work, work);

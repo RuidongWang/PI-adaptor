@@ -2,10 +2,25 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { NativeSessionCatalog, openNativeSessionForWrite } from "../src/pi/session-catalog.js";
 
 describe("native session catalog", () => {
+  it("reuses unchanged summaries but reparses a modified session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-summary-cache-"));
+    const parse = vi.spyOn(SessionManager, "inMemory");
+    try {
+      const catalog = new NativeSessionCatalog([root]);
+      const path = await catalog.createFile(root, root, "cached");
+      await catalog.scan();
+      await catalog.scan();
+      expect(parse).toHaveBeenCalledTimes(1);
+      await catalog.appendSessionInfo(path, "new name");
+      parse.mockClear();
+      expect(await catalog.scan()).toMatchObject([{ title: "new name" }]);
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally { parse.mockRestore(); await rm(root, { recursive: true, force: true }); }
+  });
   it("preserves a truncated native file and blocks writes to it", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-adaptor-tail-"));
     try {
@@ -67,7 +82,8 @@ describe("native session catalog", () => {
 
     await catalog.appendSessionInfo(file!, "Renamed");
     expect((await catalog.scan())[0]?.title).toBe("Renamed");
-    const child = await catalog.branch(file!, first);
+    const child = await catalog.branch(file!, first, undefined, "Named branch");
     expect(child).not.toBe(file);
+    expect((await catalog.scan()).find(session => session.path === child)).toMatchObject({ title: "Named branch", readOnlyReason: null });
   });
 });

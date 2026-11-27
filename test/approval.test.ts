@@ -74,6 +74,51 @@ async function setup(driver: AgentDriver = new ApprovalToolDriver()) {
 }
 
 describe("pending tool approvals", () => {
+  it("does not release the driver or grant session permission on a failed decision write", async () => {
+    const decisions: boolean[] = [];
+    const fixture = await hostFixture({ appendsPrompt: true, start(request) {
+      const wait = (async () => {
+        for (const input of [1, 2]) decisions.push(await request.requestApproval!("fixture", input));
+      })();
+      return { turnId: request.turnId, wait: () => wait, abort: async () => {} };
+    } });
+    const { service, auth, sessionId } = fixture;
+    try {
+      await service.handle("turn/start", { sessionId, input: { text: "fixture" } }, auth);
+      await vi.waitFor(() => expect(service.journal.replay("session", sessionId, { epoch: service.journal.epoch, sequence: 0 }).some(event => event.kind === "approval.requested")).toBe(true));
+      const [approvalId] = service["pendingApprovals"].keys();
+      const respond = (decision: string) => service.handle("approval/respond", { approvalId, decision }, auth);
+      vi.spyOn(service.journal, "append").mockRejectedValueOnce(new Error("fixture write failure"));
+      await expect(respond("allow-session")).rejects.toThrow("fixture write failure");
+      expect(decisions).toEqual([]);
+      expect(service["pendingApprovals"].has(approvalId!)).toBe(true);
+      const results = await Promise.all([respond("deny"), respond("allow-once")]);
+      expect(results).toMatchObject([{ alreadyResolved: false }, { alreadyResolved: true }]);
+      await vi.waitFor(() => expect(service["pendingApprovals"].size).toBe(1));
+      expect(decisions).toEqual([false]);
+      await service.handle("approval/respond", { approvalId: [...service["pendingApprovals"].keys()][0], decision: "allow-once" }, auth);
+      expect(decisions).toEqual([false, true]);
+    } finally { vi.restoreAllMocks(); await service.shutdown(); await rm(fixture.root, { recursive: true, force: true }); }
+  });
+
+  it("expires a pending approval with a replayable resolution and an empty snapshot", async () => {
+    const fixture = await hostFixture(new ApprovalToolDriver());
+    const { service, auth, sessionId } = fixture;
+    const after = service.journal.currentCursor();
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      await service.handle("turn/start", { sessionId, input: { text: "fixture" } }, auth);
+      const attached = await service.handle("session/attach", { sessionId }, auth) as { snapshot: { pendingApprovals: Array<{id: string; expiresAt: string}> } };
+      const approval = attached.snapshot.pendingApprovals[0]!;
+      expect(Date.parse(approval.expiresAt)).toBe(Date.now() + 86400000);
+      await vi.advanceTimersByTimeAsync(86400000);
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(service["pendingApprovals"].size).toBe(0));
+      const resolutions = service.journal.replay("session", sessionId, after).filter(event => event.kind === "approval.resolved");
+      expect(resolutions.map(event => event.payload)).toEqual([{ approvalId: approval.id, status: "expired" }]);
+      await expect(service.handle("session/attach", { sessionId }, auth)).resolves.toMatchObject({ snapshot: { pendingApprovals: [] } });
+    } finally { vi.useRealTimers(); await service.shutdown(); await rm(fixture.root, { recursive: true, force: true }); }
+  });
   it("replays a live approval through session/attach", async () => {
     const { service, auth, sessionId } = await setup();
     await service.handle("turn/start", { sessionId, input: { text: "run a tool" } }, auth);

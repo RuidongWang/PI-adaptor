@@ -1,5 +1,6 @@
-import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { HostError } from "../errors.js";
 import { readJsonFile, writeJsonFileAtomic } from "../util/json-file.js";
 import { sha256 } from "../util/id.js";
@@ -24,9 +25,8 @@ export type IdempotencyRecord = {
 type IdempotencyFile = { version: 1; records: IdempotencyRecord[] };
 
 const EMPTY: IdempotencyFile = { version: 1, records: [] };
-/** Keys older than this are forgotten; a retry after the window is a new request. */
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_DONE_RECORDS = 5000;
+const MAX_RECORDS = 5000;
 
 /** Deterministic JSON encoding so two equivalent param objects share a digest. */
 function stableStringify(value: unknown): string {
@@ -77,6 +77,7 @@ export class IdempotencyStore {
   private readonly path: string;
   private pending: Promise<void> = Promise.resolve();
   private readonly requests = new KeyedMutex();
+  private expiredKeys: DatabaseSync | undefined;
   private cache: { data: IdempotencyFile; mtimeMs: number | null; size: number | null } | null = null;
 
   private serialized<T>(work: () => Promise<T>): Promise<T> {
@@ -88,6 +89,20 @@ export class IdempotencyStore {
   constructor(dataDir: string) {
     this.path = join(dataDir, "meta", "idempotency.json");
   }
+
+  private async expiryIndex(): Promise<DatabaseSync> {
+    if (this.expiredKeys) return this.expiredKeys;
+    const directory = dirname(this.path);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const index = new DatabaseSync(join(directory, "expired-idempotency.sqlite"));
+    try {
+      index.exec("CREATE TABLE IF NOT EXISTS expired (identity BLOB PRIMARY KEY) WITHOUT ROWID");
+      this.expiredKeys = index;
+      return index;
+    } catch (error) { index.close(); throw error; }
+  }
+
+  close(): void { this.expiredKeys?.close(); this.expiredKeys = undefined; }
 
   private async fileStamp(): Promise<{ mtimeMs: number | null; size: number | null }> {
     try {
@@ -119,12 +134,6 @@ export class IdempotencyStore {
   }
 
   private async save(value: IdempotencyFile): Promise<void> {
-    const pendingRecords = value.records.filter((record) => record.state === "pending");
-    const doneRecords = value.records.filter((record) => record.state !== "pending");
-    if (doneRecords.length > MAX_DONE_RECORDS) {
-      doneRecords.sort((left, right) => (Date.parse(left.createdAt) || 0) - (Date.parse(right.createdAt) || 0));
-      value.records = [...pendingRecords, ...doneRecords.slice(doneRecords.length - MAX_DONE_RECORDS)];
-    }
     try {
       await writeJsonFileAtomic(this.path, value, 0o600);
       this.cache = { data: value, ...(await this.fileStamp()) };
@@ -161,8 +170,26 @@ export class IdempotencyStore {
           }
           return { existing };
         }
-        const purgeCutoff = now.getTime() - 7 * IDEMPOTENCY_TTL_MS;
-        data.records = data.records.filter((record) => record.state === "pending" || Date.parse(record.createdAt) >= purgeCutoff);
+        const index = await this.expiryIndex();
+        const identity = (device: string | undefined, requestKey: string) => Buffer.from(sha256(JSON.stringify([device ?? "", requestKey])), "hex");
+        if (index.prepare("SELECT 1 FROM expired WHERE identity = ?").get(identity(deviceId, key))) {
+          throw new HostError("CONFLICT", "idempotency key expired");
+        }
+        const expired = data.records.filter(record => Date.parse(record.createdAt) < cutoff &&
+          !this.requests.has(JSON.stringify([record.deviceId ?? "", record.key])));
+        if (expired.length) {
+          index.exec("BEGIN IMMEDIATE");
+          try {
+            const insert = index.prepare("INSERT OR IGNORE INTO expired VALUES (?)");
+            for (const record of expired) insert.run(identity(record.deviceId, record.key));
+            index.exec("COMMIT");
+          } catch (error) { index.exec("ROLLBACK"); throw error; }
+          const archived = new Set(expired);
+          data.records = data.records.filter(record => !archived.has(record));
+        }
+        if (method !== "connection/revoke" && data.records.filter(record => record.method !== "connection/revoke").length >= MAX_RECORDS) {
+          throw new HostError("RATE_LIMITED", "Idempotency window is full; no action was performed");
+        }
         data.records.push({ key, ...(deviceId ? { deviceId } : {}), method, digest, result: null, createdAt: now.toISOString(), state: "pending" });
         await this.save(data);
         return { existing: undefined };
